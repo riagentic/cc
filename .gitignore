@@ -1,0 +1,5 @@
+.aio/
+dist/
+node_modules/
+dep/
+*.sqlite
