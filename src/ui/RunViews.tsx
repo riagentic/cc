@@ -4,19 +4,64 @@
  * pages, which differ only in what they select and how they title it.
  */
 import type { VNode } from "aio/air";
-import { agentSteps, session } from "../cell/session.ts";
+import { agentSteps, view } from "../cell/session.ts";
 import type { ToolRun } from "../type/claude.ts";
 import { ago, clock, duration, oneLine, tokens } from "../lib/format.ts";
-import { Empty, Panel, Pill, useNow } from "./parts.tsx";
+import { Copy, Empty, Panel, Pill, useNow } from "./parts.tsx";
 import { Markdown } from "./Markdown.tsx";
 import { IconCheck, IconShield, IconX, toolIcon } from "./icons.tsx";
 
+/**
+ * What a page is *about*, stated on the page.
+ *
+ * Three of these sections are machine-wide and the rest are not, and nothing on
+ * screen used to say which was which — so Jobs (every background session on the
+ * machine, each in its own directory) sat next to Loops (this project only)
+ * looking exactly alike. The rail groups pages by what they are FOR, which is
+ * the right way to find one and the wrong way to know what it covers.
+ */
+export type PageScope = "session" | "project" | "machine";
+
+const SCOPE_TEXT: Record<PageScope, { label: string; title: string }> = {
+  session: {
+    label: "this session",
+    title: "This project's running Claude Code session. Ends when it does.",
+  },
+  project: {
+    label: "this project",
+    title:
+      "The project selected on the left. Each project has its own, and they are remembered separately.",
+  },
+  machine: {
+    label: "this machine",
+    title:
+      "Everything on this machine, across every project — not just the one selected.",
+  },
+};
+
+/** The tag itself, so a panel on a mixed page can carry its own — Settings has
+ *  all three scopes on it, and one tag on the title would be a lie about two. */
+export function ScopeTag(props: { scope: PageScope }): VNode {
+  const scope = SCOPE_TEXT[props.scope];
+  return (
+    <span class={`scopetag scopetag--${props.scope}`} title={scope.title}>
+      {scope.label}
+    </span>
+  );
+}
+
 export function PageHead(
-  props: { title: string; sub?: string; actions?: unknown },
+  props: {
+    title: string;
+    sub?: string;
+    scope?: PageScope;
+    actions?: unknown;
+  },
 ): VNode {
   return (
     <div class="page__head">
       <h1 class="page__title">{props.title}</h1>
+      {props.scope && <ScopeTag scope={props.scope} />}
       {props.sub && <span class="page__sub">{props.sub}</span>}
       <span style={{ flex: 1 }} />
       {props.actions}
@@ -119,7 +164,7 @@ export function RunList(
  *  the sub-agent produced under it. */
 export function RunDetail(props: { run: ToolRun }): VNode {
   const r = props.run;
-  const nested = session.messages.filter((m) => m.parentToolUseId === r.id);
+  const nested = view().messages.filter((m) => m.parentToolUseId === r.id);
   const steps = agentSteps(r.id);
   const now = useNow(r.endedAt === null, 500);
   const held = r.permissionId !== null;
@@ -199,7 +244,7 @@ export function RunDetail(props: { run: ToolRun }): VNode {
       </Panel>
 
       {r.agent?.prompt && (
-        <Panel title="Prompt">
+        <Panel title="Prompt" actions={<Copy text={r.agent.prompt} />}>
           <div class="code">{r.agent.prompt}</div>
         </Panel>
       )}
@@ -256,6 +301,7 @@ export function RunDetail(props: { run: ToolRun }): VNode {
             : r.kind === "agent"
             ? "Returned"
             : "Result"}
+          actions={<Copy text={r.output} />}
         >
           {r.kind === "agent" && r.ok !== false
             ? <Markdown source={r.output} />
@@ -294,7 +340,10 @@ export function RunDetail(props: { run: ToolRun }): VNode {
         </Panel>
       )}
 
-      <Panel title="Input">
+      <Panel
+        title="Input"
+        actions={<Copy text={JSON.stringify(r.input, null, 2)} />}
+      >
         <div class="code">{JSON.stringify(r.input, null, 2)}</div>
       </Panel>
     </div>

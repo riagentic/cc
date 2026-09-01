@@ -895,3 +895,153 @@ testCell(
     t.expect.state((s) => s.tools[0].ok === true);
   },
 );
+
+/* ── limits, queueing and live thinking ───────────────────────────────────── */
+
+testCell(
+  session,
+  "every usage window is kept, fullest first — not just the headline one",
+  (t) => {
+    // Captured shape (CLI 2.1.248): the headline names one window while
+    // `unifiedWindows` carries them all. A session comfortable on five_hour can
+    // be at 99% of seven_day, which is the figure that stops the next turn.
+    t.send.ingest({
+      type: "rate_limit_event",
+      rate_limit_info: {
+        status: "allowed_warning",
+        rateLimitType: "seven_day",
+        utilization: 0.99,
+        resetsAt: 1_787_886_000,
+        isUsingOverage: false,
+        unifiedWindows: {
+          five_hour: { utilization: 0.08, resetsAt: 1_787_881_200 },
+          seven_day: { utilization: 0.99, resetsAt: 1_787_886_000 },
+        },
+      },
+    });
+    t.expect.state((s) => s.rateLimit?.windows.length === 2);
+    // Sorted by pressure, so the first is always the one about to bite.
+    t.expect.state((s) => s.rateLimit?.windows[0].name === "seven_day");
+    t.expect.state((s) => s.rateLimit?.windows[0].utilization === 0.99);
+    // Seconds on the wire, milliseconds in state — a reset time is useless in
+    // the wrong unit.
+    t.expect.state((s) =>
+      s.rateLimit?.windows[0].resetsAt === 1_787_886_000_000
+    );
+    t.expect.state((s) => s.rateLimit?.overage === false);
+  },
+);
+
+testCell(session, "an older event with no window map still reads", (t) => {
+  t.send.ingest({
+    type: "rate_limit_event",
+    rate_limit_info: {
+      status: "allowed",
+      rateLimitType: "five_hour",
+      utilization: 0.2,
+    },
+  });
+  t.expect.state((s) => s.rateLimit?.windows.length === 0);
+  t.expect.state((s) => s.rateLimit?.utilization === 0.2);
+  t.expect.state((s) => s.rateLimit?.resetsAt === 0);
+});
+
+testCell(session, "queued turns are reported, not just promised", (t) => {
+  // The composer tells the user a turn sent now will be queued. Until this, the
+  // app had no idea how many the CLI was holding.
+  t.send.ingest({ ...resultEvt(0.01), queued_turn_count: 2 });
+  t.expect.state((s) => s.queuedTurns === 2);
+  t.send.ingest({ ...resultEvt(0.02), queued_turn_count: 0 });
+  t.expect.state((s) => s.queuedTurns === 0);
+});
+
+testCell(
+  session,
+  "the thinking estimate moves during a turn and is cleared by its result",
+  (t) => {
+    // Every other figure on screen is frozen until the turn lands, so a long
+    // think and a hang looked identical.
+    t.send.ingest({
+      type: "system",
+      subtype: "thinking_tokens",
+      estimated_tokens: 4,
+      estimated_tokens_delta: 4,
+    });
+    t.expect.state((s) => s.thinkingTokens === 4);
+    t.send.ingest({
+      type: "system",
+      subtype: "thinking_tokens",
+      estimated_tokens: 176,
+      estimated_tokens_delta: 172,
+    });
+    t.expect.state((s) => s.thinkingTokens === 176);
+    // It belongs to the turn that just ended.
+    t.send.ingest(resultEvt(0.01));
+    t.expect.state((s) => s.thinkingTokens === 0);
+  },
+);
+
+testCell(
+  session,
+  "a refused sub-agent is reported, not silently worked around",
+  (t) => {
+    // Captured shape (CLI 2.1.248). A delegation turned down for a depth,
+    // concurrency or budget limit produces no agent, no error and no row —
+    // the model just carries on without the help it asked for.
+    t.send.ingest({
+      ...resultEvt(0.01),
+      subagent_stats: {
+        spawned: 1,
+        completed: 0,
+        failed: 0,
+        killed: { parent: 0, user: 0, system: 0 },
+        refused: { depth_limit: 0, concurrency_limit: 2, budget: 1 },
+      },
+    });
+    t.expect.state((s) => s.agentStats?.refused === 3);
+    t.expect.state((s) => s.agentStats?.refusedBy.length === 2);
+    t.expect.state((s) => (s.error ?? "").includes("refused"));
+    t.expect.state((s) => (s.error ?? "").includes("concurrency limit"));
+    t.expect.state((s) =>
+      s.activity.some((a) => a.label === "Sub-agents refused")
+    );
+  },
+);
+
+testCell(session, "a clean turn reports its outcome without alarming", (t) => {
+  t.send.ingest({
+    ...resultEvt(0.01),
+    terminal_reason: "completed",
+    stop_reason: "end_turn",
+    ttft_ms: 5_493,
+    subagent_stats: {
+      spawned: 1,
+      completed: 1,
+      failed: 0,
+      killed: { parent: 0, user: 0, system: 0 },
+      refused: { depth_limit: 0, concurrency_limit: 0, budget: 0 },
+    },
+  });
+  t.expect.state((s) => s.turnEnd?.reason === "completed");
+  t.expect.state((s) => s.turnEnd?.stopReason === "end_turn");
+  t.expect.state((s) => s.turnEnd?.ttftMs === 5_493);
+  t.expect.state((s) => s.agentStats?.refused === 0);
+  t.expect.state((s) => s.error === null); // nothing to warn about
+});
+
+testCell(
+  session,
+  "plugins the CLI loaded are part of what a session can do",
+  (t) => {
+    t.send.ingest({
+      ...init,
+      plugins: [{ name: "rust-analyzer-lsp", version: "1.0.0", path: "/x" }],
+    });
+    t.expect.state((s) => s.meta.plugins.length === 1);
+    t.expect.state((s) => s.meta.plugins[0].name === "rust-analyzer-lsp");
+    t.expect.state((s) => s.meta.plugins[0].version === "1.0.0");
+    // Absent is empty, never undefined.
+    t.send.ingest(init);
+    t.expect.state((s) => s.meta.plugins.length === 0);
+  },
+);

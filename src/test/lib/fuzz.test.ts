@@ -120,6 +120,18 @@ const CODE = [
   "\n",
   "😀",
   "a".repeat(50),
+  // Table shapes: a header, the rule rows in every alignment, body rows, and
+  // the ragged/degenerate forms an interrupted stream produces.
+  "| a | b |",
+  "| --- | ---: |",
+  "| :-: | :-- |",
+  "| 1 | 2 |",
+  "| only |",
+  "|",
+  "||",
+  "a | b",
+  "--- | ---",
+  "| `x \\| y` | **b** |",
 ];
 
 const lines = (xs: string[], max: number) =>
@@ -139,6 +151,8 @@ const blockText = (b: Block): string => {
       return "";
     case "list":
       return b.items.map(inlineText).join("");
+    case "table":
+      return [...b.head, ...b.rows.flat()].map(inlineText).join("");
     default:
       return inlineText(b.v);
   }
@@ -158,6 +172,10 @@ const visible = (src: string): string =>
     .replace(/^\s*\d+[.)]\s+/gm, "")
     .replace(/^\s*#{1,6}\s+/gm, "")
     .replace(/^\s*>\s?/gm, "")
+    // A table's rule row is pure syntax, and `|` is a cell separator wherever
+    // it appears — neither is text the tree promises to carry.
+    .replace(/^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$/gm, "")
+    .replace(/\|/g, "")
     .replace(/[*_`\\[\]()]/g, "")
     .replace(/\s+/g, "");
 
@@ -216,6 +234,16 @@ Deno.test("highlighting never loses a character", () => {
   }
 });
 
+/** Characters as a reader counts them, not UTF-16 units. */
+const codePoints = (text: string): number => Array.from(text).length;
+
+/** True when a surrogate stands alone — the half-emoji that renders as `�`. */
+const hasLoneSurrogate = (text: string): boolean =>
+  Array.from(text).some((ch) => {
+    const c = ch.codePointAt(0) ?? 0;
+    return c >= 0xd800 && c <= 0xdfff;
+  });
+
 Deno.test("every formatter is total", () => {
   const NUMS = [
     0,
@@ -252,10 +280,18 @@ Deno.test("every formatter is total", () => {
       { length: int(120) },
       () => pick(["a", " ", "\n", "\t", "😀", "…", "/"]),
     ).join("");
-    // The cap is a cap, whichever end the text is kept from.
-    assert(oneLine(s, max).length <= max, `oneLine ${max}`);
-    assert(tailPath(s, max).length <= max, `tailPath ${max}`);
-    assert(!/\n/.test(`${oneLine(s, max)}${tailPath(s, max)}`), "newline leak");
+    // The cap is a cap, whichever end the text is kept from — counted in code
+    // points, which is what `max` means to a caller sizing a column. Counting
+    // UTF-16 units instead is what made these functions cut a `😀` in half and
+    // emit a lone surrogate, so the unit the cap is measured in *is* the fix.
+    const one = oneLine(s, max);
+    const tail = tailPath(s, max);
+    assert(codePoints(one) <= max, `oneLine ${max}: ${codePoints(one)}`);
+    assert(codePoints(tail) <= max, `tailPath ${max}: ${codePoints(tail)}`);
+    // …and no output may ever end mid-pair, whatever the cap is.
+    assert(!hasLoneSurrogate(one), `oneLine lone surrogate ${max}`);
+    assert(!hasLoneSurrogate(tail), `tailPath lone surrogate ${max}`);
+    assert(!/\n/.test(`${one}${tail}`), "newline leak");
   }
 });
 

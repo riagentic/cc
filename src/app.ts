@@ -6,6 +6,11 @@
 // there for development and headless driving via `deno task am`.
 import "./cell/workspace.ts";
 import "./cell/session.ts";
+import "./cell/jobs.ts";
+import "./cell/loops.ts";
+import "./cell/tree.ts";
+import "./cell/catalog.ts";
+import "./cell/storage.ts";
 import { aio } from "aio";
 
 await aio.run({

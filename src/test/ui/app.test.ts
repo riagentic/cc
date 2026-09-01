@@ -13,11 +13,19 @@
 import { assertEquals } from "@std/assert";
 import { testUI } from "aio/testing";
 import App from "../../App.tsx";
-import { session } from "../../cell/session.ts";
+import { session, view } from "../../cell/session.ts";
 import type { ToolRun } from "../../type/claude.ts";
 import { workspace } from "../../cell/workspace.ts";
+import { loops } from "../../cell/loops.ts";
+import { tree } from "../../cell/tree.ts";
+import { catalog } from "../../cell/catalog.ts";
 
 const SESSION = "441e5bea-4547-42f1-9a5c-11d495c662ff";
+
+/** The active project inside a workspace snapshot — where settings now live. */
+// deno-lint-ignore no-explicit-any
+const active = (w: any) =>
+  w.projects.find((p: { id: string }) => p.id === w.activeId);
 
 /**
  * Start every test on the chat page.
@@ -93,7 +101,16 @@ testUI(
         "SubAgentsLink",
         "TasksLink",
         "ActivityLink",
+        "JobsLink",
+        "LoopsLink",
+        "TreeLink",
         "MemoryLink",
+        "SkillsLink",
+        "CommandsLink",
+        "MCPLink",
+        "PluginsLink",
+        "HooksLink",
+        "StorageLink",
         "SettingsLink",
       ]
     ) {
@@ -348,17 +365,22 @@ testUI(
 
 testUI(
   App,
-  "choosing a model and a permission mode updates the workspace",
+  "choosing a model and a permission mode settles on the active project",
   async (ui) => {
     await open(ui);
     ui.SettingsLink.click();
     await ui.waitFor(() => ui.html().includes("Permissions"));
 
+    // The project, not the app: these are per-project settings now, and the
+    // seed is only what the *next* project starts from.
     ui.OpusButton.click();
-    await ui.expectCell(workspace, (w) => w.model === "opus");
+    await ui.expectCell(workspace, (w) => active(w)?.model === "opus");
 
     ui.PlanButton.click();
-    await ui.expectCell(workspace, (w) => w.permissionMode === "plan");
+    await ui.expectCell(
+      workspace,
+      (w) => active(w)?.permissionMode === "plan",
+    );
   },
 );
 
@@ -381,12 +403,18 @@ testUI(App, "a directory can be granted and revoked", async (ui) => {
   try {
     ui.DirectoryToAllowInput.type(dir);
     ui.AllowButton.click();
-    await ui.expectCell(workspace, (w) => w.allowedDirs.includes(dir));
+    await ui.expectCell(
+      workspace,
+      (w) => (active(w)?.allowedDirs ?? []).includes(dir),
+    );
     await ui.waitFor(() => ui.html().includes(dir.split("/").pop() ?? dir));
 
     // Revoking removes it from the list as well as from the state.
     workspace.removeAllowedDir(dir);
-    await ui.expectCell(workspace, (w) => w.allowedDirs.length === 0);
+    await ui.expectCell(
+      workspace,
+      (w) => (active(w)?.allowedDirs ?? []).length === 0,
+    );
     await ui.waitFor(() => ui.html().includes("may only touch the project"));
   } finally {
     await Deno.remove(dir);
@@ -401,17 +429,17 @@ testUI(App, "Allow all needs a second, explicit confirmation", async (ui) => {
   // One click only arms it — nothing is granted yet.
   ui.AllowAllButton.click();
   await ui.settle();
-  await ui.expectCell(workspace, (w) => w.skipPermissions === false);
+  await ui.expectCell(workspace, (w) => active(w)?.skipPermissions === false);
   await ui.waitFor(() => ui.html().includes("no checks at all"));
 
   // The second click is the decision, and it says what it grants.
   ui.YesRunWithNoChecksButton.click();
-  await ui.expectCell(workspace, (w) => w.skipPermissions === true);
+  await ui.expectCell(workspace, (w) => active(w)?.skipPermissions === true);
   await ui.waitFor(() => ui.html().includes("All permission checks are off"));
 
   // …and it can always be undone.
   ui.TurnBackOnButton.click();
-  await ui.expectCell(workspace, (w) => w.skipPermissions === false);
+  await ui.expectCell(workspace, (w) => active(w)?.skipPermissions === false);
 });
 
 /* ── errors are visible, never swallowed ──────────────────────────────────── */
@@ -562,3 +590,363 @@ testUI(
     }
   },
 );
+
+/**
+ * Both composer tests below submit turns, so they point `CLAUDE_BIN` at nothing:
+ * `send` appends the user message optimistically *before* it discovers there is
+ * no process, which is exactly the transcript these need — and no real `claude`
+ * is spawned to produce it.
+ */
+async function withoutCli(body: () => Promise<void>): Promise<void> {
+  const previous = Deno.env.get("CLAUDE_BIN");
+  Deno.env.set("CLAUDE_BIN", "/nonexistent/claude-binary");
+  try {
+    await body();
+  } finally {
+    if (previous === undefined) Deno.env.delete("CLAUDE_BIN");
+    else Deno.env.set("CLAUDE_BIN", previous);
+  }
+}
+
+testUI(App, "Enter mid-composition belongs to the input method", async (ui) => {
+  await withoutCli(async () => {
+    await open(ui);
+    session.clearTranscript();
+    await ui.settle();
+
+    ui.MessageClaudeCodeInput.type("にほん");
+    await ui.settle();
+    // The keystroke that accepts an IME candidate is an Enter with
+    // `isComposing` set. Sending on it posts a half-finished sentence — the
+    // whole failure mode for anyone typing Japanese, Chinese or Korean.
+    ui.MessageClaudeCodeInput.press("Enter", { isComposing: true });
+    await ui.settle();
+    assertEquals(ui.MessageClaudeCodeInput.value, "にほん"); // still in the box
+    assertEquals(session.messages.length, 0); // and nothing was sent
+
+    // A plain Enter, once composition has ended, sends as always.
+    ui.MessageClaudeCodeInput.press("Enter");
+    await ui.waitFor(() => session.messages.length === 1);
+    assertEquals(ui.MessageClaudeCodeInput.value, "");
+  });
+});
+
+testUI(
+  App,
+  "Up recalls the last turn, and only from an empty box",
+  async (ui) => {
+    await withoutCli(async () => {
+      await open(ui);
+      session.clearTranscript();
+      await ui.settle();
+
+      // One prior turn is all this can build: with no process, `send` restarts
+      // the session, and a restart resets the transcript by design (a session
+      // dies with its process). The recall mechanism is the same either way.
+      ui.MessageClaudeCodeInput.type("first question");
+      ui.MessageClaudeCodeInput.press("Enter");
+      await ui.waitFor(() => session.messages.length === 1);
+      assertEquals(ui.MessageClaudeCodeInput.value, "");
+
+      ui.MessageClaudeCodeInput.press("ArrowUp");
+      await ui.settle();
+      assertEquals(ui.MessageClaudeCodeInput.value, "first question");
+
+      // Forward again, back to the empty draft the recall was started from.
+      ui.MessageClaudeCodeInput.press("ArrowDown");
+      await ui.settle();
+      assertEquals(ui.MessageClaudeCodeInput.value, "");
+
+      // Escape abandons a recall wherever it has got to.
+      ui.MessageClaudeCodeInput.press("ArrowUp");
+      await ui.settle();
+      assertEquals(ui.MessageClaudeCodeInput.value, "first question");
+      ui.MessageClaudeCodeInput.press("Escape");
+      await ui.settle();
+      assertEquals(ui.MessageClaudeCodeInput.value, "");
+
+      // With a draft in the box, Up is an ordinary cursor key — stealing it
+      // would destroy the paragraph someone is in the middle of writing.
+      ui.MessageClaudeCodeInput.type("a draft I am still writing");
+      await ui.settle();
+      ui.MessageClaudeCodeInput.press("ArrowUp");
+      await ui.settle();
+      assertEquals(
+        ui.MessageClaudeCodeInput.value,
+        "a draft I am still writing",
+      );
+    });
+  },
+);
+
+testUI(App, "a code block carries a copy control", async (ui) => {
+  await open(ui);
+  session.clearTranscript();
+  session.ingest({
+    type: "assistant",
+    message: {
+      id: "msg_code",
+      content: [{
+        type: "text",
+        text: "Here:\n\n```bash\necho hello\n```\n",
+      }],
+    },
+  });
+  // Code is what people take out of a transcript; selecting it by hand out of a
+  // scrolling chat is the worst way to do it.
+  await ui.waitFor(() => ui.present("CopyToClipboardButton"));
+});
+
+testUI(
+  App,
+  "a markdown table renders as a table, not a wall of pipes",
+  async (ui) => {
+    await open(ui);
+    session.clearTranscript();
+    session.ingest({
+      type: "assistant",
+      message: {
+        id: "msg_table",
+        content: [{
+          type: "text",
+          text: "| Shell | Weakness |\n| --- | --- |\n| Bash | Verbose |\n",
+        }],
+      },
+    });
+    await ui.waitFor(() => ui.html().includes("<table"));
+    // The syntax is consumed, not printed: a failed parse leaves the rule row and
+    // the pipes on screen, which is exactly what it used to do.
+    const html = ui.html();
+    assertEquals(html.includes("| --- |"), false);
+    assertEquals(html.includes("Verbose"), true);
+  },
+);
+
+testUI(
+  App,
+  "the timeline can be filtered, and says so when nothing matches",
+  async (ui) => {
+    await open(ui);
+    session.ingest(init);
+    session.ingest(assistantTool("toolu_f1", "Bash", {
+      command: "ls",
+      description: "List the directory",
+    }));
+    ui.ActivityLink.click();
+    await ui.waitFor(() => ui.html().includes("List the directory"));
+
+    // Hundreds of rows accumulate in minutes; scrolling is not a way to find one.
+    ui.FilterEventsInput.setValue("List the directory");
+    await ui.waitFor(() => !ui.html().includes("Session ready"));
+    assertEquals(ui.html().includes("List the directory"), true);
+
+    // A filter must never look like an empty session.
+    ui.FilterEventsInput.setValue("zzz-no-such-event");
+    await ui.waitFor(() => ui.html().includes("Nothing matches"));
+    assertEquals(ui.html().includes("Nothing here yet"), false);
+
+    ui.FilterEventsInput.setValue("");
+    await ui.waitFor(() => ui.html().includes("List the directory"));
+  },
+);
+
+/* ── the three-column shell ───────────────────────────────────────────────── */
+
+testUI(
+  App,
+  "the project dock lists projects and switches between them",
+  async (ui) => {
+    await open(ui);
+    // Named subdirectories, not bare temp dirs: the tab is addressed by the
+    // project's name, which is its basename.
+    const tmp = await Deno.makeTempDir();
+    const alpha = `${tmp}/alpha`;
+    const beta = `${tmp}/beta`;
+    await Deno.mkdir(alpha);
+    await Deno.mkdir(beta);
+    try {
+      await workspace.addProject(alpha);
+      await workspace.addProject(beta);
+      await ui.settle();
+
+      const idAlpha = workspace.projects.find((p) => p.path === alpha)!.id;
+      const idBeta = workspace.projects.find((p) => p.path === beta)!.id;
+      assertEquals(workspace.activeId, idBeta); // adding selects
+
+      // Clicking a tab is the switch — the whole point of the dock.
+      ui.find("ProjectTab", idAlpha).AlphaButton.click();
+      await ui.waitFor(() => workspace.activeId === idAlpha);
+      assertEquals(workspace.activeId, idAlpha);
+
+      // The dock lives outside the routed area, so it is there whatever page
+      // you are on and switching project never means leaving one.
+      ui.SettingsLink.click();
+      await ui.settle();
+      assertEquals(ui.html().includes("alpha"), true);
+      assertEquals(ui.html().includes("beta"), true);
+      ui.find("ProjectTab", idBeta).BetaButton.click();
+      await ui.waitFor(() => workspace.activeId === idBeta);
+    } finally {
+      await Deno.remove(tmp, { recursive: true });
+    }
+  },
+);
+
+testUI(App, "Jobs, Loops and Tree each render their own page", async (ui) => {
+  await open(ui);
+
+  ui.JobsLink.click();
+  await ui.waitFor(() =>
+    ui.html().includes("No background sessions") ||
+    ui.html().includes("waiting on you")
+  );
+
+  ui.LoopsLink.click();
+  await ui.waitFor(() => ui.html().includes("New loop"));
+  // A loop is a standing instruction, so the page says what it is for even
+  // before there is one.
+  assertEquals(ui.html().includes("No background sessions"), false);
+
+  ui.TreeLink.click();
+  await ui.waitFor(() =>
+    ui.html().includes("Pick a file") || ui.html().includes("No project")
+  );
+});
+
+testUI(App, "the tree lists a real project and previews a file", async (ui) => {
+  await open(ui);
+  const root = await Deno.makeTempDir();
+  try {
+    await Deno.mkdir(`${root}/src`);
+    await Deno.writeTextFile(`${root}/src/app.ts`, "export const a = 1;\n");
+    await Deno.writeTextFile(`${root}/README.md`, "# hi\n");
+    await Deno.mkdir(`${root}/node_modules`);
+    await workspace.addProject(root);
+    await tree.refresh();
+
+    ui.TreeLink.click();
+    await ui.waitFor(() => ui.html().includes("README.md"));
+    assertEquals(ui.html().includes("src"), true);
+    // Generated folders never reach the panel.
+    assertEquals(ui.html().includes("node_modules"), false);
+    // Closed: the child is not listed until the folder is opened.
+    assertEquals(ui.html().includes("app.ts"), false);
+
+    await tree.toggle(`${root}/src`);
+    await ui.waitFor(() => ui.html().includes("app.ts"));
+
+    await tree.select(`${root}/src/app.ts`);
+    // Asserted token by token, not as one string: the preview runs through the
+    // same tokeniser the chat's code blocks use, so the source is split across
+    // spans and `"export const a"` never appears contiguously in the markup.
+    await ui.waitFor(() => ui.html().includes("tok--keyword"));
+    assertEquals(ui.html().includes("export"), true);
+    assertEquals(ui.html().includes("const"), true);
+  } finally {
+    await Deno.remove(root, { recursive: true });
+  }
+});
+
+testUI(App, "the capability pages each stand on their own", async (ui) => {
+  await open(ui);
+  session.ingest(init);
+  await ui.settle();
+
+  const pages: [string, string[]][] = [
+    ["SkillsLink", ["Skills", "No skills"]],
+    ["CommandsLink", ["Commands", "No slash commands"]],
+    ["MCPLink", ["MCP", "No MCP servers"]],
+    ["PluginsLink", ["Plugins", "No plugins"]],
+    // Hooks run shell commands with no approval prompt; the page has to say so
+    // whether or not any are configured.
+    ["HooksLink", ["Hooks", "No hooks"]],
+  ];
+  for (const [link, expected] of pages) {
+    ui[link].click();
+    await ui.waitFor(() => expected.some((t) => ui.html().includes(t)));
+    assertEquals(
+      expected.some((t) => ui.html().includes(t)),
+      true,
+      `${link} rendered its own page`,
+    );
+  }
+});
+
+testUI(
+  App,
+  "a loop can be added, paused and removed from its page",
+  async (ui) => {
+    await open(ui);
+    const dir = await Deno.makeTempDir();
+    try {
+      await workspace.addProject(dir);
+      ui.LoopsLink.click();
+      await ui.waitFor(() => ui.html().includes("New loop"));
+
+      ui.LoopPromptInput.setValue("run the tests");
+      ui.AddLoopButton.click();
+      await ui.waitFor(() => ui.html().includes("run the tests"));
+      assertEquals(loops.loops.length, 1);
+      // Armed by default: a loop you had to switch on after creating it is a
+      // loop that silently does nothing.
+      assertEquals(loops.loops[0].paused, false);
+      assertEquals(ui.html().includes("armed"), true);
+
+      await loops.toggle(loops.loops[0].id);
+      await ui.settle();
+      assertEquals(ui.html().includes("paused"), true);
+
+      await loops.remove(loops.loops[0].id);
+      await ui.settle();
+      assertEquals(loops.loops.length, 0);
+    } finally {
+      await Deno.remove(dir);
+    }
+  },
+);
+
+testUI(App, "every page says what it is about", async (ui) => {
+  await open(ui);
+  // Scope is the thing a reader gets wrong: three of these sections are
+  // machine-wide and the rest are not, and the rail groups pages by what they
+  // are FOR. Each page states its own coverage.
+  const expected: [string, string][] = [
+    ["SubAgentsLink", "this session"],
+    ["TasksLink", "this session"],
+    ["ActivityLink", "this session"],
+    ["JobsLink", "this machine"],
+    ["LoopsLink", "this project"],
+    ["TreeLink", "this project"],
+    ["MemoryLink", "this project"],
+    ["SkillsLink", "this project"],
+    ["CommandsLink", "this project"],
+    ["MCPLink", "this project"],
+    ["PluginsLink", "this machine"],
+    ["HooksLink", "this project"],
+    ["StorageLink", "this machine"],
+  ];
+  for (const [link, scope] of expected) {
+    ui[link].click();
+    await ui.waitFor(() => ui.html().includes(scope));
+    assertEquals(ui.html().includes(scope), true, `${link} says "${scope}"`);
+  }
+});
+
+testUI(App, "memory is measured without a session", async (ui) => {
+  await open(ui);
+  const dir = await Deno.makeTempDir();
+  try {
+    await Deno.writeTextFile(`${dir}/CLAUDE.md`, "# project memory\nrules.\n");
+    await workspace.addProject(dir);
+    await catalog.refresh();
+
+    ui.MemoryLink.click();
+    // No session has ever run here. The files are on disk, so the page has
+    // something to say — it used to read "Not scanned" until you started one.
+    await ui.waitFor(() => ui.html().includes("CLAUDE.md"));
+    assertEquals(view().status, "offline");
+    assertEquals(ui.html().includes("Not scanned yet"), false);
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});

@@ -1,32 +1,52 @@
 /**
  * @module
- * The left rail: brand, the project being controlled, and one card per detail
- * page. Each card carries a live number, so the rail doubles as the dashboard —
- * you can see what the session is doing without opening anything.
+ * The section rail, on the right: one card per page, grouped, each carrying a
+ * live number so the rail doubles as the dashboard.
+ *
+ * It sits on the right because it is the column that gets clicked — the pointer
+ * already lives near the scrollbar, and the project dock on the left changes
+ * once a session where this changes constantly.
+ *
+ * The groups are not decoration. Fourteen destinations is past the number a
+ * flat list can be scanned as one thing, and they divide cleanly by what they
+ * are *about*: the live turn, work that outlives it, the code on disk, and the
+ * configuration that decides what any of it can do.
  */
 import { Link, type VNode } from "aio/air";
-import { session } from "../cell/session.ts";
 import {
-  memoryBytes,
   pendingPermissions,
   runningAgents,
   runningTasks,
   runningTools,
+  session,
+  view,
 } from "../cell/session.ts";
-import { activeProject, workspace } from "../cell/workspace.ts";
-import { bytes, tildePath } from "../lib/format.ts";
+import { activeProject, activeSettings, workspace } from "../cell/workspace.ts";
+import { blockedJobs, jobs } from "../cell/jobs.ts";
+import { activeLoops, projectLoops } from "../cell/loops.ts";
+import { catalog, mcpEntries, memoryBytes } from "../cell/catalog.ts";
+import { storage } from "../cell/storage.ts";
+import { bytes } from "../lib/format.ts";
 import { Badge, Dot } from "./parts.tsx";
 import {
   IconActivity,
   IconAgents,
   IconChat,
+  IconCommand,
   IconFolder,
+  IconHook,
+  IconJobs,
   IconLogo,
+  IconLoop,
   IconMemory,
   IconPlay,
+  IconPlug,
+  IconPlugin,
   IconPower,
   IconSettings,
+  IconSpark,
   IconTasks,
+  IconTree,
 } from "./icons.tsx";
 
 const STATUS_TEXT: Record<string, string> = {
@@ -44,6 +64,11 @@ function NavCard(
     icon: VNode;
     label: string;
     hint: string;
+    /** Marks a destination that is NOT about the selected project. Three of
+     *  these are machine-wide, and the groups below sort pages by what they are
+     *  for, not by what they cover — so without this, Jobs (every background
+     *  session on the machine) and Loops (this project only) look identical. */
+    machine?: boolean;
     badge?: VNode;
   },
 ): VNode {
@@ -64,7 +89,15 @@ function NavCard(
     >
       <span class="navcard__icon">{props.icon}</span>
       <span class="truncate">
-        <span class="navcard__label">{props.label}</span>
+        <span class="navcard__label">
+          {props.label}
+          {props.machine && (
+            <span
+              class="navcard__machine"
+              title="Machine-wide — every project, not just the one selected"
+            />
+          )}
+        </span>
         <br />
         <span class="navcard__hint">{props.hint}</span>
       </span>
@@ -73,12 +106,27 @@ function NavCard(
   );
 }
 
+/** A group heading. `wide` so it disappears with the labels when the rail
+ *  collapses to icons — a heading over nothing is worse than no heading. */
+const Group = (props: { children: unknown }): VNode => (
+  <div class="rail__group">{props.children}</div>
+);
+
 export function Rail(): VNode {
   const project = activeProject();
   const agents = runningAgents().length;
   const tasks = runningTasks().length + runningTools().length;
   const holds = pendingPermissions().length;
-  const live = session.status === "working";
+  const live = view().status === "working";
+
+  const working = jobs.jobs.filter((j) => j.state === "working").length;
+  const blocked = blockedJobs().length;
+  const loops = projectLoops().length;
+  const armed = activeLoops().length;
+  const servers = mcpEntries();
+  const connected =
+    servers.filter((m) => m.status === "connected" || m.status === "ready")
+      .length;
 
   return (
     <nav class="rail" aria-label="Sections">
@@ -97,6 +145,7 @@ export function Rail(): VNode {
       </div>
 
       <div class="rail__nav">
+        <Group>Session</Group>
         <NavCard
           to="/"
           exact
@@ -142,49 +191,127 @@ export function Rail(): VNode {
           to="/activity"
           icon={IconActivity({ size: 16 })}
           label="Activity"
-          hint={`${session.activity.length} events`}
+          hint={`${view().activity.length} events`}
+        />
+
+        <Group>Background</Group>
+        <NavCard
+          to="/jobs"
+          icon={IconJobs({ size: 16 })}
+          label="Jobs"
+          machine
+          // Blocked leads, because a blocked job is the one that will sit there
+          // forever if nobody is told about it.
+          hint={blocked > 0
+            ? `${blocked} waiting on you`
+            : working > 0
+            ? `${working} working`
+            : jobs.jobs.length > 0
+            ? `${jobs.jobs.length} total`
+            : "None"}
+          badge={blocked > 0
+            ? <Badge value={blocked} tone="danger" />
+            : working > 0
+            ? <Badge value={working} tone="live" />
+            : undefined}
+        />
+        <NavCard
+          to="/loops"
+          icon={IconLoop({ size: 16 })}
+          label="Loops"
+          hint={armed > 0
+            ? `${armed} armed`
+            : loops > 0
+            ? `${loops} paused`
+            : "None"}
+          badge={armed > 0 ? <Badge value={armed} /> : undefined}
+        />
+
+        <Group>Project</Group>
+        <NavCard
+          to="/tree"
+          icon={IconTree({ size: 16 })}
+          label="Tree"
+          hint={project ? project.name : "No project"}
         />
         <NavCard
           to="/memory"
           icon={IconMemory({ size: 16 })}
           label="Memory"
-          hint={session.memory.length > 0
+          hint={catalog.memory.length > 0
             ? bytes(memoryBytes())
+            : "Not scanned"}
+        />
+
+        <Group>Capabilities</Group>
+        <NavCard
+          to="/skills"
+          icon={IconSpark({ size: 16 })}
+          label="Skills"
+          hint={`${view().meta.skills.length || catalog.skills.length} loaded`}
+        />
+        <NavCard
+          to="/commands"
+          icon={IconCommand({ size: 16 })}
+          label="Commands"
+          hint={`${
+            view().meta.commands.length || catalog.commands.length
+          } available`}
+        />
+        <NavCard
+          to="/mcp"
+          icon={IconPlug({ size: 16 })}
+          label="MCP"
+          hint={servers.length === 0
+            ? "None configured"
+            : `${connected}/${servers.length} connected`}
+        />
+        <NavCard
+          to="/plugins"
+          icon={IconPlugin({ size: 16 })}
+          label="Plugins"
+          machine
+          hint={catalog.plugins.length > 0
+            ? `${catalog.plugins.length} installed`
+            : "None"}
+        />
+        <NavCard
+          to="/hooks"
+          icon={IconHook({ size: 16 })}
+          label="Hooks"
+          hint={catalog.hooks.length > 0
+            ? `${catalog.hooks.length} configured`
+            : "None"}
+        />
+        <NavCard
+          to="/storage"
+          icon={IconFolder({ size: 16 })}
+          label="Storage"
+          machine
+          hint={storage.scannedAt > 0
+            ? bytes(storage.totalBytes)
             : "Not scanned"}
         />
         <NavCard
           to="/settings"
           icon={IconSettings({ size: 16 })}
           label="Settings"
-          hint={`${workspace.model} · ${workspace.permissionMode}`}
+          hint={`${activeSettings().model} · ${activeSettings().permissionMode}${
+            activeSettings().effort ? ` · ${activeSettings().effort}` : ""
+          }`}
         />
       </div>
 
       <div class="rail__foot">
-        <div class="navcard" style={{ cursor: "default" }}>
-          <span class="navcard__icon">{IconFolder({ size: 15 })}</span>
-          <span class="truncate wide">
-            <span class="navcard__label truncate">
-              {project?.name ?? "No project"}
-            </span>
-            <br />
-            <span class="navcard__hint truncate" title={project?.path}>
-              {project
-                ? tildePath(project.path, workspace.home)
-                : "Add one in Settings"}
-            </span>
-          </span>
-        </div>
-
         <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-          <Dot status={session.status} />
+          <Dot status={view().status} />
           <span
             class="wide"
             style={{ flex: 1, fontSize: "12px", color: "var(--ink-soft)" }}
           >
-            {STATUS_TEXT[session.status] ?? session.status}
+            {STATUS_TEXT[view().status] ?? view().status}
           </span>
-          {session.status === "offline" || session.status === "error"
+          {view().status === "offline" || view().status === "error"
             ? (
               <button
                 type="button"

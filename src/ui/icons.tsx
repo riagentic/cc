@@ -217,11 +217,39 @@ export const IconSpark = (p?: Props) =>
     p,
   );
 
+/** Thinking — a brain-ish loop. Used only while the model is reasoning. */
+export const IconThinking = (p?: Props) =>
+  svg(
+    <>
+      <path d="M9 19.2a3.2 3.2 0 0 1-3.1-4 3.4 3.4 0 0 1-.7-5.6A3.3 3.3 0 0 1 9 4.8a2.9 2.9 0 0 1 3 0 3.3 3.3 0 0 1 3.8 4.8 3.4 3.4 0 0 1-.7 5.6 3.2 3.2 0 0 1-3.1 4Z" />
+      <path d="M12 5v14" />
+    </>,
+    p,
+  );
+
 export const IconUser = (p?: Props) =>
   svg(
     <>
       <circle cx="12" cy="8" r="3.6" />
       <path d="M4.8 20a7.2 7.2 0 0 1 14.4 0" />
+    </>,
+    p,
+  );
+
+export const IconCopy = (p?: Props) =>
+  svg(
+    <>
+      <rect x="9" y="9" width="11.2" height="11.2" rx="2.2" />
+      <path d="M15.4 5.6a2.2 2.2 0 0 0-2.2-2.2H6a2.2 2.2 0 0 0-2.2 2.2v7.2a2.2 2.2 0 0 0 2.2 2.2" />
+    </>,
+    p,
+  );
+
+export const IconSearch = (p?: Props) =>
+  svg(
+    <>
+      <circle cx="10.6" cy="10.6" r="6.2" />
+      <path d="m15.2 15.2 4.4 4.4" />
     </>,
     p,
   );
@@ -293,3 +321,104 @@ export function toolIcon(name: string, size = 15): VNode {
   if (name === "Skill") return IconSpark(p);
   return IconTerminal(p);
 }
+
+/** Jobs — a case with a handle. Background *sessions*, not the checklist that
+ *  marks the in-session tasks. */
+export const IconJobs = (p?: Props) =>
+  svg(
+    <>
+      <rect x="2.6" y="7.2" width="18.8" height="13" rx="2.2" />
+      <path d="M8.6 7.2V5.4a2 2 0 0 1 2-2h2.8a2 2 0 0 1 2 2v1.8" />
+      <path d="M2.6 12.4h18.8" />
+    </>,
+    p,
+  );
+
+/** Loops — a closed circuit with an arrowhead, so it reads as repetition
+ *  rather than as the refresh control it sits next to. */
+export const IconLoop = (p?: Props) =>
+  svg(
+    <>
+      <path d="M4 9.5A6.5 6.5 0 0 1 10.5 3h3A6.5 6.5 0 0 1 20 9.5" />
+      <path d="M20 14.5A6.5 6.5 0 0 1 13.5 21h-3A6.5 6.5 0 0 1 4 14.5" />
+      <path d="m17.2 6.4 2.9 3.2 3-2.2" />
+      <path d="m6.8 17.6-2.9-3.2-3 2.2" />
+    </>,
+    p,
+  );
+
+/** Tree — a root with two branches. */
+export const IconTree = (p?: Props) =>
+  svg(
+    <>
+      <rect x="3" y="3" width="7" height="5" rx="1.4" />
+      <rect x="14" y="10" width="7" height="5" rx="1.4" />
+      <rect x="14" y="17.5" width="7" height="5" rx="1.4" />
+      <path d="M6.5 8v11a1.5 1.5 0 0 0 1.5 1.5h6" />
+      <path d="M6.5 12.5h7.5" />
+    </>,
+    p,
+  );
+
+/** Slash commands. */
+export const IconCommand = (p?: Props) =>
+  svg(
+    <>
+      <rect x="2.8" y="4" width="18.4" height="16" rx="2.4" />
+      <path d="m8.4 15.6 3.4-7.2" />
+      <path d="M14.4 15.6h2.6" />
+    </>,
+    p,
+  );
+
+/** Plugins — interlocking blocks. */
+export const IconPlugin = (p?: Props) =>
+  svg(
+    <>
+      <path d="M10 3.4h4v2.3a1.7 1.7 0 1 0 3.4 0V3.4h3.2v3.2h-2.3a1.7 1.7 0 1 0 0 3.4h2.3v4h-3.2" />
+      <path d="M10 3.4H6.8v3.2H4.5a1.7 1.7 0 1 0 0 3.4h2.3V14H3.4v6.6H10v-2.3a1.7 1.7 0 1 1 3.4 0v2.3h4.2V14" />
+    </>,
+    p,
+  );
+
+/** Hooks — a line intercepted by a hook. They run real commands on the user's
+ *  machine, so the icon leans sharp rather than friendly. */
+export const IconHook = (p?: Props) =>
+  svg(
+    <>
+      <path d="M8 3.2v7.4a4.2 4.2 0 0 0 8.4 0V7.8" />
+      <path d="M4.6 6.6 8 3.2l3.4 3.4" />
+      <circle cx="16.4" cy="5.4" r="2.2" />
+    </>,
+    p,
+  );
+
+/** Pause — for a loop that is armed but not firing. */
+export const IconPause = (p?: Props) =>
+  svg(
+    <>
+      <rect x="6.4" y="4.4" width="3.8" height="15.2" rx="1.3" />
+      <rect x="13.8" y="4.4" width="3.8" height="15.2" rx="1.3" />
+    </>,
+    p,
+  );
+
+/** A folder that is open — the expanded state in the tree. */
+export const IconFolderOpen = (p?: Props) =>
+  svg(
+    <>
+      <path d="M3 8.2V6a2 2 0 0 1 2-2h3.9l2 2.4H19a2 2 0 0 1 2 2v.8" />
+      <path d="M3.2 8.9h18.1a1 1 0 0 1 .97 1.24l-2.1 8.4a1.6 1.6 0 0 1-1.55 1.21H4.6a1.6 1.6 0 0 1-1.6-1.6V8.9Z" />
+    </>,
+    p,
+  );
+
+/** A pencil — a file this session wrote. */
+export const IconPencil = (p?: Props) =>
+  svg(
+    <>
+      <path d="M4 20.2h4.1L19.4 8.9a2.2 2.2 0 0 0 0-3.1l-1.2-1.2a2.2 2.2 0 0 0-3.1 0L3.8 15.9v4.3Z" />
+      <path d="m13.8 6.2 4 4" />
+    </>,
+    p,
+  );

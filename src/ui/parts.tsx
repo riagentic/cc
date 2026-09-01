@@ -4,7 +4,7 @@
  * tokens in `theme.tsx` — no component here owns a colour.
  */
 import { useInterval, useLocal, type VNode } from "aio/air";
-import { IconAlert, IconCheck } from "./icons.tsx";
+import { IconAlert, IconCheck, IconCopy, IconSearch } from "./icons.tsx";
 import { duration, pct as percent } from "../lib/format.ts";
 import type { Status } from "../type/claude.ts";
 
@@ -248,6 +248,108 @@ export function Segmented<T extends string>(
     </div>
   );
 }
+
+/**
+ * Copy-to-clipboard, for the things a reader actually wants out of a
+ * transcript: a code block, a tool's input, an agent's answer.
+ *
+ * The confirmation is the label changing for a moment — a toast for an action
+ * this small is more interruption than information.
+ */
+export function Copy(props: { text: string; label?: string }): VNode {
+  const [done, setDone] = useLocal(false);
+
+  const copy = async () => {
+    const ok = await writeClipboard(props.text);
+    if (!ok) return;
+    setDone(true);
+    // Long enough to read, short enough that the button is ready again before
+    // anyone reaches for it twice.
+    setTimeout(() => setDone(false), 1_200);
+  };
+
+  return (
+    <button
+      type="button"
+      class="btn btn--ghost btn--sm copy"
+      title={done ? "Copied" : "Copy to clipboard"}
+      aria-label={done ? "Copied" : "Copy to clipboard"}
+      onClick={() => void copy()}
+    >
+      {done ? IconCheck({ size: 13 }) : IconCopy({ size: 13 })}
+      {props.label ? <span>{done ? "Copied" : props.label}</span> : null}
+    </button>
+  );
+}
+
+/** `navigator.clipboard` needs a secure context and a permission the embedder
+ *  may not grant; the textarea path is the floor that works everywhere. */
+async function writeClipboard(text: string): Promise<boolean> {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    try {
+      const el = document.createElement("textarea");
+      el.value = text;
+      el.setAttribute("readonly", "");
+      el.style.position = "fixed";
+      el.style.opacity = "0";
+      document.body.appendChild(el);
+      el.select();
+      const ok = document.execCommand("copy");
+      document.body.removeChild(el);
+      return ok;
+    } catch {
+      return false;
+    }
+  }
+}
+
+/**
+ * A filter box for the long lists.
+ *
+ * The ring buffers behind these pages hold hundreds of entries, and a busy
+ * session fills them in minutes — at which point scrolling is the only way to
+ * find the one call you are looking for, which is no way at all.
+ */
+export function Search(
+  props: {
+    value: string;
+    onChange: (v: string) => void;
+    placeholder?: string;
+    label: string;
+  },
+): VNode {
+  return (
+    <span class="search">
+      <span class="search__icon">{IconSearch({ size: 13 })}</span>
+      <input
+        class="input input--search"
+        type="search"
+        value={props.value}
+        aria-label={props.label}
+        placeholder={props.placeholder ?? "Filter…"}
+        onInput={(e) => props.onChange((e.target as HTMLInputElement).value)}
+        // Escape clears without reaching for the mouse — the box is usually the
+        // only thing standing between the reader and the full list again.
+        onKeyDown={(e: KeyboardEvent) => {
+          if (e.key === "Escape") props.onChange("");
+        }}
+      />
+    </span>
+  );
+}
+
+/** Case-insensitive "does this row match what was typed". Empty query matches
+ *  everything, so a filter is never a way to lose the list. */
+export const matches = (query: string, ...fields: unknown[]): boolean => {
+  const q = query.trim().toLowerCase();
+  if (!q) return true;
+  return fields.some((f) =>
+    typeof f === "string" && f.toLowerCase().includes(q)
+  );
+};
 
 export function Tags(props: { items: string[]; max?: number }): VNode {
   const max = props.max ?? 999;

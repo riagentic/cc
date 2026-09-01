@@ -16,17 +16,29 @@ export type Inline =
   | { t: "em"; v: Inline[] }
   | { t: "link"; href: string; v: Inline[] };
 
+/** Column alignment, from the `---:` / `:---:` markers in a table's rule row. */
+export type Align = "left" | "center" | "right";
+
 export type Block =
   | { t: "p"; v: Inline[] }
   | { t: "h"; level: number; v: Inline[] }
   | { t: "pre"; lang: string; v: string }
   | { t: "list"; ordered: boolean; items: Inline[][] }
   | { t: "quote"; v: Inline[] }
+  | { t: "table"; head: Inline[][]; rows: Inline[][][]; align: Align[] }
   | { t: "hr" };
 
-/** Schemes a link may use. Anything else (`javascript:`, `data:`, …) loses its
- *  href and renders as plain text — a dropped link beats an executable one. */
-const SAFE_SCHEME = /^(https?:|mailto:|#|\/|\.\/|\.\.\/)/i;
+/**
+ * Schemes a link may use. Anything else (`javascript:`, `data:`, …) loses its
+ * href and renders as plain text — a dropped link beats an executable one.
+ *
+ * The bare `/` branch is deliberately `\/(?![/\\])`: `//evil.com/x` and
+ * `/\evil.com` *look* like same-origin paths and are not — a browser resolves
+ * both to `https://evil.com/`. Model output that renders as a local-looking
+ * link and navigates off-site is exactly the shape this allow-list exists to
+ * stop, so the two-separator forms are excluded.
+ */
+const SAFE_SCHEME = /^(https?:|mailto:|#|\/(?![/\\])|\.\/|\.\.\/)/i;
 
 const H = /^(#{1,6})\s+(.*)$/;
 const UL = /^\s*[-*+]\s+(.*)$/;
@@ -34,6 +46,10 @@ const OL = /^\s*\d+[.)]\s+(.*)$/;
 const HR = /^\s*([-*_])(\s*\1){2,}\s*$/;
 const QUOTE = /^\s*>\s?(.*)$/;
 const FENCE = /^\s*```(.*)$/;
+/** A table row is any line with a `|` that is not a fence or a rule. */
+const ROW = /\|/;
+/** The rule row under the header: `| --- | :---: | ---: |`. */
+const RULE = /^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$/;
 
 /** Parse a Markdown document into blocks. Never throws: anything unrecognised
  *  survives as a paragraph, which is the honest fallback for agent output. */
@@ -91,12 +107,37 @@ export function parseMarkdown(src: string): Block[] {
       const ordered = !UL.test(line) && OL.test(line);
       const items: Inline[][] = [];
       while (i < lines.length) {
+        // A thematic break also matches the bullet pattern (`* * *` is a valid
+        // `UL` line), and the continuation loop tested only `UL`/`OL` — so a
+        // rule *inside* a list was swallowed as a bullet and its characters
+        // lost: `- a`/`* * *`/`- b` rendered three items, the middle one empty.
+        // The rule ends the list, exactly as it does when one is not open.
+        if (HR.test(lines[i])) break;
         const m = ordered ? OL.exec(lines[i]) : UL.exec(lines[i]);
         if (!m) break;
         items.push(parseInline(m[1]));
         i++;
       }
       out.push({ t: "list", ordered, items });
+      continue;
+    }
+
+    // Tables. A pipe table is a header line, a rule row, then body rows — and
+    // it is the shape a coding agent reaches for constantly (every comparison,
+    // every options matrix). Without this they fell through to the paragraph
+    // branch and rendered as a wall of pipes.
+    if (ROW.test(line) && i + 1 < lines.length && RULE.test(lines[i + 1])) {
+      const align = cells(lines[i + 1]).map(alignOf);
+      const head = cells(line).map(parseInline);
+      i += 2;
+      const rows: Inline[][][] = [];
+      while (
+        i < lines.length && lines[i].trim() !== "" && ROW.test(lines[i]) &&
+        !RULE.test(lines[i])
+      ) {
+        rows.push(cells(lines[i++]).map(parseInline));
+      }
+      out.push({ t: "table", head, rows, align });
       continue;
     }
 
@@ -115,6 +156,34 @@ export function parseMarkdown(src: string): Block[] {
 const starts = (line: string): boolean =>
   FENCE.test(line) || HR.test(line) || H.test(line) || QUOTE.test(line) ||
   UL.test(line) || OL.test(line);
+
+/** Split one table line into cell texts, dropping the optional outer pipes.
+ *  An escaped `\|` is content, not a separator — it is how a table holds a
+ *  shell pipeline, which is exactly what a coding agent puts in one. */
+function cells(line: string): string[] {
+  const trimmed = line.trim().replace(/^\|/, "").replace(/\|$/, "");
+  const out: string[] = [];
+  let buf = "";
+  for (let i = 0; i < trimmed.length; i++) {
+    const c = trimmed[i];
+    if (c === "\\" && trimmed[i + 1] === "|") {
+      buf += "|";
+      i++;
+    } else if (c === "|") {
+      out.push(buf.trim());
+      buf = "";
+    } else buf += c;
+  }
+  out.push(buf.trim());
+  return out;
+}
+
+const alignOf = (spec: string): Align => {
+  const s = spec.trim();
+  if (s.startsWith(":") && s.endsWith(":")) return "center";
+  if (s.endsWith(":")) return "right";
+  return "left";
+};
 
 /** Inline spans. Code wins over emphasis, so `` `a * b` `` stays literal. */
 export function parseInline(src: string): Inline[] {
@@ -139,11 +208,17 @@ export function parseInline(src: string): Inline[] {
     }
 
     if (c === "`") {
-      const end = src.indexOf("`", i + 1);
-      if (end > i + 1) {
+      // A run of N backticks is closed by the next run of exactly N. Matching a
+      // single tick meant ``` ``a`` ``` — the standard way to write code that
+      // itself contains a backtick — came out as three pieces with the ticks
+      // showing, which is precisely the text an agent uses to quote code.
+      let open = 0;
+      while (src[i + open] === "`") open++;
+      const close = closingRun(src, i + open, open);
+      if (close !== -1) {
         flush();
-        out.push({ t: "code", v: src.slice(i + 1, end) });
-        i = end + 1;
+        out.push({ t: "code", v: src.slice(i + open, close) });
+        i = close + open;
         continue;
       }
     }
@@ -160,7 +235,13 @@ export function parseInline(src: string): Inline[] {
 
     if (c === "*" || c === "_") {
       const end = src.indexOf(c, i + 1);
-      if (end > i + 1 && src[i + 1] !== c) {
+      // `_` never opens emphasis inside a word. Without this, every
+      // `snake_case_name` an agent writes came out as `snake`+italic+`name`,
+      // and identifiers are most of what this parser renders. `*` keeps its
+      // intra-word behaviour, which is what CommonMark says too.
+      const intraWord = c === "_" &&
+        (isWordChar(src[i - 1]) || isWordChar(src[end + 1]));
+      if (end > i + 1 && src[i + 1] !== c && !intraWord) {
         flush();
         out.push({ t: "em", v: parseInline(src.slice(i + 1, end)) });
         i = end + 1;
@@ -171,7 +252,10 @@ export function parseInline(src: string): Inline[] {
     if (c === "[") {
       const close = src.indexOf("]", i + 1);
       if (close > i && src[close + 1] === "(") {
-        const paren = src.indexOf(")", close + 2);
+        // Balanced, not first-`)`: a URL may contain parentheses, and
+        // Wikipedia-style links (`…/Foo_(bar)`) were truncated at the inner one,
+        // leaving a broken href and a stray `)` in the prose.
+        const paren = closingParen(src, close + 2);
         if (paren > close) {
           const href = safeHref(src.slice(close + 2, paren).trim());
           const label = parseInline(src.slice(i + 1, close));
@@ -191,6 +275,41 @@ export function parseInline(src: string): Inline[] {
   flush();
   return out;
 }
+
+/** The index of the next run of exactly `n` backticks at or after `from`, or
+ *  `-1`. A longer run is not a closer — it belongs to a different span. */
+function closingRun(src: string, from: number, n: number): number {
+  for (let j = from; j < src.length; j++) {
+    if (src[j] !== "`") continue;
+    let run = 0;
+    while (src[j + run] === "`") run++;
+    if (run === n) return j;
+    j += run - 1;
+  }
+  return -1;
+}
+
+/** The index of the `)` that closes the `(` before `from`, counting nesting.
+ *  `-1` when the link target is never closed. */
+function closingParen(src: string, from: number): number {
+  let depth = 0;
+  for (let j = from; j < src.length; j++) {
+    const ch = src[j];
+    if (ch === "\\") {
+      j++;
+      continue;
+    }
+    if (ch === "(") depth++;
+    else if (ch === ")") {
+      if (depth === 0) return j;
+      depth--;
+    }
+  }
+  return -1;
+}
+
+const isWordChar = (c: string | undefined): boolean =>
+  c !== undefined && /[A-Za-z0-9]/.test(c);
 
 /** `null` for anything not on the allow-list. */
 export function safeHref(href: string): string | null {

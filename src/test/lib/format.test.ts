@@ -10,6 +10,7 @@ import {
   tailPath,
   tildePath,
   tokens,
+  until,
   usd,
 } from "../../lib/format.ts";
 
@@ -111,4 +112,75 @@ Deno.test("tildePath — only collapses a real home prefix", () => {
   assertEquals(tildePath("/opt/app", "/home/dev"), "/opt/app");
   assertEquals(tildePath("/opt/app", null), "/opt/app");
   assertEquals(tildePath("/opt/app", "/"), "/opt/app"); // "/" is not a home
+});
+
+Deno.test("rounding never invents a unit it did not advance to", () => {
+  // 1 048 575 bytes is 1023.999 KB, and one decimal makes that `1024 KB` — a
+  // size that does not exist. The same carry applies at every boundary.
+  assertEquals(bytes(1024 * 1024 - 1), "1.0 MB");
+  assertEquals(bytes(1024 * 1024 * 1024 - 1), "1.0 GB");
+  assertEquals(bytes(1023.5), "1.0 KB");
+  assertEquals(tokens(999_999), "1.00M");
+  assertEquals(tokens(999.5), "1.0k");
+  // …and the ordinary cases are unchanged.
+  assertEquals(bytes(812), "812 B");
+  assertEquals(bytes(12_698), "12.4 KB");
+  assertEquals(tokens(842), "842");
+  assertEquals(tokens(12_400), "12k");
+});
+
+Deno.test("tildePath — the home prefix must end on a segment boundary", () => {
+  // `/home/dev-tools` is not under `/home/dev`, and a raw prefix test rendered
+  // it as `~-tools` — a path that does not exist, shown as though it did.
+  assertEquals(
+    tildePath("/home/dev-tools/proj", "/home/dev"),
+    "/home/dev-tools/proj",
+  );
+  assertEquals(
+    tildePath("/Users/alice/code", "/Users/al"),
+    "/Users/alice/code",
+  );
+  assertEquals(tildePath("/home/dev/code", "/home/dev"), "~/code");
+  assertEquals(tildePath("/home/dev", "/home/dev"), "~");
+  assertEquals(tildePath("/home/dev/code", "/home/dev/"), "~/code");
+  assertEquals(tildePath("/srv/app", "/home/dev"), "/srv/app");
+  assertEquals(tildePath("/srv/app", null), "/srv/app");
+});
+
+Deno.test("truncation cuts on a character, never inside one", () => {
+  // Slicing by UTF-16 unit lands between the halves of a surrogate pair, and a
+  // lone surrogate is the `�` a reader actually sees.
+  const lone = (s: string) =>
+    Array.from(s).some((ch) => {
+      const c = ch.codePointAt(0) ?? 0;
+      return c >= 0xd800 && c <= 0xdfff;
+    });
+  const emoji = "😀".repeat(20);
+  assertEquals(lone(oneLine(emoji, 10)), false);
+  assertEquals(Array.from(oneLine(emoji, 10)).length <= 10, true);
+  assertEquals(lone(tailPath(`/x/${emoji}/end.txt`, 30)), false);
+  assertEquals(tailPath(`/x/${emoji}/end.txt`, 30).endsWith("/end.txt"), true);
+  // The cap is a cap even when it leaves no room for the ellipsis.
+  assertEquals(oneLine("abc", 0), "");
+  assertEquals(oneLine("abc", 1), "…");
+});
+
+Deno.test("baseName — a path of nothing but separators is the root", () => {
+  assertEquals(baseName("/"), "/");
+  assertEquals(baseName("//"), "/");
+  assertEquals(baseName("///"), "/");
+  assertEquals(baseName("/a/b"), "b");
+  assertEquals(baseName("/a/b/"), "b");
+});
+
+Deno.test("until — a future moment, which `ago` cannot express", () => {
+  const now = 1_000_000_000;
+  assertEquals(until(now + 40_000, now), "in 40s");
+  assertEquals(until(now + 12 * 60_000, now), "in 12m");
+  assertEquals(until(now + 4 * 3_600_000, now), "in 4h");
+  assertEquals(until(now + 2 * 86_400_000, now), "in 2d");
+  // Past, or not a time at all.
+  assertEquals(until(now - 1, now), "now");
+  assertEquals(until(0, now), "—");
+  assertEquals(until(NaN, now), "—");
 });

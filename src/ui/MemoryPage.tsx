@@ -6,11 +6,16 @@
  * Three scopes, because they behave differently: **user** memory applies to
  * every project, **project** memory to this one, and **session** memory is what
  * the agent has written down for itself.
+ *
+ * Measured from the project's files, not from a running process — selecting a
+ * project is enough to see what it carries. Only the *session* scope needs a
+ * session, because only a running CLI knows where it keeps its own notes.
  */
 import type { VNode } from "aio/air";
-import { memoryBytes, session } from "../cell/session.ts";
+import { catalog, memoryBytes } from "../cell/catalog.ts";
+import { view } from "../cell/session.ts";
 import type { MemoryFile } from "../type/claude.ts";
-import { ago, bytes, pct } from "../lib/format.ts";
+import { ago, bytes, pct, tokens } from "../lib/format.ts";
 import { Empty, Meter, Panel, Pill, useNow } from "./parts.tsx";
 import { PageHead } from "./RunViews.tsx";
 import { IconFile, IconMemory, IconRefresh } from "./icons.tsx";
@@ -27,7 +32,12 @@ const SCOPES: { id: MemoryFile["scope"]; label: string; hint: string }[] = [
 
 export function MemoryPage(): VNode {
   const total = memoryBytes();
-  const files = session.memory;
+  const files = catalog.memory;
+  // The files are the project's; the window they are measured against, and the
+  // session memory directories below, are the running session's. This page is
+  // the one honest place those two meet.
+  const sess = view();
+  const window = sess.usage.contextWindow;
   const largest = files[0]?.bytes ?? 0;
   // Slow, but ticking: with `false` the "scanned 12s ago" line froze at whatever
   // it said when some other state last re-rendered the page, which on an idle
@@ -37,11 +47,12 @@ export function MemoryPage(): VNode {
   return (
     <div class="page">
       <PageHead
+        scope="project"
         title="Memory"
         sub={files.length > 0
           ? `${bytes(total)} across ${files.length} files${
-            session.memoryScannedAt
-              ? ` · scanned ${ago(session.memoryScannedAt, now)}`
+            catalog.memoryScannedAt
+              ? ` · scanned ${ago(catalog.memoryScannedAt, now)}`
               : ""
           }`
           : "Not scanned yet"}
@@ -49,7 +60,7 @@ export function MemoryPage(): VNode {
           <button
             type="button"
             class="btn btn--sm"
-            onClick={() => session.scanMemory()}
+            onClick={() => catalog.refreshMemory()}
           >
             {IconRefresh({ size: 13 })} Rescan
           </button>
@@ -68,7 +79,7 @@ export function MemoryPage(): VNode {
                 <button
                   type="button"
                   class="btn btn--sm"
-                  onClick={() => session.scanMemory()}
+                  onClick={() => catalog.refreshMemory()}
                 >
                   Scan now
                 </button>
@@ -97,11 +108,12 @@ export function MemoryPage(): VNode {
                   </span>
                   <span class="page__sub">
                     ≈ {Math.round(total / 4).toLocaleString()} tokens ·{" "}
-                    {pct(total / 4, session.usage.contextWindow).toFixed(1)}% of
-                    the window
+                    {pct(total / 4, window).toFixed(1)}% of the {tokens(window)}
+                    {" "}
+                    window
                   </span>
                 </div>
-                <Meter value={total / 4} max={session.usage.contextWindow} />
+                <Meter value={total / 4} max={window} />
                 <div class="field__hint" style={{ marginTop: "6px" }}>
                   Token count is an estimate (≈4 bytes per token) — the CLI
                   reports exact usage only once a turn completes.
@@ -164,10 +176,10 @@ export function MemoryPage(): VNode {
             </>
           )}
 
-        {session.meta.memoryPaths.length > 0 && (
+        {sess.meta.memoryPaths.length > 0 && (
           <Panel title="Memory directories reported by the CLI">
             <div class="tags">
-              {session.meta.memoryPaths.map((p) => (
+              {sess.meta.memoryPaths.map((p) => (
                 <span key={p} class="tag">{p}</span>
               ))}
             </div>

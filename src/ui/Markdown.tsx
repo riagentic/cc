@@ -6,6 +6,7 @@
 import type { VNode } from "aio/air";
 import { type Block, type Inline, parseMarkdown } from "../lib/markdown.ts";
 import { highlight } from "../lib/highlight.ts";
+import { Copy } from "./parts.tsx";
 
 export function Markdown(props: { source: string }): VNode {
   return <div class="md">{parseMarkdown(props.source).map(renderBlock)}</div>;
@@ -27,10 +28,16 @@ function renderBlock(b: Block, i: number): VNode {
         </div>
       );
     }
+    // Code is the thing people take out of a transcript most often, and
+    // selecting it by hand out of a scrolling chat is the worst way to do it —
+    // hence the copy control pinned to the block.
     case "pre":
       return (
         <pre key={i} class="md__pre">
           {b.lang && <span class="md__lang">{b.lang}</span>}
+          <span class="md__copy">
+            <Copy text={b.v} />
+          </span>
           <code>
             {highlight(b.v, b.lang).map((t, n) =>
               t.kind === "plain"
@@ -59,6 +66,35 @@ function renderBlock(b: Block, i: number): VNode {
         <blockquote key={i} class="md__quote">
           {b.v.map(renderInline)}
         </blockquote>
+      );
+    case "table":
+      return (
+        // Wrapped, and the wrapper is what scrolls: a wide table inside a chat
+        // column must not push the whole page sideways.
+        <div key={i} class="md__tablewrap">
+          <table class="md__table">
+            <thead>
+              <tr>
+                {b.head.map((cell, n) => (
+                  <th key={n} style={{ textAlign: b.align[n] ?? "left" }}>
+                    {cell.map(renderInline)}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {b.rows.map((row, r) => (
+                <tr key={r}>
+                  {row.map((cell, n) => (
+                    <td key={n} style={{ textAlign: b.align[n] ?? "left" }}>
+                      {cell.map(renderInline)}
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       );
     case "hr":
       return <hr key={i} class="md__hr" />;

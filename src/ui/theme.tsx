@@ -70,7 +70,8 @@ const CSS = `
   --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
   --shadow: 0 1px 2px rgba(0,0,0,.4), 0 12px 32px -12px rgba(0,0,0,.6);
   --ease: cubic-bezier(.22,.61,.36,1);
-  --rail: 260px;
+  --rail: 248px;
+  --dock: 212px;
 
   /* aio/ui kit reskin — the kit inherits this palette instead of fighting it */
   --aio-accent: var(--accent);
@@ -123,17 +124,137 @@ body {
 
 /* ── shell ──────────────────────────────────────────────────────────────── */
 
-.shell { display: grid; grid-template-columns: var(--rail) minmax(0, 1fr); height: 100vh; }
+/* Projects on the left, sections on the right, the work in the middle.
+   The two panels answer different questions and are deliberately not
+   interchangeable: the left one is *which codebase*, and it changes rarely; the
+   right one is *what am I looking at*, and it changes constantly. Putting the
+   frequently-clicked column next to the scrollbar, on the side the pointer
+   already rests, is the whole reason for the split. */
+.shell {
+  display: grid;
+  grid-template-columns: var(--dock) minmax(0, 1fr) var(--rail);
+  height: 100vh;
+}
 
 .rail {
   display: flex; flex-direction: column; min-height: 0;
-  border-right: 1px solid var(--line);
+  grid-column: 3;
+  border-left: 1px solid var(--line);
   background: color-mix(in srgb, var(--panel) 78%, transparent);
   backdrop-filter: blur(12px);
 }
 .rail__head { padding: 16px 16px 12px; }
-.rail__nav { flex: 1; overflow-y: auto; padding: 4px 10px 10px; display: flex; flex-direction: column; gap: 4px; }
+.rail__nav { flex: 1; overflow-y: auto; padding: 4px 10px 10px; display: flex; flex-direction: column; gap: 3px; }
 .rail__foot { padding: 10px; border-top: 1px solid var(--line-soft); display: grid; gap: 8px; }
+
+/* A heading inside the rail. Fourteen destinations is too many to scan as one
+   list; four short groups is not. */
+.rail__group {
+  font-size: 9.5px; text-transform: uppercase; letter-spacing: .1em; font-weight: 700;
+  color: var(--ink-dim); padding: 12px 12px 4px;
+}
+.rail__group:first-child { padding-top: 2px; }
+
+/* ── project dock ───────────────────────────────────────────────────────── */
+
+.dock {
+  grid-column: 1;
+  display: flex; flex-direction: column; min-height: 0;
+  border-right: 1px solid var(--line);
+  background: color-mix(in srgb, var(--panel) 62%, transparent);
+  backdrop-filter: blur(12px);
+}
+.dock__head {
+  padding: 14px 12px 8px; display: flex; align-items: center; gap: 8px;
+  font-size: 9.5px; text-transform: uppercase; letter-spacing: .1em; font-weight: 700;
+  color: var(--ink-dim);
+}
+.dock__list { flex: 1; overflow-y: auto; padding: 2px 8px 8px; display: flex; flex-direction: column; gap: 3px; }
+.dock__foot { padding: 8px; border-top: 1px solid var(--line-soft); display: grid; gap: 6px; }
+
+/* One project. A tab, not a list row: the accent bar on the leading edge is
+   what makes "this is the one the session runs in" readable at a glance.
+   The tab is a WRAPPER — the select and the close are two real buttons, since a
+   button inside a button is invalid and collapses to one ambiguous target. */
+.ptab {
+  position: relative; display: flex; align-items: center;
+  border-radius: var(--radius-sm);
+  border: 1px solid transparent; background: transparent; color: var(--ink-soft);
+  transition: background .16s var(--ease), color .16s var(--ease), border-color .16s var(--ease);
+}
+/* The select button IS the tab: full width, with room reserved on the right for
+   the overlays. It used to be a flex sibling of the state dot, which left a
+   ~16px strip down the right of every tab that looked like the tab and clicked
+   like nothing — the "sometimes switching does nothing" bug. */
+.ptab__main {
+  width: 100%; min-width: 0;
+  display: grid; grid-template-columns: 26px minmax(0, 1fr);
+  align-items: center; gap: 9px; text-align: left;
+  padding: 8px 30px 8px 9px; border: 0; background: none; color: inherit;
+  font: inherit; cursor: pointer; border-radius: inherit;
+}
+.ptab:hover { background: var(--panel-2); color: var(--ink); }
+.ptab.active {
+  background: var(--accent-soft); color: var(--ink);
+  border-color: color-mix(in srgb, var(--accent) 30%, transparent);
+}
+.ptab.active::before {
+  content: ""; position: absolute; left: -8px; top: 50%; transform: translateY(-50%);
+  width: 3px; height: 22px; border-radius: 0 3px 3px 0; background: var(--accent);
+}
+.ptab__mark {
+  width: 26px; height: 26px; border-radius: 7px; display: grid; place-items: center;
+  background: var(--raise); color: var(--ink-soft);
+  font-size: 11.5px; font-weight: 700; letter-spacing: -.02em; text-transform: uppercase;
+}
+.ptab.active .ptab__mark { background: color-mix(in srgb, var(--accent) 22%, transparent); color: var(--accent); }
+.ptab__name { font-size: 12.5px; font-weight: 560; letter-spacing: -.005em; }
+.ptab__sub { font-size: 10.5px; color: var(--ink-dim); display: flex; align-items: center; gap: 4px; }
+/* Each project's own session, at a glance. The dock is the only place that
+   reports a conversation you are NOT looking at, so this is the whole signal
+   for a turn that finished — or stopped to ask something — in another project. */
+/* An indicator, never a target: pointer-events none, so the dot cannot swallow
+   a click meant for the tab underneath it. */
+.ptab__state {
+  position: absolute; right: 10px; top: 50%; transform: translateY(-50%);
+  width: 7px; height: 7px; border-radius: 99px; background: transparent;
+  pointer-events: none;
+}
+.ptab__state--ready { background: color-mix(in srgb, var(--ok) 70%, transparent); }
+.ptab__state--working { background: var(--accent); animation: pulse 1.5s var(--ease) infinite; }
+.ptab__state--error { background: var(--danger); }
+/* Blocked on a human: it will wait forever, so it gets a ring rather than a dot. */
+.ptab__state--holds {
+  background: var(--warn);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--warn) 26%, transparent);
+  animation: pulse 1.8s var(--ease) infinite;
+}
+
+/* End this project's session without leaving the page you are on. Revealed on
+   hover and on keyboard focus — always reachable, never sitting there inviting
+   a mis-click on a session that is working. It takes the state dot's place, so
+   the row does not reflow when it appears. */
+.ptab__close {
+  position: absolute; right: 6px; top: 50%; transform: translateY(-50%);
+  display: grid; place-items: center; width: 20px; height: 20px;
+  border: 0; border-radius: 6px; padding: 0;
+  background: var(--raise); color: var(--ink-dim);
+  cursor: pointer;
+  /* Hidden means UNCLICKABLE. opacity 0 alone still hit-tests, so the tab
+     carried an invisible 20x20 button that ate clicks aimed at the project. */
+  opacity: 0; pointer-events: none;
+  transition: opacity .14s var(--ease), color .14s var(--ease), background .14s var(--ease);
+}
+.ptab:hover .ptab__close, .ptab:focus-within .ptab__close {
+  opacity: 1; pointer-events: auto;
+}
+.ptab:hover .ptab__state { opacity: 0; }
+.ptab__close:hover { background: color-mix(in srgb, var(--danger) 18%, transparent); color: var(--danger); }
+
+/* A project whose directory is gone is still listed — it is the row you go to
+   in order to remove it — but it must not look startable. */
+.ptab--missing .ptab__mark { background: color-mix(in srgb, var(--danger) 18%, transparent); color: var(--danger); }
+.ptab--missing .ptab__name { text-decoration: line-through; text-decoration-color: color-mix(in srgb, var(--danger) 60%, transparent); }
 
 .brand { display: flex; align-items: center; gap: 10px; }
 .brand__mark {
@@ -160,6 +281,25 @@ body {
 .navcard.active .navcard__icon { background: color-mix(in srgb, var(--accent) 20%, transparent); }
 .navcard__label { font-size: 13px; font-weight: 560; letter-spacing: -.005em; }
 .navcard__hint { font-size: 11px; color: var(--ink-dim); }
+/* Machine-wide, in the one place the choice is made. Same hue as the page's
+   scope tag, so the two read as one idea rather than two decorations. */
+.navcard__machine {
+  display: inline-block; width: 5px; height: 5px; border-radius: 99px;
+  margin-left: 6px; vertical-align: 2px;
+  background: color-mix(in srgb, var(--violet) 75%, transparent);
+}
+
+/* A line that scopes the panels under it to one project. Not a Banner: nothing
+   is wrong, and a warning tone for an ordinary fact trains people to ignore
+   warnings. */
+.scopebar {
+  display: flex; align-items: center; gap: 9px;
+  padding: 9px 13px; border-radius: var(--radius-sm);
+  border: 1px solid var(--line-soft); background: var(--panel-2);
+  font-size: 12.5px; color: var(--ink-soft);
+}
+.scopebar__icon { display: grid; place-items: center; color: var(--ink-dim); flex: none; }
+.scopebar b { color: var(--ink); font-weight: 620; }
 
 /* ── content ────────────────────────────────────────────────────────────── */
 
@@ -169,6 +309,21 @@ body {
 .page__head { padding: 16px 22px 10px; display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
 .page__title { font-size: 17px; font-weight: 640; letter-spacing: -.015em; margin: 0; }
 .page__sub { font-size: 12.5px; color: var(--ink-dim); }
+
+/* The scope tag beside a page title. Muted by default — it is a label, not a
+   status — with the machine-wide one given a distinct hue, because that is the
+   case a reader is most likely to get wrong. */
+.scopetag {
+  font-size: 10px; font-weight: 650; letter-spacing: .04em; text-transform: uppercase;
+  padding: 2px 7px; border-radius: 99px; white-space: nowrap;
+  border: 1px solid var(--line); background: var(--panel-2); color: var(--ink-dim);
+  cursor: help;
+}
+.scopetag--machine {
+  border-color: color-mix(in srgb, var(--violet) 40%, transparent);
+  background: color-mix(in srgb, var(--violet) 12%, transparent);
+  color: var(--violet);
+}
 
 /* ── status strip ───────────────────────────────────────────────────────── */
 
@@ -263,6 +418,47 @@ button.rowitem:hover { background: var(--panel-2); }
 .rowitem__detail { font-size: 12px; color: var(--ink-dim); font-family: var(--mono); }
 .rowitem__meta { font-size: 11px; color: var(--ink-dim); font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
 
+/* ── file tree ──────────────────────────────────────────────────────────── */
+
+/* The tree scrolls independently of the preview beside it: opening a deep
+   folder must not push the file you are reading off the screen. */
+.treesplit { flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(240px, 340px) minmax(0, 1fr); gap: 0; }
+@media (max-width: 1000px) { .treesplit { grid-template-columns: minmax(0, 1fr); } .treesplit .filepane { display: none; } }
+.treepane { min-height: 0; overflow-y: auto; border-right: 1px solid var(--line-soft); padding: 6px 0 14px; }
+.filepane { min-height: 0; overflow: auto; padding: 12px 16px 20px; }
+
+.treerow {
+  display: grid; grid-template-columns: 16px minmax(0, 1fr) auto; align-items: center; gap: 7px;
+  width: 100%; text-align: left; font: inherit; color: var(--ink-soft);
+  background: none; border: 0; cursor: pointer;
+  padding: 3px 12px 3px 0; line-height: 1.5;
+  transition: background .12s var(--ease), color .12s var(--ease);
+}
+.treerow:hover { background: var(--panel-2); color: var(--ink); }
+.treerow.selected { background: var(--accent-soft); color: var(--ink); }
+.treerow__icon { display: grid; place-items: center; color: var(--ink-dim); }
+.treerow.selected .treerow__icon, .treerow--dir .treerow__icon { color: var(--ink-soft); }
+.treerow__name { font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.treerow--dir .treerow__name { font-weight: 560; }
+.treerow__size { font-size: 10.5px; color: var(--ink-dim); font-variant-numeric: tabular-nums; white-space: nowrap; }
+/* The overlay this panel exists for: a file the session read, or changed.
+   Sized by content with a floor, not pinned to the icon's width: the same cell
+   also carries a file size, and a fixed 15px wrapped "155 B" onto two lines. */
+.treerow__touch { display: grid; place-items: center; justify-self: end; min-width: 15px; }
+.treerow--read .treerow__name { color: var(--info); }
+.treerow--written .treerow__name { color: var(--accent); font-weight: 600; }
+
+/* ── code preview ───────────────────────────────────────────────────────── */
+
+.codeview {
+  margin: 0; padding: 12px 14px; overflow: auto;
+  background: var(--panel-2); border: 1px solid var(--line-soft); border-radius: var(--radius-sm);
+  font-family: var(--mono); font-size: 12px; line-height: 1.62; white-space: pre;
+  /* tab-size matters here and nowhere else in the app: this is the only place
+     that renders a file's own bytes rather than text the model produced. */
+  tab-size: 2;
+}
+
 /* ── chat ───────────────────────────────────────────────────────────────── */
 
 .chat { flex: 1; min-height: 0; overflow-y: auto; padding: 20px 22px 8px; scroll-behavior: smooth; }
@@ -321,6 +517,30 @@ button.rowitem:hover { background: var(--panel-2); }
   font-family: var(--mono); font-size: 12px; line-height: 1.6; white-space: pre;
 }
 .md__pre code { background: none; border: 0; padding: 0; font: inherit; }
+/* The copy control sits over the block and fades in on hover — always reachable
+   from the keyboard, never in the way of the code while reading. */
+.md__copy { position: absolute; top: 6px; right: 6px; opacity: 0; transition: opacity .12s; }
+.md__pre:hover .md__copy, .md__copy:focus-within { opacity: 1; }
+.copy { gap: 5px; }
+
+
+/* The card takes focus when it appears, so it needs a visible ring — an
+   invisible focus target is worse than none. */
+.perm:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.perm:focus { outline: none; }
+
+/* Tables. The wrapper scrolls, not the page: a wide comparison table is normal
+   model output and must never push the chat column sideways. */
+.md__tablewrap { margin: 0 0 .7em; overflow-x: auto; max-width: 100%; }
+.md__table {
+  border-collapse: collapse; font-size: .94em;
+  border: 1px solid var(--line-soft); border-radius: var(--radius-sm);
+}
+.md__table th, .md__table td {
+  padding: .38em .7em; border: 1px solid var(--line-soft); vertical-align: top;
+}
+.md__table th { background: var(--panel-2); font-weight: 620; white-space: nowrap; }
+.md__table tbody tr:nth-child(even) td { background: color-mix(in srgb, var(--panel-2) 45%, transparent); }
 
 /* Syntax tokens. One hue per meaning, from the same palette as the rest of the
    app, so code reads as part of the UI rather than a pasted-in widget. */
@@ -423,6 +643,23 @@ button.rowitem:hover { background: var(--panel-2); }
 }
 .input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 .input::placeholder { color: var(--ink-dim); }
+
+/* Filter box. Sits in a page header beside the segmented control, so it is
+   sized to that row rather than to a form.
+
+   Declared *after* the .input rule, deliberately: both are one class deep, so
+   source order decides, and defined earlier its left padding lost — leaving the
+   magnifier sitting on top of the placeholder text. */
+.search { position: relative; display: inline-flex; align-items: center; }
+.search__icon {
+  position: absolute; left: 8px; display: inline-flex; pointer-events: none;
+  color: var(--ink-dim);
+}
+.input--search {
+  padding-left: 27px; min-width: 150px; max-width: 240px;
+  height: 28px; font-size: 12px;
+}
+.input--search::-webkit-search-cancel-button { filter: invert(.5); }
 .field { display: grid; gap: 6px; }
 .field__label { font-size: 12px; font-weight: 600; color: var(--ink-soft); }
 .field__hint { font-size: 11.5px; color: var(--ink-dim); }
@@ -437,7 +674,13 @@ button.rowitem:hover { background: var(--panel-2); }
 .choice:hover { border-color: color-mix(in srgb, var(--accent) 40%, transparent); }
 .choice.selected { border-color: var(--accent); background: var(--accent-soft); }
 .choice__label { font-size: 13px; font-weight: 560; }
-.choice__hint { font-size: 11.5px; color: var(--ink-dim); }
+/* One line, always. A hint is a subtitle, and a long one — a project path
+   outside the home directory is the usual culprit — wrapped a row to four lines
+   and pushed everything under it off the panel. */
+.choice__hint {
+  display: block; font-size: 11.5px; color: var(--ink-dim);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 .choice__tick { color: var(--accent); }
 
 .seg { display: inline-flex; padding: 3px; gap: 2px; background: var(--panel-2); border: 1px solid var(--line); border-radius: 99px; }
@@ -478,11 +721,26 @@ button.rowitem:hover { background: var(--panel-2); }
   * { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; scroll-behavior: auto !important; }
 }
 
-@media (max-width: 880px) {
+/* Two collapse steps, because there are now two panels to give up. The dock
+   goes to icons first — a project is recognisable from its initial and its
+   colour — and the rail follows only when the window is genuinely small. */
+@media (max-width: 1180px) {
+  :root { --dock: 56px; }
+  .dock__head, .dock__foot { padding-inline: 6px; }
+  .dock__head span, .ptab__text { display: none; }
+  /* The state dot survives the collapse — it is the one thing a 56px column
+     still has room to say, and the only warning that another project is
+     blocked. It overlaps the initials rather than taking a column of its own. */
+  .ptab__main { grid-template-columns: 26px; justify-content: center; padding-right: 9px; }
+  .ptab__state { top: 6px; right: 6px; transform: none; }
+}
+
+@media (max-width: 900px) {
   :root { --rail: 68px; }
   .rail__head, .rail__foot { padding-inline: 8px; }
   .brand__text, .navcard__label, .navcard__hint, .rail__foot .wide { display: none; }
   .navcard { grid-template-columns: 30px; justify-content: center; }
+  .rail__group { text-align: center; padding-inline: 0; letter-spacing: .04em; }
   .chat, .composer { padding-inline: 14px; }
   .page__body, .page__head { padding-inline: 14px; }
 }

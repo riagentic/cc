@@ -47,6 +47,22 @@ export const MODELS: ModelOption[] = [
   },
 ];
 
+/**
+ * Reasoning effort (`--effort`), verified accepted alongside `-p` against CLI
+ * 2.1.248 — which also validates the value and warns on an unknown one.
+ *
+ * `""` is "whatever the CLI is configured to do", and it is the default here:
+ * the app should not silently override a setting the user made elsewhere.
+ */
+export const EFFORTS: { id: string; label: string; hint: string }[] = [
+  { id: "", label: "Default", hint: "Leave the CLI's own setting alone" },
+  { id: "low", label: "Low", hint: "Fastest, cheapest answers" },
+  { id: "medium", label: "Medium", hint: "Balanced" },
+  { id: "high", label: "High", hint: "Thinks harder before answering" },
+  { id: "xhigh", label: "Extra high", hint: "For work worth waiting for" },
+  { id: "max", label: "Max", hint: "Everything the model has" },
+];
+
 export const PERMISSION_MODES: { id: string; label: string; hint: string }[] = [
   { id: "default", label: "Ask", hint: "Prompt before every sensitive action" },
   {
@@ -113,18 +129,47 @@ export function usageOf(raw: unknown, fallbackWindow: number): Usage {
 export const contextUsed = (u: Usage): number =>
   u.input + u.cacheRead + u.cacheCreate + u.output;
 
-/** What `modelUsage` reports for one model id, matching a full id against an
- *  alias in either direction (`haiku` ↔ `claude-haiku-4-5-20251001`) and against
- *  the `canonicalModel` each entry carries. `0` when it says nothing. */
+/** The long-context variant of a model wears its window in its id:
+ *  `claude-opus-5[1m]`. Before the first result there is nothing else to read it
+ *  from, and guessing 200k made a 1M session look 5× fuller than it was. */
+const LONG_CONTEXT = /\[1m\]/i;
+
+/**
+ * What `modelUsage` reports for one model id. `0` when it says nothing.
+ *
+ * Matched in tiers, strongest first, because a loose match alone is wrong in a
+ * way that matters: `"claude-sonnet-5[1m]"` *contains* `"claude-sonnet-5"`, so a
+ * sub-agent handed the long-context variant matched the main model's id and the
+ * meter reported a 1M window for a 200k conversation — under-stating context
+ * pressure, the one direction this figure must never round.
+ *
+ *  1. the exact key,
+ *  2. the `canonicalModel` an entry declares,
+ *  3. an alias match in either direction (`haiku` ↔ `claude-haiku-4-5-20251001`)
+ *     — but only between ids that agree about being long-context, which is what
+ *     kept `[1m]` out of a 200k session's answer.
+ */
 function windowFor(models: Record<string, unknown>, id: string): number {
+  const entries = Object.entries(models);
+  const windowOf = (entry: unknown): number => num(obj(entry).contextWindow);
+
+  const exact = entries.find(([key]) => key === id);
+  if (exact && windowOf(exact[1]) > 0) return windowOf(exact[1]);
+
+  const canonical = entries.find(([, entry]) =>
+    str(obj(entry).canonicalModel) === id
+  );
+  if (canonical && windowOf(canonical[1]) > 0) return windowOf(canonical[1]);
+
+  const long = LONG_CONTEXT.test(id);
   return Math.max(
     0,
-    ...Object.entries(models)
-      .filter(([key, entry]) =>
-        key === id || id.includes(key) || key.includes(id) ||
-        str(obj(entry).canonicalModel) === id
+    ...entries
+      .filter(([key]) =>
+        (id.includes(key) || key.includes(id)) &&
+        LONG_CONTEXT.test(key) === long
       )
-      .map(([, entry]) => num(obj(entry).contextWindow)),
+      .map(([, entry]) => windowOf(entry)),
   );
 }
 
@@ -145,19 +190,23 @@ export function contextWindowOf(
   model: string | null = null,
 ): number {
   const models = obj(result.modelUsage);
-  const own = model === null ? 0 : windowFor(models, model);
-  if (own > 0) return own;
+  if (model !== null) {
+    // The session's model is the only one whose window this transcript fills.
+    // When the map cannot be matched to it, the caller's fallback — read from
+    // that same model id — is a better answer than another model's number:
+    // borrowing a sub-agent's 1M window is exactly the over-statement the tiers
+    // in `windowFor` exist to prevent.
+    const own = windowFor(models, model);
+    return own > 0 ? own : fallback;
+  }
+  // No model to attribute the turn to (the very first result can arrive before
+  // `system/init` names one): the largest window reported is the best guess.
   const best = Math.max(
     0,
     ...Object.values(models).map((entry) => num(obj(entry).contextWindow)),
   );
   return best > 0 ? best : fallback;
 }
-
-/** The long-context variant of a model wears its window in its id:
- *  `claude-opus-5[1m]`. Before the first result there is nothing else to read it
- *  from, and guessing 200k made a 1M session look 5× fuller than it was. */
-const LONG_CONTEXT = /\[1m\]/i;
 
 /** Fallback window for a model id, used until the CLI reports the real one. */
 export function fallbackWindow(model: string | null): number {
@@ -197,11 +246,14 @@ export function blocksOf(message: unknown): Block[] {
   return out;
 }
 
-/** `tool_result.content` is a string or a content-block array. Flatten both. */
+/** `tool_result.content` is a string, or an array of content blocks — or, from
+ *  some MCP servers, an array of bare strings. Flatten all three: reading only
+ *  the block shape turned `["hello", "world"]` into an empty result, which is a
+ *  tool whose output silently vanished. */
 export function resultText(content: unknown): string {
   if (typeof content === "string") return content;
   return arr(content)
-    .map((c) => str(obj(c).text) ?? "")
+    .map((c) => typeof c === "string" ? c : str(obj(c).text) ?? "")
     .filter(Boolean)
     .join("\n");
 }
@@ -345,8 +397,36 @@ export type AgentResult = {
 };
 
 const USAGE_BLOCK = /<usage>([\s\S]*?)<\/usage>/;
+/** The same block, for stripping: a result can carry more than one (a sub-agent
+ *  that quotes another's output), and a non-global `replace` left the second on
+ *  screen as though the agent had written it. */
+const USAGE_BLOCK_ALL = /<usage>[\s\S]*?<\/usage>/g;
 const META_LINE =
   /^(agentId:|output_file:|The agent is working in the background|Do NOT Read or tail|Do not duplicate this agent)/;
+
+/**
+ * Drop the CLI's bookkeeping lines from the *end* of a result, and only there.
+ *
+ * They are appended after the agent's answer, so matching them anywhere meant an
+ * answer that merely mentioned one ("`agentId:` is a field you should set") lost
+ * that line out of the middle of its own prose. The tail is where they live, and
+ * the tail is the only place worth trimming.
+ */
+function stripTrailingMeta(text: string): string {
+  const lines = text.split("\n");
+  let end = lines.length;
+  while (end > 0) {
+    const line = lines[end - 1].trim();
+    if (line !== "" && !META_LINE.test(line)) break;
+    end--;
+  }
+  return lines.slice(0, end).join("\n");
+}
+
+/** The launch receipt opens the result — it is not something an agent's prose
+ *  can happen to contain. Anchoring it stopped an agent that *wrote about*
+ *  async launches from having its whole answer discarded as a receipt. */
+const LAUNCH_RECEIPT = /^\s*(?:async\s+)?agent launched successfully/i;
 
 /**
  * Split a `Task`/`Agent` tool result into the agent's answer and its metrics.
@@ -359,17 +439,15 @@ export function agentResultOf(raw: string): AgentResult {
   const text = typeof raw === "string" ? raw : "";
   const usage = USAGE_BLOCK.exec(text);
   const metrics = usage ? usage[1] : "";
+  // Anchored on a word boundary: unanchored, the lookup for `tool_uses` matched
+  // `subagent_tool_uses` first and reported another agent's figure as this
+  // one's, and `duration_ms` picked up `total_duration_ms`.
   const numberAfter = (key: string): number | null => {
-    const m = new RegExp(`${key}:\\s*(\\d+)`).exec(metrics);
+    const m = new RegExp(`(?:^|[^A-Za-z0-9_])${key}:\\s*(\\d+)`).exec(metrics);
     return m ? Number(m[1]) : null;
   };
-  const body = text
-    .replace(USAGE_BLOCK, "")
-    .split("\n")
-    .filter((line) => !META_LINE.test(line.trim()))
-    .join("\n")
-    .trim();
-  const launchReceipt = /agent launched successfully/i.test(text);
+  const body = stripTrailingMeta(text.replace(USAGE_BLOCK_ALL, "")).trim();
+  const launchReceipt = LAUNCH_RECEIPT.test(text);
   return {
     text: launchReceipt ? "" : body,
     tokens: numberAfter("subagent_tokens") ?? numberAfter("total_tokens"),
@@ -401,7 +479,10 @@ export function toolDetail(
 ): string {
   if (isAgentTool(name)) {
     const type = str(input.subagent_type) ?? str(input.agentType) ?? "general";
-    return `${type} · ${oneLine(str(input.prompt) ?? "", 100)}`.trim();
+    const prompt = oneLine(str(input.prompt) ?? "", 100);
+    // Joined, not interpolated: an agent with no prompt yet read `general ·`,
+    // a separator with nothing on the other side of it.
+    return prompt ? `${type} · ${prompt}` : type;
   }
   const keys = Object.keys(input).filter((k) => k !== "description");
   if (keys.length === 0) return "";
@@ -413,9 +494,14 @@ export function toolDetail(
 
 /** One input value, short. Paths keep their tail for the same reason titles
  *  do — `file_path=/home/dev/code/gen/…` names no file. */
+/** Keys whose value is a path, matched at a word boundary. A bare
+ *  `/path|file/` also matched `profile`, and left-truncating a profile name
+ *  ("…ntic/default") hid its beginning to save a tail that was not one. */
+const PATH_KEY = /(?:^|[^a-z])(path|file|dir|folder)/i;
+
 const preview = (key: string, v: unknown): string => {
   if (typeof v === "string") {
-    return /path|file/i.test(key) ? tailPath(v, 40) : oneLine(v, 40);
+    return PATH_KEY.test(key) ? tailPath(v, 40) : oneLine(v, 40);
   }
   if (v === null || v === undefined) return "—";
   if (typeof v === "object") return Array.isArray(v) ? `[${v.length}]` : "{…}";

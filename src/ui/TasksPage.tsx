@@ -8,7 +8,7 @@
  *    result yet is running.
  */
 import { useLocal, type VNode } from "aio/air";
-import { session } from "../cell/session.ts";
+import { view } from "../cell/session.ts";
 import {
   decidedPermissions,
   runningTasks,
@@ -17,24 +17,27 @@ import {
 } from "../cell/session.ts";
 import type { BackgroundTask } from "../type/claude.ts";
 import { ago, clock, duration } from "../lib/format.ts";
-import { Empty, Panel, Pill, useNow } from "./parts.tsx";
+import { Empty, matches, Panel, Pill, Search, useNow } from "./parts.tsx";
 import { NoSelection, PageHead, RunDetail, RunList } from "./RunViews.tsx";
 import { PermissionRow } from "./PermissionPrompt.tsx";
 import { IconTasks, IconTerminal } from "./icons.tsx";
 
 export function TasksPage(): VNode {
   const [selected, setSelected] = useLocal<string | null>(null);
+  const [query, setQuery] = useLocal("");
 
-  const tools = toolRuns();
+  const all = toolRuns();
+  const tools = all.filter((r) => matches(query, r.title, r.name, r.detail));
   const runs = tools.slice().reverse();
   const current = tools.find((r) => r.id === selected) ?? runs[0] ?? null;
   const busy = runningTools().length;
-  const bg = session.tasks;
+  const bg = view().tasks;
   const decided = decidedPermissions();
 
   return (
     <div class="page">
       <PageHead
+        scope="session"
         title="Tasks"
         sub={`${runningTasks().length} background · ${busy} tool calls running`}
       />
@@ -73,7 +76,7 @@ export function TasksPage(): VNode {
             )}
         </Panel>
 
-        {tools.length === 0
+        {all.length === 0
           ? (
             <Panel flush title="Tool calls">
               <Empty
@@ -85,12 +88,35 @@ export function TasksPage(): VNode {
           )
           : (
             <div class="split">
-              <Panel flush title={`Tool calls · ${tools.length}`}>
-                <RunList
-                  runs={runs}
-                  selectedId={current?.id ?? null}
-                  onSelect={setSelected}
-                />
+              <Panel
+                flush
+                title={query.trim()
+                  ? `Tool calls · ${tools.length} of ${all.length}`
+                  : `Tool calls · ${tools.length}`}
+                actions={
+                  <Search
+                    value={query}
+                    onChange={setQuery}
+                    label="Filter tool calls"
+                    placeholder="Filter calls…"
+                  />
+                }
+              >
+                {runs.length === 0
+                  ? (
+                    <Empty
+                      icon={IconTerminal({ size: 20 })}
+                      title="Nothing matches"
+                      hint="No call in this session matches that filter — clear it to see them all."
+                    />
+                  )
+                  : (
+                    <RunList
+                      runs={runs}
+                      selectedId={current?.id ?? null}
+                      onSelect={setSelected}
+                    />
+                  )}
               </Panel>
               {current ? <RunDetail run={current} /> : (
                 <NoSelection

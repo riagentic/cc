@@ -98,63 +98,6 @@ Deno.test("a CLI that answers the handshake is ready before any turn", () =>
     assertEquals(session.turnStartedAt, null);
   }));
 
-Deno.test("memory is measured on start, not on a first turn", () =>
-  withStub(STUB, async (dir) => {
-    await Deno.writeTextFile(`${dir}/CLAUDE.md`, "# project memory\nrules.\n");
-    await session.start();
-    for (let i = 0; i < 100 && session.status === "starting"; i++) {
-      await delay(20);
-    }
-    assertEquals(session.status, "ready");
-
-    // The only trigger used to be `system/init`, which the CLI holds back until
-    // a turn begins — so a running session's Memory page read "Not scanned"
-    // until somebody typed. Nothing is sent here on purpose.
-    for (let i = 0; i < 100 && session.memory.length === 0; i++) {
-      await delay(20);
-    }
-    assertEquals(session.turns, 0);
-    assertEquals(session.messages.length, 0);
-    assertEquals(
-      session.memory.some((f) => f.path === `${dir}/CLAUDE.md`),
-      true,
-    );
-    assertEquals(session.memoryScannedAt !== null, true);
-
-    // Pacing holds back a repeat of the same measurement, never a new one: the
-    // project is what the figure is about, so a different one is taken at once.
-    const first = session.memoryScannedAt;
-    await session.scanMemory(false);
-    assertEquals(session.memoryScannedAt, first); // same project, paced
-    const other = await Deno.makeTempDir();
-    try {
-      await Deno.writeTextFile(`${other}/CLAUDE.md`, "# elsewhere\n");
-      await workspace.addProject(other);
-      await session.start();
-      for (let i = 0; i < 100 && session.status === "starting"; i++) {
-        await delay(20);
-      }
-      for (
-        let i = 0;
-        i < 100 && !session.memory.some((f) => f.path === `${other}/CLAUDE.md`);
-        i++
-      ) {
-        await delay(20);
-      }
-      assertEquals(
-        session.memory.some((f) => f.path === `${other}/CLAUDE.md`),
-        true,
-      );
-      assertEquals(
-        session.memory.some((f) => f.path === `${dir}/CLAUDE.md`),
-        false,
-      );
-    } finally {
-      await session.stop();
-      await Deno.remove(other, { recursive: true }).catch(() => {});
-    }
-  }));
-
 Deno.test("Stop mid-turn is not a crash", () =>
   withStub(BUSY_STUB, async () => {
     await session.start();
@@ -178,3 +121,46 @@ Deno.test("Stop mid-turn is not a crash", () =>
     assertEquals(session.error, null);
     assertEquals(session.pid, null);
   }));
+
+/** Whether a pid is still a running process. */
+function alive(pid: number): boolean {
+  try {
+    Deno.kill(pid, "SIGCONT"); // a signal every live process accepts
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+Deno.test("stop() ends a child that ignores SIGTERM", async () => {
+  // `stop()` used to close stdin, wait 1.5s, send SIGTERM and return — so a CLI
+  // that ignored the signal and held its stdin open outlived the app silently,
+  // one more of them after every restart. SIGKILL is the stage that cannot be
+  // ignored, and this proves it is reached.
+  const dir = await Deno.makeTempDir();
+  const bin = `${dir}/stubborn.sh`;
+  await Deno.writeTextFile(
+    bin,
+    ["#!/bin/bash", "trap '' TERM", "sleep 60"].join("\n"),
+  );
+  await Deno.chmod(bin, 0o755);
+
+  const previous = Deno.env.get("CLAUDE_BIN");
+  Deno.env.set("CLAUDE_BIN", bin);
+  try {
+    const io = await import("../../cell/claude.server.ts");
+    const { pid } = await io.start(
+      "p1",
+      { cwd: dir, model: "haiku", permissionMode: "acceptEdits" },
+      { onEvent: () => {}, onDelta: () => {}, onExit: () => {} },
+    );
+    assertEquals(alive(pid), true);
+    await io.stop("p1");
+    // Reaped, so the pid is gone rather than left as a zombie.
+    assertEquals(alive(pid), false);
+  } finally {
+    if (previous === undefined) Deno.env.delete("CLAUDE_BIN");
+    else Deno.env.set("CLAUDE_BIN", previous);
+    await Deno.remove(dir, { recursive: true });
+  }
+});

@@ -4,6 +4,7 @@
  */
 import { assertEquals } from "@std/assert";
 import {
+  agentResultOf,
   blocksOf,
   contextUsed,
   contextWindowOf,
@@ -147,8 +148,31 @@ Deno.test("contextWindowOf — the CLI's own number wins over the fallback", () 
     ),
     400_000,
   );
-  // A model the map says nothing about falls back to the largest it does report.
-  assertEquals(contextWindowOf(result, 999, "claude-opus-5"), 1_000_000);
+  // A model the map says nothing about keeps the caller's fallback, which was
+  // read from that same model id. Borrowing another model's number would let a
+  // sub-agent's window stand in for the session's — the over-statement below.
+  assertEquals(contextWindowOf(result, 999, "claude-opus-5"), 999);
+  // With no model to attribute the turn to, the largest reported window is the
+  // only guess available, and still beats a bare default.
+  assertEquals(contextWindowOf(result, 999), 1_000_000);
+
+  // A sub-agent on the long-context variant of the *same* model must not widen
+  // the meter: `claude-sonnet-5[1m]` contains `claude-sonnet-5`, so a loose
+  // match alone reported a 1M window for a 200k conversation.
+  const withLong = {
+    modelUsage: {
+      "claude-sonnet-5": { contextWindow: 200_000 },
+      "claude-sonnet-5[1m]": { contextWindow: 1_000_000 },
+    },
+  };
+  assertEquals(contextWindowOf(withLong, 999, "claude-sonnet-5"), 200_000);
+  // …and the long-context session still reads its own, larger window.
+  assertEquals(
+    contextWindowOf(withLong, 999, "claude-sonnet-5[1m]"),
+    1_000_000,
+  );
+  // The alias, too: `sonnet` must not pick up the `[1m]` row.
+  assertEquals(contextWindowOf(withLong, 999, "sonnet"), 200_000);
 });
 
 Deno.test("fallbackWindow — matches on the alias inside a full model id", () => {
@@ -231,4 +255,75 @@ Deno.test("isInterruptAck — the id says which request the CLI just answered", 
   );
   assertEquals(isInterruptAck({ type: "result" }), false);
   assertEquals(isInterruptAck({ type: "control_response" }), false);
+});
+
+Deno.test("agentResultOf — a receipt is how a result opens, not a phrase it contains", () => {
+  // An agent reporting *on* async launches quoted the phrase, and the whole
+  // answer was thrown away as a launch receipt.
+  const prose =
+    'I audited the launcher.\n"Async agent launched successfully" ' +
+    "is printed before the work starts.\nUse task_completed instead.";
+  assertEquals(agentResultOf(prose).launchReceipt, false);
+  assertEquals(agentResultOf(prose).text, prose);
+
+  const receipt = "Async agent launched successfully. (internal metadata)\n" +
+    "agentId: abc\noutput_file: /tmp/x";
+  assertEquals(agentResultOf(receipt).launchReceipt, true);
+  assertEquals(agentResultOf(receipt).text, "");
+});
+
+Deno.test("agentResultOf — bookkeeping is trimmed from the tail, not the middle", () => {
+  // The CLI appends its metadata after the answer. Matching those shapes
+  // anywhere deleted a line out of the middle of an agent's own prose.
+  const body = "Summary:\nagentId: is a field you should set\ndone";
+  assertEquals(agentResultOf(body).text, body);
+  assertEquals(
+    agentResultOf("answer\nagentId: abc\noutput_file: /x").text,
+    "answer",
+  );
+
+  // Every usage block is stripped, not only the first — a result can quote
+  // another agent's, and the leftover rendered as the answer itself.
+  assertEquals(
+    agentResultOf("answer\n<usage>tool_uses: 3</usage>\nmore\n<usage>x</usage>")
+      .text,
+    "answer\n\nmore",
+  );
+
+  // The metric lookup is anchored: unanchored, `tool_uses` matched
+  // `subagent_tool_uses` first and reported another agent's figure.
+  assertEquals(
+    agentResultOf("<usage>subagent_tool_uses: 7\ntool_uses: 2</usage>")
+      .toolUses,
+    2,
+  );
+  assertEquals(
+    agentResultOf("<usage>total_duration_ms: 9000\nduration_ms: 12</usage>")
+      .durationMs,
+    12,
+  );
+});
+
+Deno.test("resultText — a bare-string content array is a real shape", () => {
+  // Some MCP servers send one; reading only the block shape lost the output
+  // entirely, which reads as a tool that returned nothing.
+  assertEquals(resultText(["hello", "world"]), "hello\nworld");
+  assertEquals(resultText([{ type: "text", text: "a" }]), "a");
+  assertEquals(resultText("plain"), "plain");
+  assertEquals(resultText(null), "");
+});
+
+Deno.test("toolDetail — no separator with nothing on the other side", () => {
+  assertEquals(toolDetail("Task", {}), "general");
+  assertEquals(
+    toolDetail("Task", { subagent_type: "x", prompt: "do it" }),
+    "x · do it",
+  );
+  // `profile` is not a path, and left-truncating it hid its beginning.
+  assertEquals(
+    toolDetail("X", { profile: `/very/long/${"a".repeat(60)}/end` }).startsWith(
+      "profile=/very",
+    ),
+    true,
+  );
 });

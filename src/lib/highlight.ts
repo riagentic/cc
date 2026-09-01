@@ -113,6 +113,12 @@ const OPERATORS = "+-*/%=<>!&|^~?:.,;()[]{}";
  * render as the code block itself.
  */
 export function highlight(src: string, lang = ""): Token[] {
+  // A fence language we have no dialect for is rendered plain. `canHighlight`
+  // existed to say this and nothing consulted it, so every unknown language got
+  // the JS-plus-`#`-comments `generic` dialect: a Markdown block had its
+  // `# Heading` greyed out as a comment, and an HTML line went grey from the
+  // first `#` onward. Wrong colour is worse than no colour.
+  if (!canHighlight(lang)) return src ? [{ kind: "plain", text: src }] : [];
   const d = dialectFor(lang);
   const out: Token[] = [];
   let plain = "";
@@ -159,13 +165,20 @@ export function highlight(src: string, lang = ""): Token[] {
 
     // strings (and template literals)
     if (c === '"' || c === "'" || c === "`") {
+      // Quotes end at the line break; backticks do not, because a template
+      // literal is genuinely multi-line. Without the boundary, one apostrophe in
+      // a comment or a word (`it's`) painted every following line as a string
+      // until the next quote — two lines of code the wrong colour, from one
+      // character. A regex literal holding a quote did the same.
+      const multiline = c === "`";
       let j = i + 1;
       while (j < src.length) {
         if (src[j] === "\\") j += 2;
         else if (src[j] === c) {
           j++;
           break;
-        } else j++;
+        } else if (!multiline && src[j] === "\n") break;
+        else j++;
       }
       const end = Math.min(j, src.length);
       // A quoted key ("count":) is a property, not a value. Without this, JSON

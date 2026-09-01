@@ -52,3 +52,19 @@ Deno.test("the stream-json contract is always present", () => {
   }
   assertEquals(a[a.indexOf("--output-format") + 1], "stream-json");
 });
+
+Deno.test("--effort is passed only when chosen", () => {
+  const base = {
+    cwd: "/p",
+    model: "sonnet",
+    permissionMode: "acceptEdits",
+  };
+  // The default is "leave the CLI's own setting alone" — passing a value the
+  // user never picked would silently override what they configured elsewhere.
+  assertEquals(buildArgs(base).includes("--effort"), false);
+  assertEquals(buildArgs({ ...base, effort: "" }).includes("--effort"), false);
+
+  const high = buildArgs({ ...base, effort: "high" });
+  assertEquals(high.includes("--effort"), true);
+  assertEquals(high[high.indexOf("--effort") + 1], "high");
+});

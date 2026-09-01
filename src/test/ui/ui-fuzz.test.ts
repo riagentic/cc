@@ -127,12 +127,23 @@ const event = () =>
   ]) as Record<string, unknown>;
 
 testUI(App, "ui fuzz: the app never renders blank", async (ui: any) => {
+  // Every destination in the rail. A page added without being walked here is a
+  // page whose first blank render nobody notices.
   const links = [
     "ChatLink",
     "SubAgentsLink",
     "TasksLink",
     "ActivityLink",
+    "JobsLink",
+    "LoopsLink",
+    "TreeLink",
     "MemoryLink",
+    "SkillsLink",
+    "CommandsLink",
+    "MCPLink",
+    "PluginsLink",
+    "HooksLink",
+    "StorageLink",
     "SettingsLink",
   ];
   ui.ChatLink.click();

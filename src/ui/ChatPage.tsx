@@ -9,7 +9,7 @@
 import { afterRender, onMount, useLocal, useRef, type VNode } from "aio/air";
 import { Markdown } from "./Markdown.tsx";
 import { highlight } from "../lib/highlight.ts";
-import { session } from "../cell/session.ts";
+import { session, view } from "../cell/session.ts";
 import { workspace } from "../cell/workspace.ts";
 import type { Block, Message } from "../type/claude.ts";
 import { clock, duration, oneLine } from "../lib/format.ts";
@@ -51,14 +51,14 @@ function Thread(): VNode {
     if (el && stick.current) el.scrollTop = el.scrollHeight;
   });
 
-  const messages = session.messages;
+  const messages = view().messages;
 
   return (
     <div class="chat" ref={ref} onScroll={onScroll}>
       <div class="thread">
-        {session.error && (
+        {view().error && (
           <Banner onDismiss={() => session.dismissError()}>
-            {session.error}
+            {view().error}
           </Banner>
         )}
         {workspace.cliMissing && (
@@ -69,11 +69,11 @@ function Thread(): VNode {
           </Banner>
         )}
 
-        {messages.length === 0 && !session.streaming
+        {messages.length === 0 && !view().streaming
           ? <Welcome />
           : messages.map((m) => <MessageRow key={m.id} message={m} />)}
 
-        {session.streaming && <Streaming />}
+        {view().streaming && <Streaming />}
       </div>
     </div>
   );
@@ -190,7 +190,7 @@ function ToolChip(
   props: { id: string; name: string; input: Record<string, unknown> },
 ): VNode {
   const [open, setOpen] = useLocal(false);
-  const run = session.tools.find((t) => t.id === props.id);
+  const run = view().tools.find((t) => t.id === props.id);
   const running = run !== undefined && run.endedAt === null;
   const failed = run?.ok === false;
   // A call held at a permission prompt is not "running" — nothing is happening
@@ -260,7 +260,7 @@ function ToolChip(
 /** The block being written right now — coalesced at ~10 Hz upstream, so this
  *  reads as smooth streaming without a dispatch per token. */
 function Streaming(): VNode | null {
-  const s = session.streaming;
+  const s = view().streaming;
   if (!s) return null;
   return (
     <article class="msg">
@@ -293,7 +293,20 @@ function Streaming(): VNode | null {
 function Composer(): VNode {
   const ref = useRef<HTMLTextAreaElement>(null!);
   const [hasText, setHasText] = useLocal(false);
-  const working = session.status === "working";
+  // How far back through the sent turns the user has walked. `-1` is "not
+  // browsing" — the draft in the box is their own.
+  const [recall, setRecall] = useLocal(-1);
+  const working = view().status === "working";
+
+  // Derived from the transcript rather than kept in a local list: these *are*
+  // the turns this session sent, so the history survives switching pages and
+  // can never drift from what is on screen.
+  const history = view().messages
+    .filter((m) => m.role === "user" && m.parentToolUseId === null)
+    .map((m) =>
+      m.blocks.filter((b) => b.kind === "text").map((b) => b.text).join("\n")
+    )
+    .filter((t) => t.trim() !== "");
 
   onMount(() => ref.current?.focus());
 
@@ -311,13 +324,55 @@ function Composer(): VNode {
     if (!text.trim()) return;
     el.value = "";
     setHasText(false);
+    setRecall(-1);
     resize();
     void session.send(text);
   };
 
+  /** Walk the sent turns. `step` is +1 for older, -1 for newer. */
+  const browse = (step: number) => {
+    const el = ref.current;
+    if (!el || history.length === 0) return false;
+    const next = recall + step;
+    if (next < -1 || next >= history.length) return false;
+    setRecall(next);
+    el.value = next === -1 ? "" : history[history.length - 1 - next];
+    setHasText(el.value.trim().length > 0);
+    resize();
+    // Caret to the end: the point of recalling a turn is to edit its tail.
+    const end = el.value.length;
+    el.setSelectionRange(end, end);
+    return true;
+  };
+
   const onKeyDown = (e: KeyboardEvent) => {
+    const el = ref.current;
+
+    // Recall a previous turn — but only from an empty box, or while already
+    // walking the history. Stealing Up from someone editing a paragraph would
+    // destroy the draft they are in the middle of writing.
+    if ((e.key === "ArrowUp" || e.key === "ArrowDown") && !e.shiftKey) {
+      const browsing = recall !== -1;
+      const empty = (el?.value ?? "") === "";
+      if ((browsing || empty) && browse(e.key === "ArrowUp" ? 1 : -1)) {
+        e.preventDefault();
+      }
+      return;
+    }
+    if (e.key === "Escape" && recall !== -1) {
+      e.preventDefault();
+      browse(-1 - recall); // back to the empty draft
+      return;
+    }
+
     if (e.key !== "Enter") return;
     if (e.shiftKey) return; // Shift+Enter is a newline, always
+    // Mid-composition Enter belongs to the input method, not to us: for anyone
+    // typing Japanese, Chinese or Korean, sending here fires on the keystroke
+    // that *accepts a candidate* and posts a half-finished sentence.
+    // `keyCode === 229` is the same signal from browsers that predate
+    // `isComposing`.
+    if (e.isComposing || e.keyCode === 229) return;
     e.preventDefault();
     submit();
   };
@@ -334,6 +389,8 @@ function Composer(): VNode {
           aria-label="Message Claude Code"
           onInput={() => {
             setHasText((ref.current?.value.trim().length ?? 0) > 0);
+            // Typing is editing a draft, not still walking the history.
+            if (recall !== -1) setRecall(-1);
             resize();
           }}
           onKeyDown={onKeyDown}
@@ -343,6 +400,12 @@ function Composer(): VNode {
             <span class="kbd">Enter</span> to send ·{" "}
             <span class="kbd">Shift</span>+<span class="kbd">Enter</span>{" "}
             for a new line
+            {history.length > 0 && (
+              <>
+                {" · "}
+                <span class="kbd">↑</span> for the last turn
+              </>
+            )}
           </span>
           {working && (
             <button

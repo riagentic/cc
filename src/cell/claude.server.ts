@@ -8,9 +8,15 @@
  * ever executes there (dep/aio/docs/build/imports.md §2, and the
  * dep/aio/examples/disk app for the same shape end to end).
  *
- * The session runs as ONE long-lived `claude -p --input-format stream-json`
- * process: every turn reuses it, so context, tools and MCP servers are paid
- * for once. Turns are written to stdin as NDJSON, events read from stdout.
+ * A session is ONE long-lived `claude -p --input-format stream-json` process:
+ * every turn reuses it, so context, tools and MCP servers are paid for once.
+ * Turns are written to stdin as NDJSON, events read from stdout.
+ *
+ * There is one such process **per project**, held in a registry keyed by the
+ * project id, because a project's conversation is the thing a user switches
+ * between — and a switch that stopped the turn you left running would make the
+ * switch itself the expensive operation. Every function here therefore takes
+ * the key of the session it acts on; nothing addresses "the" session.
  */
 import { log } from "aio";
 // Pure, dependency-free readers over the same protocol — one parser and one
@@ -59,18 +65,38 @@ export type StartOptions = {
   skipPermissions?: boolean;
   /** Resume a previous CLI session id instead of starting a fresh one. */
   resume?: string | null;
+  /** `--effort`: how hard the model works before answering. `""` leaves the
+   *  CLI's own setting alone rather than overriding it. */
+  effort?: string;
 };
 
 type Session = {
+  /** The project this process belongs to. */
+  key: string;
   child: Deno.ChildProcess;
   stdin: WritableStreamDefaultWriter<Uint8Array>;
   pid: number;
   closed: boolean;
 };
 
-/** At most one session at a time — the app is a control surface for one
- *  project, and a second process would silently double every token cost. */
-let live: Session | null = null;
+/**
+ * Every live session, by project id.
+ *
+ * At most one per project — a second process for the same project would
+ * silently double that project's token cost, which is the invariant `start`
+ * enforces by stopping the incumbent first. Across projects, concurrency is the
+ * point: a turn running in one project keeps running while you read another.
+ */
+const live = new Map<string, Session>();
+
+/** How many sessions are running right now. */
+export const liveCount = (): number => live.size;
+
+/** Whether this project has a process of its own. */
+export const isLive = (key: string): boolean => {
+  const s = live.get(key);
+  return s !== undefined && !s.closed;
+};
 
 const enc = new TextEncoder();
 const DELTA_FLUSH_MS = 90;
@@ -122,6 +148,10 @@ export function buildArgs(opts: StartOptions): string[] {
   // outside its working directory, which is what "denied" almost always means.
   for (const dir of opts.allowedDirs ?? []) args.push("--add-dir", dir);
 
+  // Only when chosen: passing a value the user did not pick would override
+  // whatever they configured for the CLI itself.
+  if (opts.effort) args.push("--effort", opts.effort);
+
   if (opts.resume) args.push("--resume", opts.resume);
   return args;
 }
@@ -134,14 +164,22 @@ export function buildArgs(opts: StartOptions): string[] {
  * is not usable, rather than leaving a dead "starting" state behind.
  */
 export async function start(
+  key: string,
   opts: StartOptions,
   hooks: Hooks,
 ): Promise<{ pid: number }> {
-  await stop();
+  // This project's incumbent only. Other projects' sessions are untouched —
+  // that is what makes switching free.
+  await stop(key);
 
   const stat = await Deno.stat(opts.cwd).catch(() => null);
   if (!stat?.isDirectory) {
-    throw new Error(`Project directory not found: ${opts.cwd}`);
+    // Named remedy, not just a fact: this is what a user sees when a project
+    // they added weeks ago has since been deleted or unmounted.
+    throw new Error(
+      `The project folder is gone: ${opts.cwd} — pick another project in ` +
+        `Settings, or remove it from the list.`,
+    );
   }
 
   const args = buildArgs(opts);
@@ -173,12 +211,14 @@ export async function start(
   }
 
   const session: Session = {
+    key,
     child,
     stdin: child.stdin.getWriter(),
     pid: child.pid,
     closed: false,
   };
-  live = session;
+  live.set(key, session);
+  installExitGuard();
 
   let stderrTail = "";
   const readErr = pump(child.stderr, (chunk) => {
@@ -191,7 +231,7 @@ export async function start(
   // so the CLI never has to guess whether anyone is listening — and its answer
   // is what marks the session ready, since the CLI holds `system/init` back
   // until a first turn begins.
-  await write({
+  await write(key, {
     type: "control_request",
     request_id: `${HANDSHAKE_PREFIX}${session.pid}`,
     request: { subtype: "initialize", hooks: {} },
@@ -205,7 +245,13 @@ export async function start(
   (async () => {
     const status = await child.status.catch(() => ({ code: -1 }));
     await Promise.allSettled([readOut, readErr]);
-    if (live === session) live = null;
+    // Identity, not key: a restart of the same project has already replaced the
+    // entry, and deleting it here would drop the *new* session from the
+    // registry — leaving a running process nothing could stop.
+    if (live.get(key) === session) {
+      live.delete(key);
+      releaseExitGuardIfIdle();
+    }
     session.closed = true;
     hooks.onExit(status.code, stderrTail.trim());
   })();
@@ -215,8 +261,8 @@ export async function start(
 
 /** Queue a user turn. The CLI accepts input at any time; a turn sent while one
  *  is running is queued by the CLI itself rather than dropped. */
-export async function send(text: string): Promise<void> {
-  await write({
+export async function send(key: string, text: string): Promise<void> {
+  await write(key, {
     type: "user",
     message: { role: "user", content: [{ type: "text", text }] },
   });
@@ -230,11 +276,12 @@ export async function send(text: string): Promise<void> {
  * answered here or by {@link denyTool}, and nothing else unblocks it.
  */
 export async function allowTool(
+  key: string,
   requestId: string,
   input: Record<string, unknown>,
   updatedPermissions: unknown[] = [],
 ): Promise<void> {
-  await write({
+  await write(key, {
     type: "control_response",
     response: {
       subtype: "success",
@@ -249,10 +296,11 @@ export async function allowTool(
 /** Refuse a `can_use_tool` request. `message` reaches the model as the tool's
  *  error, so it is the user's own words about why, not a generic refusal. */
 export async function denyTool(
+  key: string,
   requestId: string,
   message: string,
 ): Promise<void> {
-  await write({
+  await write(key, {
     type: "control_response",
     response: {
       subtype: "success",
@@ -270,38 +318,119 @@ let interrupts = 0;
  *  The id carries {@link INTERRUPT_PREFIX} and a counter rather than a clock:
  *  the prefix is how the reducer tells this ack apart from the handshake's, and
  *  a counter cannot collide the way two interrupts in one millisecond can. */
-export async function interrupt(): Promise<void> {
-  await write({
+export async function interrupt(key: string): Promise<void> {
+  await write(key, {
     type: "control_request",
     request_id: `${INTERRUPT_PREFIX}${++interrupts}`,
     request: { subtype: "interrupt" },
   });
 }
 
-/** End the session. Closing stdin is the graceful path; SIGTERM is the floor
- *  so a wedged child can never outlive the app. */
-export async function stop(): Promise<void> {
-  const session = live;
+/** How long each stage of the teardown gets before the next one is tried. */
+const CLOSE_GRACE_MS = 1_500;
+const SIGNAL_GRACE_MS = 1_500;
+
+/**
+ * End the session, and make sure it is actually ended.
+ *
+ * Three stages, escalating: close stdin (the CLI's own graceful exit), then
+ * SIGTERM, then SIGKILL. The last one is not paranoia — it is the only stage
+ * that cannot be ignored, and without it `stop()` returned after 1.5 s
+ * reporting success while the child ran on: a `claude` still holding a model
+ * session, invisible to the app, one more of them after every restart.
+ */
+export async function stop(key: string): Promise<void> {
+  const session = live.get(key);
   if (!session || session.closed) {
-    live = null;
+    live.delete(key);
+    releaseExitGuardIfIdle();
     return;
   }
   session.closed = true;
-  live = null;
+  live.delete(key);
+
   await session.stdin.close().catch(() => {});
-  const ended = await Promise.race([
+  if (await settled(session, CLOSE_GRACE_MS)) return releaseExitGuardIfIdle();
+
+  signal(session, "SIGTERM");
+  if (await settled(session, SIGNAL_GRACE_MS)) return releaseExitGuardIfIdle();
+
+  // The floor. Nothing survives this, which is the point.
+  log.warn("claude", "session ignored SIGTERM — killing", { pid: session.pid });
+  signal(session, "SIGKILL");
+  await settled(session, SIGNAL_GRACE_MS);
+  releaseExitGuardIfIdle();
+}
+
+/** End every session. What app shutdown needs, and the only caller that should
+ *  ever address them all at once. */
+export async function stopAll(): Promise<void> {
+  await Promise.allSettled([...live.keys()].map((key) => stop(key)));
+}
+
+/** True once the child has exited, or `false` if `ms` passes first. */
+function settled(session: Session, ms: number): Promise<boolean> {
+  return Promise.race([
     session.child.status.then(() => true).catch(() => true),
-    delay(1_500).then(() => false),
+    delay(ms).then(() => false),
   ]);
-  if (!ended) {
-    try {
-      session.child.kill("SIGTERM");
-    } catch (e) {
-      log.debug("claude", "kill after graceful close failed", {
-        error: e instanceof Error ? e.message : String(e),
-      });
-    }
+}
+
+function signal(session: Session, sig: "SIGTERM" | "SIGKILL") {
+  try {
+    session.child.kill(sig);
+  } catch (e) {
+    // Already gone is the common case and not a problem; anything else is.
+    log.debug("claude", `${sig} failed`, {
+      error: e instanceof Error ? e.message : String(e),
+    });
   }
+}
+
+/* ── exit guard ──────────────────────────────────────────────────────────────
+ *
+ * The child is a real process and outlives this one unless something ends it.
+ * `claude` does exit when its stdin closes, so a hard-killed app is survivable —
+ * but that is the CLI being well behaved, not the app being correct, and it
+ * covers none of the paths where the app *can* clean up after itself.
+ *
+ * Installed only while a session is live, and removed with it, so nothing here
+ * is holding the process open or intercepting signals an idle app should see.
+ */
+
+let guard: { sigint: () => void; sigterm: () => void } | null = null;
+
+/** Last resort on a normal exit: `unload` cannot await, so this is a bare
+ *  synchronous kill rather than the graceful sequence above. */
+const onUnload = () => {
+  for (const session of live.values()) {
+    if (!session.closed) signal(session, "SIGKILL");
+  }
+};
+
+function installExitGuard() {
+  if (guard) return;
+  const bye = (code: number) => () => {
+    // Ends every child *before* this process goes, then exits deliberately:
+    // taking over the signal means nothing else will.
+    void stopAll().finally(() => Deno.exit(code));
+  };
+  guard = { sigint: bye(130), sigterm: bye(143) };
+  Deno.addSignalListener("SIGINT", guard.sigint);
+  Deno.addSignalListener("SIGTERM", guard.sigterm);
+  globalThis.addEventListener("unload", onUnload);
+}
+
+/** The guard exists to protect running children, so it is released only once
+ *  the last one is gone — not when any single session ends. */
+function releaseExitGuardIfIdle() {
+  if (!guard || live.size > 0) return;
+  try {
+    Deno.removeSignalListener("SIGINT", guard.sigint);
+    Deno.removeSignalListener("SIGTERM", guard.sigterm);
+  } catch { /* never registered on this platform — nothing to undo */ }
+  globalThis.removeEventListener("unload", onUnload);
+  guard = null;
 }
 
 /* ── environment ─────────────────────────────────────────────────────────── */
@@ -451,8 +580,8 @@ const labelFor = (path: string, home: string): string =>
 
 /* ── plumbing ────────────────────────────────────────────────────────────── */
 
-async function write(frame: unknown): Promise<void> {
-  const session = live;
+async function write(key: string, frame: unknown): Promise<void> {
+  const session = live.get(key);
   if (!session || session.closed) throw new Error("No session is running.");
   await session.stdin.write(enc.encode(`${JSON.stringify(frame)}\n`));
 }

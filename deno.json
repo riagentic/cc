@@ -1,7 +1,7 @@
 {
-  "aioVersion": "v1.0.0-alpha55",
+  "aioVersion": "v1.0.0-alpha73",
   "title": "Claude Control",
-  "version": "0.1.0",
+  "version": "0.1",
   "client": "electron",
   "build": {
     "targets": [
@@ -55,7 +55,9 @@
     "lint": "deno run -A ./dep/aio/aiol/mod.ts",
     "doctor": "deno run -A ./dep/aio/src/server/doctor.ts",
     "am": "deno run -A ./dep/aio/src/am.ts",
-    "install:electron": "deno install --allow-scripts=npm:electron npm:electron"
+    "install:electron": "deno install --allow-scripts=npm:electron npm:electron",
+    "publish": "deno run -A ./dep/aio/src/am.ts publish",
+    "ship": "deno run -A ./dep/aio/src/build/ship.ts"
   },
   "fmt": {
     "exclude": [

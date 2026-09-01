@@ -86,3 +86,50 @@ Deno.test("an escaped quote does not end the string", () => {
     true,
   );
 });
+
+Deno.test("a language we have no dialect for is rendered plain, not guessed", () => {
+  // `canHighlight` existed and nothing consulted it, so every unknown fence got
+  // the JS-plus-hash-comments dialect: Markdown had its `# Heading` greyed out
+  // as a comment, and an HTML line went grey from the first `#` onward.
+  assertEquals(canHighlight("md"), false);
+  assertEquals(highlight("# Heading\nsome **markdown**", "md"), [
+    { kind: "plain", text: "# Heading\nsome **markdown**" },
+  ]);
+  assertEquals(highlight("<p>hello # world</p>", "html").length, 1);
+  assertEquals(highlight("", "md"), []);
+
+  // The dialects we do have are untouched.
+  assertEquals(kinds("const x = 1", "ts").includes("keyword"), true);
+  assertEquals(kinds('{"a": 1}', "json").includes("property"), true);
+  assertEquals(kinds("# note\nls", "bash").includes("comment"), true);
+  // No fence language at all still gets the generic pass.
+  assertEquals(kinds("const x = 1", "").includes("keyword"), true);
+});
+
+Deno.test("a quote does not colour the lines below it", () => {
+  // One apostrophe in a word (`it's`) painted every following line as a string
+  // until the next quote — two lines of code the wrong colour, from one
+  // character. A regex literal holding a quote did the same.
+  const py = "s = it's\nprint('hello')\nreturn 1";
+  assertEquals(
+    highlight(py, "python").some((t) =>
+      t.kind === "string" && t.text.includes("\n")
+    ),
+    false,
+  );
+  assertEquals(
+    highlight('const r = /a"b/; const s = "x";', "ts").some((t) =>
+      t.kind === "string" && t.text.includes("\n")
+    ),
+    false,
+  );
+  // A template literal is genuinely multi-line and still spans.
+  assertEquals(
+    highlight("const a = `line1\nline2`;", "ts").some((t) =>
+      t.kind === "string" && t.text.includes("\n")
+    ),
+    true,
+  );
+  // The one hard invariant holds throughout.
+  assertEquals(text(highlight(py, "python")), py);
+});

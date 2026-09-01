@@ -6,21 +6,30 @@
  * Changes that need a fresh process say so instead of pretending to apply.
  */
 import { useLocal, useRef, type VNode } from "aio/air";
-import { session } from "../cell/session.ts";
-import { activeProject, workspace } from "../cell/workspace.ts";
-import { MODELS, PERMISSION_MODES } from "../lib/stream.ts";
-import { ago, clock, tildePath, usd } from "../lib/format.ts";
+import { session, view } from "../cell/session.ts";
+import { activeProject, activeSettings, workspace } from "../cell/workspace.ts";
+import { EFFORTS, MODELS, PERMISSION_MODES } from "../lib/stream.ts";
+import {
+  ago,
+  clock,
+  duration,
+  tailPath,
+  tildePath,
+  until,
+  usd,
+} from "../lib/format.ts";
 import {
   Banner,
   Choice,
   Empty,
+  Meter,
   Panel,
   Pill,
   Segmented,
   Tags,
   useNow,
 } from "./parts.tsx";
-import { PageHead } from "./RunViews.tsx";
+import { PageHead, ScopeTag } from "./RunViews.tsx";
 import {
   IconAlert,
   IconCheck,
@@ -33,17 +42,19 @@ import {
 } from "./icons.tsx";
 
 export function SettingsPage(): VNode {
-  const project = activeProject();
+  // One resolution per render: `view()` resolves by key, and repeating
+  // the call also defeats every narrowing of its nullable fields.
+  const sess = view();
   // Slow, but ticking: "started 3s ago" otherwise stayed "3s ago" for as long as
   // an idle session left the page with nothing else to re-render it.
   const now = useNow(true, 10_000);
-  const live = session.status !== "offline" && session.status !== "error";
+  const live = sess.status !== "offline" && sess.status !== "error";
 
   return (
     <div class="page">
       <PageHead
         title="Settings"
-        sub="Project, model, permissions and session"
+        sub="Some of this belongs to the project, some to the machine"
         actions={
           <div style={{ display: "flex", gap: "8px" }}>
             {live
@@ -67,11 +78,11 @@ export function SettingsPage(): VNode {
               )
               : (
                 <>
-                  {session.resumeId && (
+                  {sess.resumeId && (
                     <button
                       type="button"
                       class="btn btn--sm"
-                      title={`Resume CLI session ${session.resumeId} — the model keeps its context; the transcript here starts empty`}
+                      title={`Resume CLI session ${sess.resumeId} — the model keeps its context; the transcript here starts empty`}
                       onClick={() => session.start(true)}
                     >
                       {IconRefresh({ size: 13 })} Resume
@@ -103,10 +114,19 @@ export function SettingsPage(): VNode {
           </Banner>
         )}
 
+        {
+          /* Said once, above the panels that mean it: these are settings for
+            ONE codebase. Every project keeps its own, seeded from what the CLI
+            is configured to do in that directory, and a change here follows the
+            project rather than the app — which is the whole point, and is also
+            the thing a reader would otherwise have to guess. */
+        }
+        <ProjectScope />
+
         <div class="grid grid--2">
           <Projects />
 
-          <Panel title="Model" actions={<Pill>{workspace.model}</Pill>}>
+          <Panel title="Model" actions={<Pill>{activeSettings().model}</Pill>}>
             <div class="choices">
               {MODELS.map((m) => (
                 <Choice
@@ -114,7 +134,7 @@ export function SettingsPage(): VNode {
                   label={m.label}
                   name={m.label}
                   hint={m.hint}
-                  selected={workspace.model === m.id}
+                  selected={activeSettings().model === m.id}
                   onSelect={() => workspace.setModel(m.id)}
                 />
               ))}
@@ -122,8 +142,33 @@ export function SettingsPage(): VNode {
           </Panel>
 
           <Panel
+            title="Effort"
+            actions={<Pill>{activeSettings().effort || "default"}</Pill>}
+          >
+            <div class="choices">
+              {EFFORTS.map((e) => (
+                <Choice
+                  key={e.id || "default"}
+                  label={e.label}
+                  name={e.label}
+                  hint={e.hint}
+                  selected={activeSettings().effort === e.id}
+                  onSelect={() => workspace.setEffort(e.id)}
+                />
+              ))}
+            </div>
+            <div class="field__hint" style={{ marginTop: "10px" }}>
+              How hard the model works before it answers (<code>
+                --effort
+              </code>). <b>Default</b>{" "}
+              passes no flag at all, so whatever you have configured for the CLI
+              itself still applies.
+            </div>
+          </Panel>
+
+          <Panel
             title="Permissions"
-            actions={<Pill>{workspace.permissionMode}</Pill>}
+            actions={<Pill>{activeSettings().permissionMode}</Pill>}
           >
             <div class="choices">
               {PERMISSION_MODES.map((m) => (
@@ -132,7 +177,7 @@ export function SettingsPage(): VNode {
                   label={m.label}
                   name={m.label}
                   hint={m.hint}
-                  selected={workspace.permissionMode === m.id}
+                  selected={activeSettings().permissionMode === m.id}
                   onSelect={() => workspace.setPermissionMode(m.id)}
                 />
               ))}
@@ -153,12 +198,12 @@ export function SettingsPage(): VNode {
 
           <Panel
             title="Allowed directories"
-            actions={<Pill>{workspace.allowedDirs.length}</Pill>}
+            actions={<Pill>{activeSettings().allowedDirs.length}</Pill>}
           >
             <AllowedDirs />
           </Panel>
 
-          <Panel title="Appearance">
+          <Panel title="Appearance" actions={<ScopeTag scope="machine" />}>
             <div class="field">
               <span class="field__label">Theme</span>
               <Segmented
@@ -179,60 +224,166 @@ export function SettingsPage(): VNode {
 
         <AllowAll />
 
-        <Panel title="Session">
+        <Panel title="Session" actions={<ScopeTag scope="session" />}>
           <div class="kv">
             <span class="kv__k">Status</span>
-            <span class="kv__v">{session.status}</span>
+            <span class="kv__v">{sess.status}</span>
             <span class="kv__k">Working directory</span>
             <span class="kv__v mono">
-              {session.cwd ? tildePath(session.cwd, workspace.home) : "—"}
+              {sess.cwd ? tildePath(sess.cwd, workspace.home) : "—"}
             </span>
             <span class="kv__k">CLI session id</span>
-            <span class="kv__v mono">{session.sessionId ?? "—"}</span>
+            <span class="kv__v mono">{sess.sessionId ?? "—"}</span>
             <span class="kv__k">Process</span>
-            <span class="kv__v mono">{session.pid ?? "—"}</span>
+            <span class="kv__v mono">{sess.pid ?? "—"}</span>
             <span class="kv__k">Claude Code</span>
             <span class="kv__v mono">
-              {session.meta.version || workspace.cliVersion || "not found"}
+              {sess.meta.version || workspace.cliVersion || "not found"}
             </span>
             <span class="kv__k">Started</span>
             <span class="kv__v">
-              {session.startedAt
-                ? `${clock(session.startedAt)} · ${ago(session.startedAt, now)}`
+              {sess.startedAt
+                ? `${clock(sess.startedAt)} · ${ago(sess.startedAt, now)}`
                 : "—"}
             </span>
-            <span class="kv__k">Turns · cost</span>
-            <span class="kv__v">{session.turns} · {usd(session.cost)}</span>
-            {session.rateLimit && (
+            {sess.turnEnd && (
               <>
-                <span class="kv__k">Rate limit</span>
+                <span class="kv__k">Last turn ended</span>
                 <span class="kv__v">
-                  {(session.rateLimit.utilization * 100).toFixed(0)}% of the
-                  {" "}
-                  {session.rateLimit.type.replace("_", "-")} window ·{" "}
-                  {session.rateLimit.status}
+                  {
+                    /* "completed" and "ran out of output tokens" look identical
+                      on screen and mean very different things about whether the
+                      answer you are reading is finished. */
+                  }
+                  {sess.turnEnd.reason || sess.turnEnd.stopReason || "—"}
+                  {sess.turnEnd.stopReason &&
+                      sess.turnEnd.stopReason !== sess.turnEnd.reason
+                    ? ` · ${sess.turnEnd.stopReason}`
+                    : ""}
+                  {sess.turnEnd.ttftMs > 0
+                    ? ` · first token in ${duration(sess.turnEnd.ttftMs)}`
+                    : ""}
+                </span>
+              </>
+            )}
+            {sess.agentStats && sess.agentStats.spawned > 0 && (
+              <>
+                <span class="kv__k">Sub-agents last turn</span>
+                <span class="kv__v">
+                  {sess.agentStats.spawned} spawned ·{" "}
+                  {sess.agentStats.completed} completed
+                  {sess.agentStats.failed > 0
+                    ? ` · ${sess.agentStats.failed} failed`
+                    : ""}
+                  {sess.agentStats.killed > 0
+                    ? ` · ${sess.agentStats.killed} killed`
+                    : ""}
+                  {sess.agentStats.refused > 0
+                    ? ` · ${sess.agentStats.refused} refused`
+                    : ""}
+                </span>
+              </>
+            )}
+            <span class="kv__k">Turns · cost</span>
+            <span class="kv__v">
+              {sess.turns} · {usd(sess.cost)}
+              {sess.queuedTurns > 0 ? ` · ${sess.queuedTurns} queued` : ""}
+            </span>
+            {sess.meta.outputStyle && (
+              <>
+                <span class="kv__k">Output style</span>
+                <span class="kv__v">{sess.meta.outputStyle}</span>
+              </>
+            )}
+            {
+              /* Every window, with the time it resets. One headline percentage
+                and no reset time left the two questions that matter — which
+                limit, and how long until it lifts — both unanswered. */
+            }
+            {sess.rateLimit && (
+              <>
+                <span class="kv__k">Usage limits</span>
+                <span class="kv__v">
+                  <div style={{ display: "grid", gap: "4px" }}>
+                    {(sess.rateLimit.windows.length > 0
+                      ? sess.rateLimit.windows
+                      : [{
+                        name: sess.rateLimit.type || "window",
+                        utilization: sess.rateLimit.utilization,
+                        resetsAt: sess.rateLimit.resetsAt,
+                      }]).map((w) => (
+                        <div
+                          key={w.name}
+                          style={{
+                            display: "flex",
+                            gap: "8px",
+                            alignItems: "center",
+                          }}
+                        >
+                          <span style={{ minWidth: "72px" }}>
+                            {w.name.replace("_", "-")}
+                          </span>
+                          <span
+                            style={{
+                              minWidth: "132px",
+                              maxWidth: "180px",
+                              flex: 1,
+                            }}
+                          >
+                            <Meter value={w.utilization * 100} max={100} />
+                          </span>
+                          <span class="mono" style={{ minWidth: "38px" }}>
+                            {Math.round(w.utilization * 100)}%
+                          </span>
+                          <span style={{ color: "var(--ink-dim)" }}>
+                            {w.resetsAt > 0
+                              ? `resets ${until(w.resetsAt, now)}`
+                              : ""}
+                          </span>
+                        </div>
+                      ))}
+                    <span style={{ color: "var(--ink-dim)" }}>
+                      {sess.rateLimit.status}
+                      {sess.rateLimit.overage ? " · billed as overage" : ""}
+                    </span>
+                  </div>
                 </span>
               </>
             )}
           </div>
 
-          {session.meta.tools.length > 0 && (
+          {sess.meta.tools.length > 0 && (
             <>
               <div class="divider" />
               <div class="grid" style={{ gap: "10px" }}>
-                <Capability label="Tools" items={session.meta.tools} />
-                <Capability label="Agents" items={session.meta.agents} />
-                <Capability label="Skills" items={session.meta.skills} />
+                <Capability label="Tools" items={sess.meta.tools} />
+                <Capability label="Agents" items={sess.meta.agents} />
+                <Capability label="Skills" items={sess.meta.skills} />
                 <Capability
                   label="Slash commands"
-                  items={session.meta.commands}
+                  items={sess.meta.commands}
                   max={18}
                 />
-                {session.meta.mcp.length > 0 && (
+                {sess.meta.plugins.length > 0 && (
+                  <div class="field">
+                    <span class="field__label">
+                      Plugins · {sess.meta.plugins.length}
+                    </span>
+                    <div class="tags">
+                      {sess.meta.plugins.map((x) => (
+                        <span key={x.name} class="tag">
+                          {x.name}
+                          {x.version ? ` · ${x.version}` : ""}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {sess.meta.mcp.length > 0 && (
                   <div class="field">
                     <span class="field__label">MCP servers</span>
                     <div class="tags">
-                      {session.meta.mcp.map((m) => (
+                      {sess.meta.mcp.map((m) => (
                         <span key={m.name} class="tag">
                           {m.name} · {m.status}
                         </span>
@@ -245,12 +396,13 @@ export function SettingsPage(): VNode {
           )}
         </Panel>
 
-        <Panel title="Transcript">
+        <Panel title="Transcript" actions={<ScopeTag scope="session" />}>
           <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
             <button
               type="button"
               class="btn btn--sm"
-              onClick={() => session.clearTranscript()}
+              onClick={() =>
+                session.clearTranscript()}
             >
               {IconTrash({ size: 13 })} Clear the view
             </button>
@@ -261,6 +413,29 @@ export function SettingsPage(): VNode {
           </div>
         </Panel>
       </div>
+    </div>
+  );
+}
+
+/** Which project the settings below belong to. */
+function ProjectScope(): VNode {
+  const project = activeProject();
+  if (!project) {
+    return (
+      <Banner tone="warn">
+        No project selected — the settings below have nowhere to go. Pick one
+        from the dock on the left, or add one under Projects.
+      </Banner>
+    );
+  }
+  return (
+    <div class="scopebar">
+      <span class="scopebar__icon">{IconFolder({ size: 14 })}</span>
+      <span>
+        Model, effort, permissions and allowed directories below are{" "}
+        <b>{project.name}</b>&rsquo;s own, and are remembered with it. Every
+        project keeps its own set.
+      </span>
     </div>
   );
 }
@@ -291,7 +466,7 @@ function Capability(
  */
 function AllowAll(): VNode {
   const [armed, setArmed] = useLocal(false);
-  const on = workspace.skipPermissions;
+  const on = activeSettings().skipPermissions;
 
   if (on) {
     return (
@@ -395,7 +570,7 @@ function AllowedDirs(): VNode {
         </button>
       </div>
 
-      {workspace.allowedDirs.length === 0
+      {activeSettings().allowedDirs.length === 0
         ? (
           <div class="field__hint">
             Claude Code may only touch the project folder. Add one here when a
@@ -406,7 +581,7 @@ function AllowedDirs(): VNode {
         )
         : (
           <div class="choices">
-            {workspace.allowedDirs.map((d) => (
+            {activeSettings().allowedDirs.map((d) => (
               <div key={d} class="choice" style={{ cursor: "default" }}>
                 <span class="choice__label mono truncate" title={d}>
                   {tildePath(d, workspace.home)}
@@ -451,12 +626,23 @@ function Projects(): VNode {
       title="Projects"
       actions={
         <>
+          <ScopeTag scope="machine" />
+          {workspace.projects.some((p) => p.missing) && (
+            <button
+              type="button"
+              class="btn btn--ghost btn--sm"
+              title="Remove every project whose folder is gone. Their Claude Code history is untouched — delete that from Storage, where its size is shown."
+              onClick={() => workspace.removeMissingProjects()}
+            >
+              Remove gone
+            </button>
+          )}
           <button
             type="button"
             class="btn btn--sm btn--ghost"
-            title="Refresh git branch"
-            aria-label="Refresh git branch"
-            onClick={() => workspace.refreshGit()}
+            title="Re-check every project against the disk, and refresh the branch"
+            aria-label="Re-check projects"
+            onClick={() => workspace.refreshProjects()}
           >
             {IconRefresh({ size: 13 })}
           </button>
@@ -516,11 +702,17 @@ function Projects(): VNode {
                   >
                     {IconFolder({ size: 13 })}
                     {p.name}
-                    {p.branch && <Pill>{p.branch}</Pill>}
-                    {p.dirty && <Pill tone="warn">dirty</Pill>}
+                    {p.missing ? <Pill tone="danger">folder is gone</Pill> : (
+                      <>
+                        {p.branch && <Pill>{p.branch}</Pill>}
+                        {p.dirty && <Pill tone="warn">dirty</Pill>}
+                      </>
+                    )}
                   </span>
                 }
-                hint={tildePath(p.path, workspace.home)}
+                // Trimmed from the left: a path is read from its tail, and the
+                // first 60 characters of one say only which machine it is on.
+                hint={tailPath(tildePath(p.path, workspace.home), 52)}
                 selected={active?.id === p.id}
                 onSelect={() => workspace.select(p.id)}
                 trailing={
@@ -532,27 +724,52 @@ function Projects(): VNode {
                     }}
                   >
                     {active?.id === p.id && IconCheck({ size: 16 })}
-                    {workspace.projects.length > 1 && (
-                      <span
-                        role="button"
-                        tabIndex={0}
-                        class="btn btn--ghost btn--sm btn--icon"
-                        title={`Remove ${p.name}`}
-                        aria-label={`Remove ${p.name}`}
-                        onClick={(e: Event) => {
-                          e.stopPropagation();
-                          workspace.removeProject(p.id);
-                        }}
-                      >
-                        {IconTrash({ size: 13 })}
-                      </span>
-                    )}
+                    {
+                      /* Always removable. Gating this on "more than one
+                        project" was a dead end with no exit: a single project
+                        whose folder had been deleted could not be started and
+                        could not be removed either. */
+                    }
+                    <span
+                      role="button"
+                      tabIndex={0}
+                      class="btn btn--ghost btn--sm btn--icon"
+                      title={`Remove ${p.name}`}
+                      aria-label={`Remove ${p.name}`}
+                      onClick={(e: Event) => {
+                        e.stopPropagation();
+                        workspace.removeProject(p.id);
+                      }}
+                      // A `<span role="button">` gets no key handling for free,
+                      // and it cannot be a real `<button>` here — it sits inside
+                      // the row's own button, which nesting forbids. Enter and
+                      // Space are wired by hand so the row is operable from the
+                      // keyboard, not only the mouse.
+                      onKeyDown={(e: KeyboardEvent) => {
+                        if (e.key !== "Enter" && e.key !== " ") return;
+                        e.preventDefault();
+                        e.stopPropagation();
+                        workspace.removeProject(p.id);
+                      }}
+                    >
+                      {IconTrash({ size: 13 })}
+                    </span>
                   </span>
                 }
               />
             ))}
           </div>
         )}
+      {workspace.projects.some((p) => p.missing) && (
+        <div
+          class="field__hint"
+          style={{ marginTop: "10px", color: "var(--danger)" }}
+        >
+          A folder marked <b>gone</b>{" "}
+          is no longer on disk — a session cannot start in it. Select a
+          different project, or remove the row.
+        </div>
+      )}
       <div class="field__hint" style={{ marginTop: "10px" }}>
         Switching projects takes effect on the next session start.
       </div>

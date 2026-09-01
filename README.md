@@ -1,14 +1,51 @@
 # cc — Claude Control
 
 A desktop control surface for [Claude Code](https://claude.com/claude-code):
-chat, live monitoring, and settings for one project at a time, built on
-[aio](https://github.com/riagentic/aio).
+chat, live monitoring, background work, and settings — across every project you
+work in — built on [aio](https://github.com/riagentic/aio).
 
-One long-lived `claude` process backs the whole app, so a session's context,
-tools and MCP servers are paid for once and every turn continues the same
-conversation.
+**Every project is its own everything.** Its own conversation, its own
+long-lived `claude` process, its own model, effort, permission mode and allowed
+directories — all remembered. They run _concurrently_: a turn you start in one
+codebase keeps working while you read another, and lands in that project's
+transcript rather than over the one on screen. Within a project the process is
+long-lived, so its context, tools and MCP servers are paid for once and every
+turn continues the same conversation.
+
+## The shell
+
+Three columns, split by how often you use them:
+
+- **Left — projects.** One vertical tab per project: its name, its branch,
+  whether it has uncommitted work, whether the folder is still there — and what
+  its own session is doing. A dot for a live one, a ring when it has stopped to
+  ask you something. That is the whole signal for a turn that finished, or
+  blocked, in a project you are not looking at. Hovering a tab with a live
+  session reveals a **×** that ends it, without switching there first — the
+  conversation is kept, and Resume brings its context back.
+- **Middle — the page**, under the live status strip.
+- **Right — sections.** The thing you click constantly, on the side the pointer
+  already rests.
+
+## Settings belong to the project
+
+Two codebases rarely want the same answer. The one you are shipping wants Opus
+and an approval prompt on every write; the scratch repo wants Haiku and no
+prompts at all. So **model, effort, permission mode, allowed directories and
+Allow-all are per project**, and persisted with it.
+
+A new project is seeded from what the CLI itself is configured to do in that
+directory — the `model`, `effortLevel` and `permissions.defaultMode` in the
+settings files Claude Code reads — so it starts where a terminal opened there
+would start. After that it is its own. Nothing follows you between projects,
+which is what stops a `bypassPermissions` chosen for a sandbox arriving at
+production.
+
+Theme stays global: it is a fact about the window, not about a codebase.
 
 ## What it shows
+
+**Session**
 
 | Page           | What it is for                                                                          |
 | -------------- | --------------------------------------------------------------------------------------- |
@@ -16,12 +53,41 @@ conversation.
 | **Sub-agents** | Each delegation — its prompt, the tools it is running now, tokens, and what it returned |
 | **Tasks**      | The CLI's background tasks, plus every tool call with its input and output              |
 | **Activity**   | One timeline of session, model, tool, agent and task events                             |
-| **Memory**     | Every `CLAUDE.md` and memory file in play, measured on disk, by scope                   |
-| **Settings**   | Project, model, permission mode, theme, and everything the session reports about itself |
+
+**Background** — work that outlives the turn that started it
+
+| Page      | What it is for                                                                      |
+| --------- | ----------------------------------------------------------------------------------- |
+| **Jobs**  | Every `claude --bg` background session: what it is doing, and what it is waiting on |
+| **Loops** | A prompt re-sent on an interval — a standing check you can see, pause and edit      |
+
+**Project**
+
+| Page       | What it is for                                                              |
+| ---------- | --------------------------------------------------------------------------- |
+| **Tree**   | The project's files, with every one this session read or wrote marked on it |
+| **Memory** | Every `CLAUDE.md` and memory file in play, measured on disk, by scope       |
+
+**Capabilities** — what the session can do, and where each piece comes from
+
+| Page         | What it is for                                                                    |
+| ------------ | --------------------------------------------------------------------------------- |
+| **Skills**   | Every skill, its description, and the file behind it                              |
+| **Commands** | Slash commands, by scope                                                          |
+| **MCP**      | Servers as configured, joined to whether the session actually reached them        |
+| **Plugins**  | Installed, enabled and loaded — three different states                            |
+| **Hooks**    | Every command that runs automatically on this machine, and which file declares it |
+| **Settings** | Project, model, effort, permission mode, theme, and what the session reports      |
 
 The status strip above every page carries the live figures: project, git branch,
 model, **context used against the real window**, running sub-agents, running
-tasks, the current turn's elapsed time, and session cost.
+tasks, the current turn's elapsed time, session cost, queued turns, the live
+thinking-token estimate while a turn is in flight, and — once a usage window
+gets tight — how full it is.
+
+Assistant prose renders as Markdown, including **tables**, with syntax-highlit
+code blocks you can copy in one click. The composer takes <kbd>↑</kbd> to recall
+a previous turn.
 
 ## Running it
 
@@ -95,7 +161,61 @@ Five things the protocol makes subtle, all handled deliberately:
   and a re-init never overwrites the context window already measured.
 
 `Stop` sends a real `interrupt` control request: the turn ends, the session and
-its context survive.
+its context survive. Ending the session ends the **process**: stdin is closed,
+then `SIGTERM`, then `SIGKILL`, and the same teardown runs on app exit — a
+`claude` is never left behind holding a session nothing can see.
+
+## When a project folder disappears
+
+Nothing tells a running `claude` that the directory it is working in has been
+deleted, renamed or unmounted. Left alone it holds a process, a context and a
+token bill for a codebase that no longer exists, and every tool call it makes
+fails in a way that reads like the model being confused rather than the folder
+being gone.
+
+So every running session's working directory is re-checked on a timer. One that
+has vanished has its session closed — process ended, reason stated — and its
+project is marked **gone** in the dock and the Projects list, which is where the
+remedy is.
+
+## Background sessions, and loops
+
+`claude --bg` detaches a whole session: it keeps working after the terminal that
+started it is gone. That is a different thing from a background _task_, which is
+one tool call inside the session this app drives — so they get separate pages.
+
+The failure **Jobs** exists for is a job that went **blocked**: waiting on a
+human answer, costing nothing, finishing never, and discoverable only by
+remembering it exists. Blocked jobs sort first, carry the loudest badge, and
+show the question they are actually holding on. Stop, respawn and remove run the
+CLI's own subcommands; answering a job means `claude attach <id>`, because a
+background session is a conversation and this app drives a different one.
+
+A **loop** is a prompt cc re-sends on an interval, the way `/loop` does inside
+the CLI — except owned here, so it survives the turn that created it, is visible
+between runs, and pauses without ending the session. Two rules keep it from
+being a surprise: it fires only into the project it was made for, and never into
+a turn that is already running.
+
+## The tree
+
+A file browser is the least interesting panel this app could have. What earns it
+a tab is the overlay: every file the running session has **read** or **written**
+is marked, live, from the tool calls it actually made. Only expanded directories
+are walked, so the panel costs what you opened.
+
+## What is measured, and what is not
+
+Projects are persisted, so a stored path is a claim about last week. Every one
+is re-checked against the disk on boot: a folder that has been deleted, renamed
+or unmounted is marked **gone**, the app boots onto one that is still there, and
+the row says what to do about it instead of failing at spawn with "Could not
+start".
+
+Usage limits come from the CLI's own `rate_limit_event`, every window it reports
+(`five_hour`, `seven_day`, …) with the time each one resets — not just the
+single figure it chooses to headline, which can read 0% while another window is
+nearly full.
 
 ## Permissions
 
@@ -120,6 +240,11 @@ status strip and the tool chip all say so — a blocked turn is never silent.
 > Without this the CLI has nobody to ask, so it denies the call itself and the
 > model narrates a request that never reaches the screen. That is what "the
 > sub-agents started and never finished" was.
+
+Effort (`--effort`) is set in Settings too, from **Low** to **Max**. The default
+passes no flag at all, so whatever you have configured for the CLI itself still
+applies. Like the model and the permission mode, it takes effect on the **next**
+session.
 
 Two ways to grant more up front, in Settings:
 

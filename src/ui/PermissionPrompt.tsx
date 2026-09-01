@@ -7,7 +7,7 @@
  * is needed, and three answers that are all one click away. Nothing here is
  * inferred — every line comes from the request the CLI sent.
  */
-import { useLocal, type VNode } from "aio/air";
+import { onMount, useLocal, useRef, type VNode } from "aio/air";
 import { session } from "../cell/session.ts";
 import type { PermissionRequest } from "../type/claude.ts";
 import { highlight } from "../lib/highlight.ts";
@@ -35,9 +35,24 @@ function PermissionCard(props: { request: PermissionRequest }): VNode {
   const [reason, setReason] = useLocal("");
   const now = useNow(true, 500);
   const suggestion = r.suggestions[0] ?? null;
+  const card = useRef<HTMLElement>(null!);
+
+  // Move focus to the prompt when it appears. A blocked turn that a keyboard
+  // user has to Tab across the whole page to reach is a blocked turn.
+  //
+  // The *card* takes focus, never a button: focusing "Allow once" would arm
+  // Enter to approve a tool call, and the one thing an approval dialog must
+  // never do is let a stray keystroke say yes.
+  onMount(() => card.current?.focus());
 
   return (
-    <section class="perm" role="alertdialog" aria-label={`Approve ${r.tool}`}>
+    <section
+      ref={card}
+      class="perm"
+      role="alertdialog"
+      tabIndex={-1}
+      aria-label={`Approve ${r.tool}`}
+    >
       <header class="perm__head">
         <span class="perm__icon">{IconShield({ size: 16 })}</span>
         <span class="perm__title">
@@ -67,8 +82,7 @@ function PermissionCard(props: { request: PermissionRequest }): VNode {
           type="button"
           class="btn btn--ghost btn--sm perm__toggle"
           aria-expanded={showInput}
-          onClick={() =>
-            setShowInput(!showInput)}
+          onClick={() => setShowInput(!showInput)}
         >
           {showInput ? "Hide" : "Show"} exactly what it will run
         </button>
@@ -92,21 +106,29 @@ function PermissionCard(props: { request: PermissionRequest }): VNode {
                 aria-label="Reason for denying"
                 value={reason}
                 onInput={(e) => setReason((e.target as HTMLInputElement).value)}
+                // Enter sends the denial, Escape backs out of it — the two
+                // things a hand already on this field wants to do next.
+                onKeyDown={(e: KeyboardEvent) => {
+                  if (e.isComposing || e.keyCode === 229) return;
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    void session.denyPermission(r.id, reason);
+                  }
+                  if (e.key === "Escape") setDenying(false);
+                }}
               />
               <div class="perm__actions">
                 <button
                   type="button"
                   class="btn btn--sm"
-                  onClick={() =>
-                    setDenying(false)}
+                  onClick={() => setDenying(false)}
                 >
                   Back
                 </button>
                 <button
                   type="button"
                   class="btn btn--danger btn--sm"
-                  onClick={() =>
-                    void session.denyPermission(r.id, reason)}
+                  onClick={() => void session.denyPermission(r.id, reason)}
                 >
                   {IconX({ size: 13 })} Deny this call
                 </button>

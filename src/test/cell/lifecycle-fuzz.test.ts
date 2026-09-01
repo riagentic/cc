@@ -9,6 +9,7 @@
 import { assert, assertEquals } from "@std/assert";
 import { bootCells } from "aio/testing";
 import { session } from "../../cell/session.ts";
+import { catalog } from "../../cell/catalog.ts";
 import { workspace } from "../../cell/workspace.ts";
 
 const MARKER = "cc-fuzz-stub-42";
@@ -64,7 +65,7 @@ Deno.test("lifecycle fuzz: one process, and offline means offline", async () => 
   await Deno.chmod(bin, 0o755);
   const previous = Deno.env.get("CLAUDE_BIN");
   Deno.env.set("CLAUDE_BIN", bin);
-  const booted = await bootCells([workspace, session]);
+  const booted = await bootCells([workspace, session, catalog]);
 
   const steps: string[] = [];
   try {
@@ -104,7 +105,10 @@ Deno.test("lifecycle fuzz: one process, and offline means offline", async () => 
           await session.interrupt();
           break;
         case "rescan":
-          await session.scanMemory();
+          // Memory belongs to the project, not the session, so a rescan is the
+          // catalog's job now — but it stays in this fuzz because it is still a
+          // button a user can hit at any point in a session's life.
+          await catalog.refreshMemory();
           break;
         case "clear":
           session.clearTranscript();
