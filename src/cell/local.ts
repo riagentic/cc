@@ -45,6 +45,7 @@ import type {
   LocalPermission,
 } from "../type/local.ts";
 import { workspace } from "./workspace.ts";
+import { perSecond } from "../lib/format.ts";
 
 /** Tool-call rounds one user turn may take. A local model that has not
  *  converged after this many acts is looping, not working. */
@@ -76,6 +77,9 @@ const blankChat = (): LocalChat => ({
   streaming: "",
   summary: "",
   usedTokens: 0,
+  startedAt: 0,
+  lastMs: 0,
+  lastTokens: 0,
   models: [],
   error: null,
   pending: null,
@@ -88,6 +92,14 @@ type LocalState = {
   /** Per-project conversation. Live state of a running process, not a
    *  document — so not persisted, same stance as the Claude session cell. */
   chats: Record<string, LocalChat>;
+  /**
+   * Per project: what the last Clear took away, kept once.
+   *
+   * Not persisted — the same stance as the conversations themselves. An undo
+   * offer that survives a restart is an offer nobody asked for about a
+   * decision they made last week.
+   */
+  cleared: Record<string, LocalMsg[]>;
   /**
    * What answered on each engine's default port, last time anyone looked.
    *
@@ -138,6 +150,7 @@ export const local = cell("local", {
   state: {
     configs: {} as Record<string, LocalConfig>,
     chats: {} as Record<string, LocalChat>,
+    cleared: {} as Record<string, LocalMsg[]>,
     detected: [] as EngineProbe[],
     detecting: false,
     detectedAt: 0,
@@ -580,7 +593,11 @@ export const local = cell("local", {
       {
         const c = chatAt(s, id);
         c.status = "working";
+        c.startedAt = Date.now();
         c.error = null;
+        // Saying something new ends the window in which the last Clear can be
+        // undone — and lets go of the transcript it was holding.
+        delete s.cleared[id];
         c.messages.push(msg("user", text));
         cap(c.messages);
       }
@@ -667,6 +684,13 @@ export const local = cell("local", {
           {
             const c = chatAt(s, id);
             c.usedTokens = acc.promptTokens ?? packed.tokens;
+            // Only when the server reported a completion count. Dividing a
+            // character count by seconds would produce a plausible-looking
+            // number that is wrong by whatever this model's tokeniser does.
+            if (acc.completionTokens !== null && c.startedAt > 0) {
+              c.lastMs = Date.now() - c.startedAt;
+              c.lastTokens = acc.completionTokens;
+            }
             // The complete reply goes into the pushed message below; the live
             // streaming buffer is cleared (the last throttled paint may be a
             // few tokens short, and the message is the source of truth).
@@ -779,6 +803,7 @@ export const local = cell("local", {
         io.endRun(id, signal); // only this run's own registration
         const c = chatAt(s, id);
         c.status = "idle";
+        c.startedAt = 0;
         c.streaming = "";
         // A question outlives nothing: the turn that asked it is over.
         c.pending = null;
@@ -851,13 +876,34 @@ export const local = cell("local", {
     /** Wipe the conversation (and its summary). Config stays. A running turn
      *  is aborted first — resetting `status` under a live loop would admit a
      *  second concurrent one. */
+    /**
+     * Start again on a blank slate.
+     *
+     * What was there is kept — once, and only for this project — so the
+     * decision can be taken back. A conversation is not persisted anywhere
+     * else in this app, which makes an unrecoverable Clear the most expensive
+     * button on the page.
+     */
     async clear(s: LocalState, projectId?: string) {
       const id = projectId ?? workspace.activeId;
       if (chatAt(s, id).status === "working") {
         const io = await import("./local.server.ts");
         io.stopRun(id);
       }
+      const before = chatAt(s, id).messages;
       s.chats[id] = blankChat();
+      if (before.length > 0) s.cleared[id] = before;
+    },
+
+    /** Put back what the last clear took away. Refused once anything new has
+     *  been said: this is an undo for the moment right after, not a merge. */
+    undoClear(s: LocalState, projectId?: string) {
+      const id = projectId ?? workspace.activeId;
+      const kept = s.cleared[id] ?? [];
+      const chat = chatAt(s, id);
+      if (kept.length === 0 || chat.messages.length > 0) return;
+      chat.messages = kept;
+      delete s.cleared[id];
     },
   },
 });
@@ -997,3 +1043,18 @@ export const detectedEngines = (): EngineProbe[] => local.detected;
 /** Just the ones that answered — what the engine switch marks as available. */
 export const reachableEngines = (): LocalEngine[] =>
   local.detected.filter((d) => d.reachable).map((d) => d.engine);
+
+/**
+ * How fast the local model's last turn produced text, in tokens a second — or
+ * `null` when the server did not report enough to say.
+ *
+ * The same contract as the Claude side's `lastSpeed`: over the whole turn,
+ * tool calls and waiting included, because that is what "slow" means to the
+ * person who waited.
+ */
+export const speedOf = (
+  turn: { lastMs: number; lastTokens: number },
+): number | null => perSecond(turn.lastTokens, turn.lastMs);
+
+export const localSpeed = (projectId?: string): number | null =>
+  speedOf(localChat(projectId ?? workspace.activeId));

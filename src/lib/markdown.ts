@@ -14,6 +14,7 @@ export type Inline =
   | { t: "code"; v: string }
   | { t: "strong"; v: Inline[] }
   | { t: "em"; v: Inline[] }
+  | { t: "del"; v: Inline[] }
   | { t: "link"; href: string; v: Inline[] };
 
 /** Column alignment, from the `---:` / `:---:` markers in a table's rule row. */
@@ -23,7 +24,21 @@ export type Block =
   | { t: "p"; v: Inline[] }
   | { t: "h"; level: number; v: Inline[] }
   | { t: "pre"; lang: string; v: string }
-  | { t: "list"; ordered: boolean; items: Inline[][] }
+  | {
+    t: "list";
+    ordered: boolean;
+    items: Inline[][];
+    /**
+     * Per item: `true` for `- [x]`, `false` for `- [ ]`, `null` for a plain
+     * bullet. A parallel array rather than a richer item type, so every
+     * existing reader of `items` keeps working unchanged.
+     *
+     * Worth having because a checklist is how an agent reports a plan, and
+     * rendering `[x]` as two brackets and an x throws away the one thing the
+     * reader is scanning for: which of these is done.
+     */
+    checks: (boolean | null)[];
+  }
   | { t: "quote"; v: Inline[] }
   | { t: "table"; head: Inline[][]; rows: Inline[][][]; align: Align[] }
   | { t: "hr" };
@@ -105,6 +120,7 @@ export function parseMarkdown(src: string): Block[] {
 
     if (UL.test(line) || OL.test(line)) {
       const ordered = !UL.test(line) && OL.test(line);
+      const checks: (boolean | null)[] = [];
       const items: Inline[][] = [];
       while (i < lines.length) {
         // A thematic break also matches the bullet pattern (`* * *` is a valid
@@ -115,10 +131,15 @@ export function parseMarkdown(src: string): Block[] {
         if (HR.test(lines[i])) break;
         const m = ordered ? OL.exec(lines[i]) : UL.exec(lines[i]);
         if (!m) break;
-        items.push(parseInline(m[1]));
+        // A task marker, if this item opens with one. Only at the very start,
+        // and only with the space after it that the syntax requires — so a
+        // sentence that happens to begin "[x] is undefined" stays a sentence.
+        const task = /^\[([ xX])\]\s+(.*)$/.exec(m[1]);
+        checks.push(task ? task[1].toLowerCase() === "x" : null);
+        items.push(parseInline(task ? task[2] : m[1]));
         i++;
       }
-      out.push({ t: "list", ordered, items });
+      out.push({ t: "list", ordered, items, checks });
       continue;
     }
 
@@ -191,6 +212,51 @@ const alignOf = (spec: string): Align => {
  * `linkify` turns a bare URL in prose into a link. It is off inside a link's
  * own label, where a second link would nest one `<a>` inside another.
  */
+
+/**
+ * Does this inline-code span look like a path worth offering to open?
+ *
+ * Deliberately narrow. Model output is full of `--flag`, `npm run x` and
+ * `Foo/Bar` generics, and a code span that turns into a button on hover is a
+ * promise: press this and the file opens. A promise that fails half the time
+ * is worse than no button, so the test asks for a separator, a real-looking
+ * file name, and no whitespace — and refuses anything that reads like a
+ * command.
+ *
+ * The `:12` suffix an agent writes to point at a line is recognised and
+ * stripped: it is not part of the file name, and leaving it on is how you get
+ * "no such file: src/app.ts:12".
+ */
+export function pathish(text: string): { path: string; line: number } | null {
+  const raw = text.trim();
+  if (raw === "" || raw.length > 240) return null;
+  if (/\s/.test(raw)) return null;
+
+  // A trailing :line or :line:column, as every compiler and grep writes it.
+  const at = raw.match(/^(.*?):(\d+)(?::\d+)?$/);
+  const path = at ? at[1] : raw;
+  const line = at ? Number(at[2]) : 0;
+
+  if (!path.includes("/")) return null;
+  // A URL is a link, not a path — `parseInline` already made it one if it was
+  // written plainly, and a code span holding one should stay quoted text.
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(path)) return null;
+  // Not every slash is a path separator: "and/or", "24/7", "Result<T/E>".
+  if (/[<>|*?"]/.test(path)) return null;
+
+  const name = path.slice(path.lastIndexOf("/") + 1);
+  const absolute = path.startsWith("/") || path.startsWith("~/") ||
+    path.startsWith("./") || path.startsWith("../");
+  // A bare `a/b` needs to look like a file — an extension, or a leading dot —
+  // before it earns a button. An absolute path is already unambiguous.
+  const looksLikeFile = /\.[A-Za-z0-9]{1,12}$/.test(name) ||
+    name.startsWith(".");
+  if (!absolute && !looksLikeFile) return null;
+  if (name === "") return null;
+
+  return { path, line };
+}
+
 export function parseInline(src: string, linkify = true): Inline[] {
   const out: Inline[] = [];
   let buf = "";
@@ -224,6 +290,19 @@ export function parseInline(src: string, linkify = true): Inline[] {
         flush();
         out.push({ t: "code", v: src.slice(i + open, close) });
         i = close + open;
+        continue;
+      }
+    }
+
+    // `~~struck~~`. Before the emphasis rules, and requiring the doubled form:
+    // a single tilde is a home directory far more often than it is emphasis,
+    // and `~/code/app` written mid-sentence must survive intact.
+    if (c === "~" && src[i + 1] === "~") {
+      const end = src.indexOf("~~", i + 2);
+      if (end > i + 2) {
+        flush();
+        out.push({ t: "del", v: parseInline(src.slice(i + 2, end), linkify) });
+        i = end + 2;
         continue;
       }
     }

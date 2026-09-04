@@ -49,10 +49,17 @@ async function read(s: TreeState): Promise<void> {
   try {
     const io = await import("./catalog.server.ts");
     const nodes = await io.readTree(project.path, s.open);
+    // What git thinks changed, gathered with the tree rather than after it:
+    // both describe the same moment, and a file list where the marks are one
+    // walk behind the names is worse than one with no marks.
+    const claude = await import("./claude.server.ts");
+    const changed = await claude.gitChanged(project.path);
     // `activeProject()` is a live read of another cell, which is the point —
     // it answers "is this still the project on screen *now*".
     if (activeProject()?.path !== project.path) return;
     s.nodes = nodes;
+    s.modified = changed.modified;
+    s.untracked = changed.untracked;
     s.scannedAt = Date.now();
     s.error = null;
   } catch (e) {
@@ -70,12 +77,27 @@ type TreeState = {
    *  kind of quiet lie this app exists to avoid. */
   root: string;
   nodes: TreeNode[];
+  /** Absolute paths git reports as changed, and as not yet tracked. Two lists
+   *  because they mean different things to somebody deciding what to review:
+   *  one has a previous version to compare against and the other does not. */
+  modified: string[];
+  untracked: string[];
   /** Absolute paths of the expanded directories. The client sends these back,
    *  which is what keeps the server free of per-connection tree state. */
   open: string[];
   /** The file being previewed, or `""`. */
   selected: string;
   preview: { text: string; bytes: number; truncated: boolean; error: string };
+  /**
+   * The committed version of the previewed file, or `""` when there is not one
+   * — not a repository, never committed, or simply unchanged.
+   *
+   * Read alongside the preview rather than on demand: the question "what did I
+   * change here" is asked about the file you have just opened, and a second
+   * round trip to answer it would make the diff arrive after the reader had
+   * already started reading the wrong thing.
+   */
+  previewHead: string;
   loading: boolean;
   scannedAt: number;
   error: string | null;
@@ -100,9 +122,15 @@ export const tree = cell("tree", {
   state: {
     root: "",
     nodes: [] as TreeNode[],
+    /** Absolute paths git reports as changed, and as not yet tracked. Two
+     *  lists because they mean different things to somebody deciding what to
+     *  review: one has a previous version to compare against. */
+    modified: [] as string[],
+    untracked: [] as string[],
     open: [] as string[],
     selected: "",
     preview: { ...NO_PREVIEW },
+    previewHead: "",
     loading: false,
     scannedAt: 0,
     error: null as string | null,
@@ -163,13 +191,29 @@ export const tree = cell("tree", {
       }
       s.selected = path;
       s.preview = { ...NO_PREVIEW };
+      s.previewHead = "";
       try {
         const io = await import("./catalog.server.ts");
         const read = await io.readFilePreview(path);
+        // The committed version too, but only for a file git says has changed:
+        // asking for every file would spawn a subprocess per click, and for an
+        // unchanged file the answer is a diff with nothing in it.
+        //
+        // aiol-ok: `modified` is read deliberately after the await. It is the
+        // current answer that matters — a refresh that landed while the file
+        // was being read knows better than the list this method entered with.
+        const claude = await import("./claude.server.ts");
+        // aiol-ok: read after the await on purpose — see above.
+        const head = s.modified.includes(path)
+          ? await claude.gitFileAtHead(path)
+          : null;
         // Re-checked after the await: the user can click another file while a
         // big one is being read, and the slower answer must not overwrite it.
         // aiol-ok: that re-read is the point
-        if (s.selected === path) s.preview = read;
+        if (s.selected === path) {
+          s.preview = read;
+          s.previewHead = head ?? "";
+        }
       } catch (e) {
         // aiol-ok: the same deliberate re-read as above
         if (s.selected === path) {
@@ -177,6 +221,7 @@ export const tree = cell("tree", {
             ...NO_PREVIEW,
             error: e instanceof Error ? e.message : String(e),
           };
+          s.previewHead = "";
         }
       }
     },
@@ -213,3 +258,12 @@ export function touchedPaths(): Map<string, Touch> {
   }
   return out;
 }
+
+/** What git says about one file: "modified", "new", or "" for neither. Read by
+ *  the row, so the page never has to hold two sets of its own. */
+export const gitMark = (path: string): string =>
+  tree.modified.includes(path)
+    ? "modified"
+    : tree.untracked.includes(path)
+    ? "new"
+    : "";

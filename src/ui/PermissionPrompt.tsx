@@ -12,7 +12,8 @@ import { session } from "../cell/session.ts";
 import type { PermissionRequest } from "../type/claude.ts";
 import { highlight } from "../lib/highlight.ts";
 import { clock, duration, oneLine } from "../lib/format.ts";
-import { useNow } from "./parts.tsx";
+import { Copy, useNow } from "./parts.tsx";
+import { DiffView, isEdit } from "./Diff.tsx";
 import { IconAlert, IconCheck, IconShield, IconX, toolIcon } from "./icons.tsx";
 
 /** Every pending prompt, oldest first — the CLI asked in that order and is
@@ -45,6 +46,31 @@ function PermissionCard(props: { request: PermissionRequest }): VNode {
   // never do is let a stray keystroke say yes.
   onMount(() => card.current?.focus());
 
+  /**
+   * Digits, the way the CLI's own prompt takes them.
+   *
+   * Not letters, and emphatically not Enter: the one thing an approval dialog
+   * must never do is let a stray keystroke say yes, and Enter is the key most
+   * likely to arrive by accident from whatever the user was doing before this
+   * appeared. A digit is a deliberate press, and 1/2/3 is the muscle memory
+   * anybody arriving from `claude` in a terminal already has.
+   *
+   * Silent while the deny box is open — there, digits are text.
+   */
+  const onKey = (e: KeyboardEvent) => {
+    if (denying || e.ctrlKey || e.metaKey || e.altKey) return;
+    if (e.key === "1") {
+      e.preventDefault();
+      void session.allowPermission(r.id, false);
+    } else if (e.key === "2" && suggestion) {
+      e.preventDefault();
+      void session.allowPermission(r.id, true);
+    } else if (e.key === "3") {
+      e.preventDefault();
+      setDenying(true);
+    }
+  };
+
   return (
     <section
       ref={card}
@@ -52,6 +78,7 @@ function PermissionCard(props: { request: PermissionRequest }): VNode {
       role="alertdialog"
       tabIndex={-1}
       aria-label={`Approve ${r.tool}`}
+      onKeyDown={onKey}
     >
       <header class="perm__head">
         <span class="perm__icon">{IconShield({ size: 16 })}</span>
@@ -78,22 +105,50 @@ function PermissionCard(props: { request: PermissionRequest }): VNode {
           </div>
         )}
 
-        <button
-          type="button"
-          class="btn btn--ghost btn--sm perm__toggle"
-          aria-expanded={showInput}
-          onClick={() => setShowInput(!showInput)}
-        >
-          {showInput ? "Hide" : "Show"} exactly what it will run
-        </button>
+        <div style={{ display: "flex", gap: "6px", alignItems: "center" }}>
+          <button
+            type="button"
+            class="btn btn--ghost btn--sm perm__toggle"
+            aria-expanded={showInput}
+            onClick={() => setShowInput(!showInput)}
+          >
+            {showInput ? "Hide" : "Show"} exactly what it will run
+          </button>
+          {
+            /* The command, on the clipboard, unchanged. Somebody who is unsure
+              about a call very often wants to try it themselves first — and
+              retyping a command out of a dialog is how you end up approving
+              the one you did not read. */
+          }
+          <Copy
+            text={() =>
+              typeof r.input.command === "string"
+                ? r.input.command
+                : JSON.stringify(r.input, null, 2)}
+            label="Copy"
+          />
+        </div>
         {showInput && (
-          <div class="code">
-            {highlight(JSON.stringify(r.input, null, 2), "json").map((t, n) =>
-              t.kind === "plain"
-                ? t.text
-                : <span key={n} class={`tok tok--${t.kind}`}>{t.text}</span>
+          <>
+            {
+              /* An edit gets a diff. This is the moment somebody decides
+                whether to let a change happen, and deciding from two walls of
+                escaped JSON is deciding without reading. */
+            }
+            {isEdit(r.input) && (
+              <DiffView
+                before={String(r.input.old_string)}
+                after={String(r.input.new_string)}
+              />
             )}
-          </div>
+            <div class="code">
+              {highlight(JSON.stringify(r.input, null, 2), "json").map((t, n) =>
+                t.kind === "plain"
+                  ? t.text
+                  : <span key={n} class={`tok tok--${t.kind}`}>{t.text}</span>
+              )}
+            </div>
+          </>
         )}
 
         {denying
@@ -153,6 +208,7 @@ function PermissionCard(props: { request: PermissionRequest }): VNode {
                   onClick={() => void session.allowPermission(r.id, true)}
                 >
                   Always allow
+                  <span class="kbd">2</span>
                 </button>
               )}
               <button
@@ -161,6 +217,7 @@ function PermissionCard(props: { request: PermissionRequest }): VNode {
                 onClick={() => void session.allowPermission(r.id, false)}
               >
                 {IconCheck({ size: 14 })} Allow once
+                <span class="kbd">1</span>
               </button>
             </div>
           )}

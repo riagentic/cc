@@ -6,7 +6,13 @@
  */
 import { assert, assertEquals } from "@std/assert";
 import { bootCells } from "aio/testing";
-import { engineOf, local, localChat, localConfig } from "../../cell/local.ts";
+import {
+  engineOf,
+  local,
+  localChat,
+  localConfig,
+  speedOf,
+} from "../../cell/local.ts";
 import { workspace } from "../../cell/workspace.ts";
 
 type Scripted = {
@@ -1441,4 +1447,16 @@ Deno.test("a guessed port has to prove it is the engine", async () => {
     await impostor.shutdown();
     await real.shutdown();
   }
+});
+
+Deno.test("local — a speed needs both halves, and is never invented", () => {
+  // Most OpenAI-compatible servers report no completion count on a streamed
+  // reply, and a tokens-per-second figure derived from characters would be
+  // wrong by whatever this model's tokeniser does — invisibly.
+  assertEquals(speedOf({ lastMs: 0, lastTokens: 0 }), null);
+  assertEquals(speedOf({ lastMs: 4_000, lastTokens: 0 }), null);
+  assertEquals(speedOf({ lastMs: 0, lastTokens: 200 }), null);
+  // Nor is a turn too short to measure a measurement.
+  assertEquals(speedOf({ lastMs: 120, lastTokens: 8 }), null);
+  assertEquals(speedOf({ lastMs: 4_000, lastTokens: 200 }), 50);
 });

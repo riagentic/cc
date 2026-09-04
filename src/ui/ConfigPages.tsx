@@ -17,7 +17,7 @@
  * Showing only the first hides a hook you just wrote; showing only the second
  * claims a capability the session does not have.
  */
-import { useLocal, type VNode } from "aio/air";
+import { navigate, useLocal, type VNode } from "aio/air";
 import {
   catalog,
   commandEntries,
@@ -41,6 +41,7 @@ import {
   useNow,
 } from "./parts.tsx";
 import { PageHead, type PageScope } from "./RunViews.tsx";
+import { fillComposer } from "./compose.ts";
 import {
   IconCommand,
   IconHook,
@@ -133,7 +134,9 @@ function ConfigPage(
 }
 
 /** Skills and commands share a shape exactly, so they share a renderer. */
-function DefinitionList(props: { entries: Entry[]; icon: VNode }): VNode {
+function DefinitionList(
+  props: { entries: Entry[]; icon: VNode; use?: (name: string) => void },
+): VNode {
   return (
     <Panel flush title={`${props.entries.length} shown`}>
       <div class="rowlist">
@@ -165,6 +168,21 @@ function DefinitionList(props: { entries: Entry[]; icon: VNode }): VNode {
               class="rowitem__meta"
               style={{ display: "flex", gap: "4px", flexWrap: "wrap" }}
             >
+              {
+                /* Reading a list of commands and then having to go and type
+                  one is the shape of a page that tells you things instead of
+                  letting you do them. */
+              }
+              {props.use && e.live && (
+                <button
+                  type="button"
+                  class="btn btn--sm"
+                  title={`Put /${e.name.replace(/^\//, "")} in the message box`}
+                  onClick={() => props.use?.(e.name)}
+                >
+                  Use
+                </button>
+              )}
               <ScopePill scope={e.scope} />
               <LivePill live={e.live} />
               {e.path && <PathActions path={e.path} label={e.name} />}
@@ -223,7 +241,19 @@ export function CommandsPage(): VNode {
       query={query}
       onQuery={setQuery}
     >
-      <DefinitionList entries={shown} icon={IconCommand({ size: 15 })} />
+      <DefinitionList
+        entries={shown}
+        icon={IconCommand({ size: 15 })}
+        // Only for a command the running session actually loaded: putting one
+        // in the box that the CLI will refuse is a worse outcome than making
+        // somebody type it.
+        use={(name) => {
+          navigate("/");
+          // After the navigation, so the composer it fills is the one that has
+          // just been mounted rather than the one being torn down.
+          queueMicrotask(() => fillComposer(`/${name.replace(/^\//, "")} `));
+        }}
+      />
     </ConfigPage>
   );
 }

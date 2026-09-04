@@ -129,8 +129,52 @@ testCell(workspace, "a path that is not a directory is refused", async (t) => {
   t.init();
   await t.send.addProject("/definitely/not/a/real/directory");
   t.expect.state((s) => s.projects.length === 0);
-  t.expect.state((s) => (s.error ?? "").includes("Not a directory"));
+  t.expect.state((s) => (s.error ?? "").includes("no folder at"));
+  // …and the path is kept, resolved, so the page can offer to create it. The
+  // offer has to name a real path: reconstructing one out of the sentence is
+  // how a Create button ends up making a folder called "Not a directory: /x".
+  t.expect.state((s) => s.absentPath === "/definitely/not/a/real/directory");
+  t.send.dismissError();
+  t.expect.state((s) => s.absentPath === "");
 });
+
+testCell(
+  workspace,
+  "a folder that is not there yet can be created and added in one act",
+  async (t) => {
+    t.init();
+    const parent = await Deno.makeTempDir();
+    const wanted = `${parent}/nested/new-project`;
+    try {
+      await t.send.addProject(wanted);
+      t.expect.state((s) => s.projects.length === 0);
+      t.expect.state((s) => s.absentPath === wanted);
+
+      await t.send.createProject(wanted);
+      t.expect.state((s) => s.projects.length === 1);
+      t.expect.state((s) => s.projects[0].path === wanted);
+      t.expect.state((s) => s.absentPath === "");
+      t.expect.state((s) => s.error === null);
+      // Every missing level above it, not just the last one.
+      assertEquals((await Deno.stat(wanted)).isDirectory, true);
+    } finally {
+      await Deno.remove(parent, { recursive: true });
+    }
+  },
+);
+
+testCell(
+  workspace,
+  "creating a folder somewhere unwritable says so, and adds nothing",
+  async (t) => {
+    t.init();
+    // /proc is real, mounted, and refuses to be written to by anybody — the
+    // closest thing to a portable unwritable directory.
+    await t.send.createProject("/proc/cc-should-not-exist");
+    t.expect.state((s) => s.projects.length === 0);
+    t.expect.state((s) => (s.error ?? "").includes("Could not create it"));
+  },
+);
 
 testCell(
   workspace,
@@ -477,3 +521,62 @@ Deno.test("a project added while the app is still booting is not wiped by boot",
     await Deno.remove(dir, { recursive: true });
   }
 });
+
+testCell(workspace, "a palette that is not a palette is refused", (t) => {
+  t.init();
+  t.send.setTheme("light");
+  t.expect.state((s) => s.theme === "light");
+  t.send.setTheme("contrast");
+  t.expect.state((s) => s.theme === "contrast");
+
+  // The control plane can call this with anything. A value nothing matches
+  // reaches CSS as an attribute no rule selects, which leaves the window in
+  // whatever the media query picks and a stored value nothing can undo.
+  t.send.setTheme("neon");
+  t.expect.state((s) => s.theme === "contrast");
+  t.send.setTheme("");
+  t.expect.state((s) => s.theme === "contrast");
+  t.send.setTheme(undefined as unknown as string);
+  t.expect.state((s) => s.theme === "contrast");
+});
+
+testCell(
+  workspace,
+  "projects can be reordered, and the order is the user's",
+  async (t) => {
+    t.init();
+    const dirs: string[] = [];
+    try {
+      for (let i = 0; i < 3; i++) {
+        const d = await Deno.makeTempDir();
+        dirs.push(d);
+        await t.send.addProject(d);
+      }
+      const names = () => t.state.projects.map((p) => p.path);
+      const idOf = (path: string) =>
+        t.state.projects.find((p) => p.path === path)?.id ?? "";
+      // Whatever order three concurrent adds settled into — the point of the
+      // test is the move, not the arrival.
+      const [a, b, c] = names();
+      assertEquals(names().length, 3);
+
+      // Last to first. Awaited: a dispatch is not a write, and reading the
+      // list on the next line reads the list from before it.
+      await t.send.moveProject(idOf(c), 0);
+      assertEquals(names(), [c, a, b]);
+
+      // A drag past the end lands at the end rather than being refused — that
+      // index is what a real drop on the empty space below the list produces.
+      await t.send.moveProject(idOf(c), 99);
+      assertEquals(names(), [a, b, c]);
+
+      // Nonsense from the control plane changes nothing.
+      await t.send.moveProject("nope", 0);
+      await t.send.moveProject(idOf(a), "first" as unknown as number);
+      await t.send.moveProject(undefined as unknown as string, 1);
+      assertEquals(names(), [a, b, c]);
+    } finally {
+      for (const d of dirs) await Deno.remove(d, { recursive: true });
+    }
+  },
+);

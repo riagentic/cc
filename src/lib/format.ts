@@ -241,3 +241,73 @@ export function modelLabel(id: string): string {
     .replace(/-\d{4,5}-of-\d{4,5}$/, "");
   return base || id;
 }
+
+/**
+ * A stable hue for a string — a project path, usually.
+ *
+ * The point is recognition, not decoration. With six projects open, the tab
+ * you want is found by its shape before its name is read, and two projects
+ * called "app" in different directories are told apart by colour rather than
+ * by hovering to see the path.
+ *
+ * Derived from the *path*, so renaming a directory changes the colour and
+ * moving one does not. FNV-1a because it is four lines and spreads short
+ * similar strings well — "app" and "api" must not land on the same hue.
+ */
+export function hueOf(seed: string): number {
+  let h = 2166136261;
+  for (let i = 0; i < seed.length; i++) {
+    h ^= seed.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  // Off the 360 wheel deliberately: 337 is coprime with it, so consecutive
+  // hashes do not cluster into bands.
+  return Math.abs(h) % 337;
+}
+
+/**
+ * Tokens a second, or `null` when there is nothing honest to divide.
+ *
+ * Both engines report speed and both must mean the same thing by it, so the
+ * two rules live here rather than twice: a turn under half a second is a
+ * rounding error with a denominator, and a turn whose token count nobody
+ * reported has no speed at all. Neither case is a zero — a zero would read as
+ * "very slow", which is the opposite of "not measured".
+ */
+export const perSecond = (count: number, ms: number): number | null =>
+  ms < 500 || count <= 0 ? null : count / (ms / 1000);
+
+/**
+ * The day a timestamp falls on, named the way a person would say it.
+ *
+ * "Today" and "Yesterday" rather than a date, because a long-lived session is
+ * routinely two or three days old and "14 Feb" tells you nothing you did not
+ * already know while "Yesterday" tells you where the gap is.
+ */
+export function dayLabel(at: number, now: number): string {
+  const day = new Date(at);
+  const today = new Date(now);
+  const midnight = (d: Date) =>
+    new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+  const diff = Math.round((midnight(today) - midnight(day)) / 86_400_000);
+  if (diff === 0) return "Today";
+  if (diff === 1) return "Yesterday";
+  // Within the week, the weekday is more use than the date; past it, the date.
+  if (diff > 1 && diff < 7) {
+    return day.toLocaleDateString(undefined, { weekday: "long" });
+  }
+  return day.toLocaleDateString(undefined, {
+    day: "numeric",
+    month: "short",
+    year: day.getFullYear() === today.getFullYear() ? undefined : "numeric",
+  });
+}
+
+/** Whether two timestamps fall on different calendar days — the test a
+ *  transcript uses to decide where a day divider goes. */
+export const differentDay = (a: number, b: number): boolean => {
+  const x = new Date(a);
+  const y = new Date(b);
+  return x.getFullYear() !== y.getFullYear() || x.getMonth() !== y.getMonth() ||
+    x.getDate() !== y.getDate();
+};

@@ -191,6 +191,7 @@ export function StoragePage(): VNode {
                   : "Where it went"}
               >
                 <Meter
+                  label="Largest project's share of the total"
                   value={storage.projects[0]?.bytes ?? 0}
                   max={storage.totalBytes || 1}
                 />

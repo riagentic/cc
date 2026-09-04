@@ -7,8 +7,23 @@
  */
 import { useLocal, useRef, type VNode } from "aio/air";
 import { session, view } from "../cell/session.ts";
-import { activeIsLocal, strayConfigs } from "../cell/local.ts";
+import {
+  activeIsLocal,
+  local,
+  localChat,
+  strayConfigs,
+} from "../cell/local.ts";
 import { EnginePanel } from "./LocalChatPage.tsx";
+import { AppearanceFields, ShortcutList } from "./Appearance.tsx";
+import { AbsentOffer, BrowseButton } from "./AddProject.tsx";
+import { MachinePanel } from "./Machine.tsx";
+import { showToast } from "./toast.tsx";
+import { ExportActions } from "./Export.tsx";
+import {
+  localTranscriptMarkdown,
+  transcriptMarkdown,
+} from "../lib/transcript.ts";
+import { prefs } from "../cell/prefs.ts";
 import {
   activeProject,
   activeSettings,
@@ -73,10 +88,17 @@ const SECTION_KEYS: Record<string, string> = {
     "add-dir folder path outside project sandbox scope write tmp",
   "Allow all permissions":
     "dangerously skip permissions bypass unrestricted danger",
-  "Appearance": "theme dark light system colour color window",
+  "Appearance":
+    "theme dark light system colour color window accent zoom font size bigger smaller density compact comfortable width narrow motion animation timestamps wrap code sound chime",
+  "Keyboard": "shortcut key binding chord palette hotkey command",
+  "Machine":
+    "cpu processor gpu ram memory vram video card nvidia amd load usage temperature hardware",
   "Session":
     "status pid process cwd cost turns usage limit rate tools skills commands mcp plugins version",
-  "Transcript": "clear history conversation wipe view",
+  "Transcript":
+    "clear history conversation wipe view export save copy markdown download",
+  "Conversation":
+    "clear history wipe local export save copy markdown transcript",
 };
 
 /** Panels that only exist while the project runs on the Claude Code CLI. */
@@ -139,6 +161,18 @@ export function SettingsPage(): VNode {
   // One resolution per render: `view()` resolves by key, and repeating
   // the call also defeats every narrowing of its nullable fields.
   const sess = view();
+  // Built on demand, not on every render: a long conversation is megabytes of
+  // string, and nothing needs it until somebody presses Copy or Save.
+  const transcript = () =>
+    sess.messages.length === 0 ? "" : transcriptMarkdown(
+      activeProject()?.name ?? "Conversation",
+      sess.messages,
+    );
+  const localTranscript = () =>
+    localTranscriptMarkdown(
+      activeProject()?.name ?? "Conversation",
+      localChat(workspace.activeId).messages,
+    );
   // Slow, but ticking: "started 3s ago" otherwise stayed "3s ago" for as long as
   // an idle session left the page with nothing else to re-render it.
   const now = useNow(true, 10_000);
@@ -245,6 +279,41 @@ export function SettingsPage(): VNode {
           <EnginePanel />
         </Section>
 
+        <Section
+          query={q}
+          title="Conversation"
+          scope="session"
+          actions={
+            <ExportActions
+              empty={localChat(workspace.activeId).messages.length === 0}
+              markdown={localTranscript}
+            />
+          }
+        >
+          <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
+            <button
+              type="button"
+              class="btn btn--sm"
+              onClick={() => {
+                void local.clear();
+                showToast({
+                  text: "Conversation cleared.",
+                  action: {
+                    label: "Undo",
+                    run: () => void local.undoClear(),
+                  },
+                });
+              }}
+            >
+              {IconTrash({ size: 13 })} Clear the conversation
+            </button>
+            <span class="field__hint">
+              Starts the local model on a blank slate. Nothing is sent anywhere
+              — the conversation only ever existed in this window.
+            </span>
+          </div>
+        </Section>
+
         <div class="grid grid--2">
           <Projects query={q} />
 
@@ -278,7 +347,7 @@ export function SettingsPage(): VNode {
                 scope="project"
                 actions={<Pill>{activeSettings().effort || "default"}</Pill>}
               >
-                <div class="choices">
+                <div class="choices" key="efforts">
                   {EFFORTS.map((e) => (
                     <Choice
                       key={e.id || "default"}
@@ -290,7 +359,11 @@ export function SettingsPage(): VNode {
                     />
                   ))}
                 </div>
-                <div class="field__hint" style={{ marginTop: "10px" }}>
+                <div
+                  class="field__hint"
+                  key="foot"
+                  style={{ marginTop: "10px" }}
+                >
                   How hard the model works before it answers (<code>
                     --effort
                   </code>). <b>Default</b>{" "}
@@ -346,23 +419,50 @@ export function SettingsPage(): VNode {
             query={q}
             title="Appearance"
             scope="machine"
+            actions={
+              <button
+                type="button"
+                class="btn btn--sm btn--ghost"
+                title="Put every appearance choice back to its default"
+                onClick={() => {
+                  // Snapshotted before the reset, and offered straight back:
+                  // a Reset that quietly discards ten deliberate choices is
+                  // a button nobody presses twice.
+                  const before = {
+                    accent: prefs.accent,
+                    zoom: prefs.zoom,
+                    density: prefs.density,
+                    motion: prefs.motion,
+                    chatWidth: prefs.chatWidth,
+                    timestamps: prefs.timestamps,
+                    codeWrap: prefs.codeWrap,
+                    sounds: prefs.sounds,
+                    dockCollapsed: prefs.dockCollapsed,
+                    railCollapsed: prefs.railCollapsed,
+                  };
+                  prefs.reset();
+                  showToast({
+                    text: "Appearance back to its defaults.",
+                    action: {
+                      label: "Undo",
+                      run: () => prefs.restore(before),
+                    },
+                  });
+                }}
+              >
+                Reset
+              </button>
+            }
           >
-            <div class="field">
-              <span class="field__label">Theme</span>
-              <Segmented
-                value={workspace.theme}
-                options={[
-                  { id: "system", label: "System" },
-                  { id: "dark", label: "Dark" },
-                  { id: "light", label: "Light" },
-                ]}
-                onChange={(v) => workspace.setTheme(v)}
-              />
-              <span class="field__hint">
-                System follows your OS setting and switches with it.
-              </span>
-            </div>
+            <AppearanceFields />
           </Section>
+
+          <Section query={q} title="Keyboard" scope="machine">
+            <ShortcutList />
+          </Section>
+
+          {matchesAll(q, "Machine", SECTION_KEYS["Machine"]) &&
+            <MachinePanel />}
         </div>
 
         {!isLocal &&
@@ -483,7 +583,11 @@ export function SettingsPage(): VNode {
                                 flex: 1,
                               }}
                             >
-                              <Meter value={w.utilization * 100} max={100} />
+                              <Meter
+                                value={w.utilization * 100}
+                                max={100}
+                                label={`${w.name} usage window`}
+                              />
                             </span>
                             <span class="mono" style={{ minWidth: "38px" }}>
                               {Math.round(w.utilization * 100)}%
@@ -495,7 +599,7 @@ export function SettingsPage(): VNode {
                             </span>
                           </div>
                         ))}
-                      <span style={{ color: "var(--ink-dim)" }}>
+                      <span key="status" style={{ color: "var(--ink-dim)" }}>
                         {sess.rateLimit.status}
                         {sess.rateLimit.overage ? " · billed as overage" : ""}
                       </span>
@@ -555,12 +659,25 @@ export function SettingsPage(): VNode {
             query={q}
             title="Transcript"
             scope="session"
+            actions={
+              <ExportActions
+                empty={sess.messages.length === 0}
+                markdown={transcript}
+              />
+            }
           >
             <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
               <button
                 type="button"
                 class="btn btn--sm"
-                onClick={() => session.clearTranscript()}
+                onClick={() => {
+                  session.clearTranscript();
+                  showToast({
+                    text:
+                      "Transcript cleared. The CLI still remembers the conversation.",
+                    action: { label: "Undo", run: () => session.undoClear() },
+                  });
+                }}
               >
                 {IconTrash({ size: 13 })} Clear the view
               </button>
@@ -843,38 +960,64 @@ function Projects(props: { query: string }): VNode | null {
         </>
       }
     >
-      {adding && (
-        <div style={{ display: "flex", gap: "8px", marginBottom: "10px" }}>
-          <input
-            ref={ref}
-            class="input"
-            placeholder="/path/to/project, ~/code/app, ./sub"
-            aria-label="Project directory"
-            onKeyDown={(e: KeyboardEvent) => {
-              if (e.key === "Enter") {
-                add();
-              }
-              if (e.key === "Escape") {
+      {
+        /* Each of these is wrapped in a keyed element that always renders,
+          rather than left as a bare `cond &&`. A falsy conditional is still a
+          child — an unkeyed null — and a parent holding several of those
+          reconciles them by position, which is how one panel's controls end up
+          in another's DOM node after a re-render. */
+      }
+      <div key="add-field">
+        {adding && (
+          <div style={{ display: "flex", gap: "8px", marginBottom: "10px" }}>
+            <input
+              ref={ref}
+              class="input"
+              placeholder="/path/to/project, ~/code/app, ./sub"
+              aria-label="Project directory"
+              onKeyDown={(e: KeyboardEvent) => {
+                if (e.key === "Enter") {
+                  add();
+                }
+                if (e.key === "Escape") {
+                  setAdding(false);
+                }
+              }}
+            />
+            <button
+              type="button"
+              class="btn btn--sm btn--primary"
+              onClick={add}
+            >
+              Add
+            </button>
+            <BrowseButton
+              onPick={(picked: string) => {
+                if (ref.current) {
+                  ref.current.value = picked;
+                }
+                void workspace.addProject(picked);
                 setAdding(false);
-              }
-            }}
-          />
-          <button type="button" class="btn btn--sm btn--primary" onClick={add}>
-            Add
-          </button>
-        </div>
-      )}
+              }}
+            />
+          </div>
+        )}
+      </div>
+      <div key="absent">
+        <AbsentOffer />
+      </div>
 
       {workspace.projects.length === 0
         ? (
           <Empty
+            key="none"
             icon={IconFolder({ size: 20 })}
             title="No projects"
             hint="Add a directory to point Claude Code at it."
           />
         )
         : (
-          <div class="choices">
+          <div class="choices" key="list">
             {workspace.projects.map((p) => (
               <Choice
                 key={p.id}
@@ -947,16 +1090,18 @@ function Projects(props: { query: string }): VNode | null {
             ))}
           </div>
         )}
-      {workspace.projects.some((p) => p.missing) && (
-        <div
-          class="field__hint"
-          style={{ marginTop: "10px", color: "var(--danger)" }}
-        >
-          A folder marked <b>gone</b>{" "}
-          is no longer on disk — a session cannot start in it. Select a
-          different project, or remove the row.
-        </div>
-      )}
+      <div key="gone-note">
+        {workspace.projects.some((p) => p.missing) && (
+          <div
+            class="field__hint"
+            style={{ marginTop: "10px", color: "var(--danger)" }}
+          >
+            A folder marked <b>gone</b>{" "}
+            is no longer on disk — a session cannot start in it. Select a
+            different project, or remove the row.
+          </div>
+        )}
+      </div>
 
       {
         /* The sweep, and the switch for it. On by default, and stated plainly
@@ -970,33 +1115,35 @@ function Projects(props: { query: string }): VNode | null {
           the project list, and the only time that list is unambiguous is when
           somebody is looking at it. */
       }
-      {strayConfigs().length > 0 && (
-        <>
-          <div class="divider" />
-          <div class="field">
-            <span class="field__label">Leftover settings</span>
-            <div
-              style={{ display: "flex", gap: "8px", alignItems: "center" }}
-            >
-              <button
-                type="button"
-                class="btn btn--sm"
-                onClick={() => pruneUnknown()}
+      <div key="strays">
+        {strayConfigs().length > 0 && (
+          <>
+            <div class="divider" />
+            <div class="field">
+              <span class="field__label">Leftover settings</span>
+              <div
+                style={{ display: "flex", gap: "8px", alignItems: "center" }}
               >
-                {IconTrash({ size: 13 })} Forget {strayConfigs().length} stray
-                {strayConfigs().length === 1 ? " entry" : " entries"}
-              </button>
-              <span class="field__hint" style={{ flex: 1 }}>
-                Engine settings and loops still stored for projects that are no
-                longer in this list. Nothing on disk is touched.
-              </span>
+                <button
+                  type="button"
+                  class="btn btn--sm"
+                  onClick={() => pruneUnknown()}
+                >
+                  {IconTrash({ size: 13 })} Forget {strayConfigs().length} stray
+                  {strayConfigs().length === 1 ? " entry" : " entries"}
+                </button>
+                <span class="field__hint" style={{ flex: 1 }}>
+                  Engine settings and loops still stored for projects that are
+                  no longer in this list. Nothing on disk is touched.
+                </span>
+              </div>
             </div>
-          </div>
-        </>
-      )}
+          </>
+        )}
+      </div>
 
-      <div class="divider" />
-      <div class="field">
+      <div class="divider" key="divider" />
+      <div class="field" key="auto-forget">
         <span class="field__label">When a project folder is gone</span>
         <Segmented
           value={workspace.autoForget ? "forget" : "keep"}
@@ -1016,7 +1163,7 @@ function Projects(props: { query: string }): VNode | null {
         </span>
       </div>
 
-      <div class="field__hint" style={{ marginTop: "10px" }}>
+      <div class="field__hint" key="foot" style={{ marginTop: "10px" }}>
         Switching projects takes effect on the next session start.
       </div>
     </Panel>

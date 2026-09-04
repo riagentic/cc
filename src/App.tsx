@@ -10,7 +10,15 @@
  * changes once a session and lives on the left; which section changes
  * constantly and lives on the right, under the hand that is already there.
  */
-import { onGlobalKey, useConnected, useRoute, type VNode } from "aio/air";
+import {
+  onCleanup,
+  onGlobalKey,
+  onMount,
+  useConnected,
+  useRef,
+  useRoute,
+  type VNode,
+} from "aio/air";
 import { Theme } from "./ui/theme.tsx";
 import { Rail } from "./ui/Rail.tsx";
 import { Dock } from "./ui/Dock.tsx";
@@ -34,11 +42,21 @@ import {
 import { SettingsPage } from "./ui/SettingsPage.tsx";
 import { Banner, Empty } from "./ui/parts.tsx";
 import { PermissionQueue } from "./ui/PermissionPrompt.tsx";
-import { backgroundApprovals, pendingPermissions } from "./cell/session.ts";
+import {
+  backgroundApprovals,
+  pendingPermissions,
+  view,
+} from "./cell/session.ts";
 import { activeIsLocal, engineOf, localChat } from "./cell/local.ts";
 import { LocalChatPage } from "./ui/LocalChatPage.tsx";
 import { workspace } from "./cell/workspace.ts";
 import { IconChat } from "./ui/icons.tsx";
+import { CommandPalette, ShortcutHelp } from "./ui/Palette.tsx";
+import { globalBindings } from "./ui/commands.ts";
+import { closeOverlay, OverlayHost, showOverlay } from "./ui/overlays.tsx";
+import { ToastHost } from "./ui/toast.tsx";
+import { useAttention } from "./ui/attention.ts";
+import { prefs, ZOOM_STEP } from "./cell/prefs.ts";
 
 /**
  * One page per path, matched exactly.
@@ -73,7 +91,23 @@ const PAGES: Record<string, () => VNode> = {
 
 export default function App(): VNode {
   const { path } = useRoute();
-  useShortcuts();
+  const shell = useRef<HTMLDivElement | null>(null);
+  useWheelZoom(shell);
+  // The window title follows the turn, and a chime marks one that finished
+  // while you were elsewhere. Both engines, one hook — the shell already knows
+  // which is running.
+  const project = workspace.projects.find((p) => p.id === workspace.activeId);
+  useAttention(
+    activeIsLocal()
+      ? localChat(workspace.activeId).status === "working"
+      : view().status === "working",
+    project?.name ?? "",
+  );
+  useShortcuts({
+    openPalette: () =>
+      showOverlay(() => <CommandPalette onClose={closeOverlay} />),
+    openHelp: () => showOverlay(() => <ShortcutHelp onClose={closeOverlay} />),
+  });
   const clean = path.replace(/(.)\/$/, "$1");
   // A project on a local engine gets the local conversation at `/` and none
   // of the Claude session chrome — the strip, the permission queue and the
@@ -95,67 +129,99 @@ export default function App(): VNode {
           which section on the right. The dock and the rail are both fixed; only
           the middle scrolls. */
       }
-      <div class="shell">
+      <div class="shell" ref={shell}>
         <Dock />
         <div class="main">
-          {!isLocal && <StatusStrip />}
-          <ConnectionBanner />
+          {
+            /* Every child here is keyed, and the conditional ones render a
+              keyed placeholder rather than nothing. Four of these come and go
+              — the strip and the approval queue are Claude-only, the banners
+              are conditions — and a falsy conditional is still a child, an
+              unkeyed one, so the reconciler paired unrelated subtrees by
+              position whenever one appeared. */
+          }
+          {isLocal ? <span key="strip" hidden /> : <StatusStrip key="strip" />}
+          <ConnectionBanner key="connection" />
           {
             /* Above the routed page, not inside one: the CLI is blocked until
               this is answered, and the page you happen to be on when it asks is
               usually Sub-agents — watching the very agent that is waiting. */
           }
-          {!isLocal && <PermissionQueue requests={pendingPermissions()} />}
+          {isLocal ? <span key="approvals" hidden /> : (
+            <PermissionQueue
+              key="approvals"
+              requests={pendingPermissions()}
+            />
+          )}
           {
             /* Above the page on BOTH engines: a turn stopped in a project you
               are not looking at is the one thing that waits forever. */
           }
-          <ElsewhereBanner />
-          <Page />
+          <ElsewhereBanner key="elsewhere" />
+          <Page key="page" />
         </div>
         <Rail />
       </div>
+
+      {
+        /* Every dialog in the app renders here — see `overlays.tsx` for the
+          reason it cannot render where it is opened from. */
+      }
+      <OverlayHost />
+      {
+        /* Confirmation of things you just did, with the one thing you might
+          want to do about them. Conditions stay in banners inside the layout;
+          a notice about a past act has no place there. */
+      }
+      <ToastHost />
     </>
   );
 }
 
 /**
- * The two keystrokes a control surface with a project list and a filter on
- * every page actually needs.
+ * Install every global shortcut, from the one table that also documents them.
  *
- * Deliberately two, not twenty. A shortcut nobody can remember is a key that
- * has been taken away from the page, and this app's own composer wants every
- * plain letter for typing.
- *
- *  - **Mod+1…9** switches project. It is the most repeated action here — the
- *    whole app is about several codebases at once — and it is the one the
- *    pointer has to travel furthest for.
- *  - **`/`** puts the cursor in whatever filter the page in front of you has.
- *    Guarded by `ignoreInInput`, which is the framework's default and the
- *    reason a bare letter is safe at all: typing a slash in the composer types
- *    a slash.
+ * The loop is over a fixed-length list on purpose: `onGlobalKey` is a hook, so
+ * the count and order must not change between renders. See `commands.ts`.
  */
-function useShortcuts(): void {
-  for (let n = 1; n <= 9; n++) {
-    onGlobalKey(String(n), () => {
-      const project = workspace.projects[n - 1];
-      // Nothing at that position is a no-op, not a wrap-around: a shortcut
-      // that lands somewhere unexpected is worse than one that does nothing.
-      if (project) workspace.select(project.id);
-    }, { mod: true, ignoreInInput: false });
-  }
+function useShortcuts(ui: {
+  openPalette: () => void;
+  openHelp: () => void;
+}): void {
+  const bindings = globalBindings(ui);
+  for (const b of bindings) onGlobalKey(b.key, b.run, b.chord);
+}
 
-  onGlobalKey("/", (e) => {
-    // The filter belonging to the PAGE, not the one in the project dock —
-    // which comes first in the DOM and would otherwise win every time. The
-    // middle column is what "the thing in front of you" means here.
-    const box = document.querySelector<HTMLInputElement>(
-      ".main .input--search",
-    ) ?? document.querySelector<HTMLInputElement>(".input--search");
-    if (!box) return;
-    e.preventDefault();
-    box.focus();
-    box.select();
+/**
+ * Ctrl+wheel zooms the app, and not the browser underneath it.
+ *
+ * Electron answers a ctrl-wheel with its own page zoom, which scales the window
+ * chrome, is not persisted, and drifts out of step with the app's own zoom
+ * control until the two disagree about what 100% means. Vetoing the event and
+ * doing the work ourselves keeps one number in charge.
+ *
+ * `passive: false` is what makes `preventDefault` legal on a wheel listener at
+ * all — without it Chromium ignores the veto and zooms anyway.
+ */
+function useWheelZoom(anchor: { current: HTMLElement | null }): void {
+  onMount(() => {
+    // The window the app is actually rendered into, not the ambient global.
+    // Under `testUI` those are two different objects, and a listener on the
+    // global one never fires — the same trap a browser hides because there the
+    // two happen to be the same thing.
+    const win = anchor.current?.ownerDocument?.defaultView ?? globalThis;
+    const onWheel = (e: WheelEvent) => {
+      if (!e.ctrlKey && !e.metaKey) return;
+      e.preventDefault();
+      // One notch per event, whichever way the platform reports it: a trackpad
+      // pinch arrives as many small deltas and a mouse wheel as one big one,
+      // so the sign is the signal and the magnitude is not.
+      prefs.zoomBy(e.deltaY < 0 ? ZOOM_STEP : -ZOOM_STEP);
+    };
+    win.addEventListener("wheel", onWheel as EventListener, {
+      passive: false,
+    });
+    onCleanup(() => win.removeEventListener("wheel", onWheel as EventListener));
   });
 }
 

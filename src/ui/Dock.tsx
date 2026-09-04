@@ -25,10 +25,13 @@ import {
 import { session, sessionOf } from "../cell/session.ts";
 import { engineOf, localChat } from "../cell/local.ts";
 import type { Project } from "../type/claude.ts";
-import { tildePath } from "../lib/format.ts";
+import { hueOf, tildePath } from "../lib/format.ts";
 import { matches, Search } from "./parts.tsx";
+import { AbsentOffer, BrowseButton } from "./AddProject.tsx";
+import { showToast } from "./toast.tsx";
 import {
   IconBranch,
+  IconFolderOpen,
   IconPlus,
   IconPower,
   IconRefresh,
@@ -105,11 +108,45 @@ function ProjectTab(
       class={`ptab${props.active ? " active" : ""}${
         p.missing ? " ptab--missing" : ""
       }`}
+      // Drag to reorder. The order decides which tab Ctrl+1 reaches, so it is
+      // the user's to set — the order things happened to be added in is not a
+      // decision anybody made.
+      draggable
+      onDragStart={(e: DragEvent) => {
+        e.dataTransfer?.setData("text/cc-project", p.id);
+        if (e.dataTransfer) e.dataTransfer.effectAllowed = "move";
+      }}
+      onDragOver={(e: DragEvent) => {
+        // Only for a tab. Without the check, dropping a file from the desktop
+        // onto the dock would be accepted and then do nothing at all.
+        if (!e.dataTransfer?.types.includes("text/cc-project")) return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = "move";
+      }}
+      onDrop={(e: DragEvent) => {
+        const id = e.dataTransfer?.getData("text/cc-project");
+        if (!id || id === p.id) return;
+        e.preventDefault();
+        workspace.moveProject(id, props.index);
+      }}
     >
       <button
         type="button"
         class="ptab__main"
         aria-pressed={props.active}
+        // Alt+Up and Alt+Down reorder from the keyboard. Drag is the obvious
+        // gesture and the one nobody can perform without a pointer.
+        onKeyDown={(e: KeyboardEvent) => {
+          if (!e.altKey || (e.key !== "ArrowUp" && e.key !== "ArrowDown")) {
+            return;
+          }
+          e.preventDefault();
+          e.stopPropagation();
+          workspace.moveProject(
+            p.id,
+            props.index + (e.key === "ArrowDown" ? 1 : -1),
+          );
+        }}
         // The name alone, plus the one qualifier that changes what the tab
         // *means*. Announcing the branch and path here would make every tab a
         // sentence to listen through, and both are already in the title.
@@ -121,17 +158,42 @@ function ProjectTab(
         }${chord}`}
         onClick={() => workspace.select(p.id)}
       >
-        <span class="ptab__mark">{initials(p.name)}</span>
+        {
+          /* A colour per project, from its path. With six tabs open the one
+            you want is found by its shape before its name is read — and two
+            projects called "app" in different directories are otherwise
+            identical until you hover. */
+        }
+        <span
+          class="ptab__mark"
+          style={{ "--hue": String(hueOf(p.path)) }}
+        >
+          {initials(p.name)}
+        </span>
         <span class="ptab__text truncate">
           <span class="ptab__name truncate">{p.name}</span>
           <br />
+          {
+            /* Three children, always. Both of these used to be bare
+              conditionals, so child 0 flipped between a branch icon and
+              nothing every time the session's status changed — and the
+              reconciler then wrote the next child into the vacated slot. The
+              symptom was a tab briefly wearing another tab's subtitle. */
+          }
           <span class="ptab__sub truncate">
-            {!p.missing && p.branch && holds === 0 && !working &&
-              IconBranch({ size: 10 })}
+            <span
+              class="ptab__icon"
+              hidden={!(!p.missing && p.branch && holds === 0 && !working)}
+            >
+              {IconBranch({ size: 10 })}
+            </span>
             <span class="truncate">{sub}</span>
-            {p.dirty && !p.missing && holds === 0 && !working && (
-              <span title="Uncommitted changes">●</span>
-            )}
+            <span
+              title="Uncommitted changes"
+              hidden={!(p.dirty && !p.missing && holds === 0 && !working)}
+            >
+              ●
+            </span>
           </span>
         </span>
       </button>
@@ -180,6 +242,23 @@ function ProjectTab(
             {IconPower({ size: 12 })}
           </button>
         )}
+        {
+          /* Open the folder in whatever the desktop uses for one. The tab is
+            where somebody is already thinking about this project, and the
+            alternative is copying a path out of Settings. */
+        }
+        <button
+          type="button"
+          class="ptab__act"
+          title={`Open ${p.path}`}
+          aria-label={`Open ${p.name} folder`}
+          onClick={async () => {
+            const why = await workspace.openPath(p.path);
+            if (why !== null) showToast({ text: why, tone: "danger" });
+          }}
+        >
+          {IconFolderOpen({ size: 12 })}
+        </button>
         <button
           type="button"
           class="ptab__act ptab__act--danger"
@@ -209,46 +288,70 @@ function AddProject(): VNode {
     setOpen(false);
   };
 
-  if (!open) {
-    return (
-      <button
-        type="button"
-        class="btn btn--ghost btn--sm"
-        aria-label="Add project"
-        title="Add a project directory"
-        onClick={() => setOpen(true)}
-      >
-        {IconPlus({ size: 14 })}
-        <span class="wide">Add project</span>
-      </button>
-    );
-  }
+  // One element with the same two children whether the field is open or not.
+  // Returning a fragment in one branch and a div in the other changes the
+  // number of children this component contributes to the dock's foot, and the
+  // reconciler pairs the survivors up by position — which is how the Add
+  // button ended up wearing the offer's DOM node.
+  //
+  // The offer to create a folder outlives the field being folded away: an add
+  // that failed is the reason somebody closed it, and hiding the way forward
+  // along with the input would be the app forgetting faster than the user
+  // does.
   return (
     <div style={{ display: "grid", gap: "6px" }}>
-      <input
-        class="input"
-        value={path}
-        // Autofocus is right here and nowhere else in the app: the field only
-        // exists because the user just asked for it.
-        autoFocus
-        placeholder="~/code/project"
-        aria-label="Project directory"
-        onInput={(e) => setPath((e.target as HTMLInputElement).value)}
-        onKeyDown={(e: KeyboardEvent) => {
-          if (e.key === "Enter") submit();
-          if (e.key === "Escape") setOpen(false);
-        }}
-      />
-      <div style={{ display: "flex", gap: "6px" }}>
-        <button type="button" class="btn btn--sm" onClick={submit}>Add</button>
-        <button
-          type="button"
-          class="btn btn--ghost btn--sm"
-          onClick={() => setOpen(false)}
-        >
-          Cancel
-        </button>
-      </div>
+      {open
+        ? (
+          <div style={{ display: "grid", gap: "6px" }}>
+            <input
+              class="input"
+              value={path}
+              // Autofocus is right here and nowhere else in the app: the field
+              // only exists because the user just asked for it.
+              autoFocus
+              placeholder="~/code/project"
+              aria-label="Project directory"
+              onInput={(e) => setPath((e.target as HTMLInputElement).value)}
+              onKeyDown={(e: KeyboardEvent) => {
+                if (e.key === "Enter") submit();
+                if (e.key === "Escape") setOpen(false);
+              }}
+            />
+            <div style={{ display: "flex", gap: "6px" }}>
+              <button type="button" class="btn btn--sm" onClick={submit}>
+                Add
+              </button>
+              <BrowseButton
+                label=""
+                onPick={(picked: string) => {
+                  setPath(picked);
+                  void workspace.addProject(picked);
+                  setOpen(false);
+                }}
+              />
+              <button
+                type="button"
+                class="btn btn--ghost btn--sm"
+                onClick={() => setOpen(false)}
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        )
+        : (
+          <button
+            type="button"
+            class="btn btn--ghost btn--sm"
+            aria-label="Add project"
+            title="Add a project directory"
+            onClick={() => setOpen(true)}
+          >
+            {IconPlus({ size: 14 })}
+            <span class="wide">Add project</span>
+          </button>
+        )}
+      <AbsentOffer />
     </div>
   );
 }
@@ -307,6 +410,31 @@ export function Dock(): VNode {
     )
     : workspace.projects;
 
+  /**
+   * Up and down move between project tabs.
+   *
+   * Focus is moved rather than the selection changed: arrowing through a list
+   * that switches project on every step would spawn and tear down a session
+   * per keypress. Space or Enter still does the switching, which is what every
+   * other list in every other app does too.
+   */
+  const walk = (e: KeyboardEvent) => {
+    if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
+    const list = e.currentTarget as HTMLElement | null;
+    if (!list) return;
+    const tabs = [...list.querySelectorAll<HTMLElement>(".ptab__main")];
+    const at = tabs.indexOf(
+      (e.target as HTMLElement).closest(".ptab__main") as HTMLElement,
+    );
+    if (at === -1) return;
+    e.preventDefault();
+    // Stops at the ends rather than wrapping: a list that jumps from the last
+    // row to the first is a list you can get lost in with one keypress too
+    // many.
+    const next = tabs[e.key === "ArrowDown" ? at + 1 : at - 1];
+    next?.focus();
+  };
+
   return (
     <nav class="dock" aria-label="Projects">
       <div class="dock__head">
@@ -339,7 +467,12 @@ export function Dock(): VNode {
         </div>
       )}
 
-      <div class="dock__list">
+      {
+        /* Up and down walk the list once focus is in it. Tab already reaches
+          every tab, but Tab also walks into each tab's two overlay buttons —
+          so getting from the first project to the fourth is nine presses. */
+      }
+      <div class="dock__list" onKeyDown={walk}>
         {workspace.projects.length === 0
           ? (
             <div

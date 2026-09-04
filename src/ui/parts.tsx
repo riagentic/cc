@@ -4,6 +4,7 @@
  * tokens in `theme.tsx` — no component here owns a colour.
  */
 import {
+  afterRender,
   onCleanup,
   onGlobalKey,
   onMount,
@@ -113,6 +114,65 @@ export function Menu<T extends string>(
 
   const current = props.options.find((o) => o.id === props.value);
 
+  // Type-ahead. A menu with fourteen projects in it is a list you should be
+  // able to get to the bottom of by typing "w", the way every native menu on
+  // every platform has worked for thirty years. The buffer clears after a
+  // pause so "wo" finds "workspace" and, a second later, "w" starts again.
+  const typed = useRef("");
+  const typedAt = useRef(0);
+
+  // Focus the selected row when the popover opens, once. Without it the arrow
+  // keys do nothing until something inside has been clicked — which is the
+  // one thing a keyboard user cannot do.
+  const wasOpen = useRef(false);
+  afterRender(() => {
+    if (open === wasOpen.current) return;
+    wasOpen.current = open;
+    if (!open) return;
+    const pop = root.current?.querySelector(".menu__pop");
+    const items = [
+      ...(pop?.querySelectorAll<HTMLElement>(".menu__item") ?? []),
+    ];
+    (items.find((el) => el.classList.contains("selected")) ?? items[0])
+      ?.focus();
+  });
+
+  /** Move focus between rows, and let a typed letter jump. */
+  const navigate = (e: KeyboardEvent) => {
+    const pop = e.currentTarget as HTMLElement;
+    const items = [...pop.querySelectorAll<HTMLElement>(".menu__item")];
+    if (items.length === 0) return;
+    const at = items.indexOf(document.activeElement as HTMLElement);
+
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      const step = e.key === "ArrowDown" ? 1 : -1;
+      // Wraps: a menu is a ring, and its ends are one row apart.
+      items[(at + step + items.length) % items.length]?.focus();
+      return;
+    }
+    if (e.key === "Home" || e.key === "End") {
+      e.preventDefault();
+      items[e.key === "Home" ? 0 : items.length - 1]?.focus();
+      return;
+    }
+    // One printable character, no modifiers — anything else belongs to the
+    // browser or to a shortcut.
+    if (e.key.length !== 1 || e.ctrlKey || e.metaKey || e.altKey) return;
+    const now = Date.now();
+    typed.current = now - typedAt.current > 900
+      ? e.key.toLowerCase()
+      : typed.current + e.key.toLowerCase();
+    typedAt.current = now;
+    const hit = props.options.findIndex((o) =>
+      o.label.toLowerCase().startsWith(typed.current)
+    );
+    if (hit >= 0) {
+      e.preventDefault();
+      items[hit]?.focus();
+    }
+  };
+
   return (
     <span class="menu" ref={root}>
       <button
@@ -150,43 +210,63 @@ export function Menu<T extends string>(
             if (e.key === "Escape") {
               e.preventDefault();
               setOpen(false);
+              return;
             }
+            navigate(e);
           }}
         >
-          {props.options.map((o) => (
-            <button
-              key={o.id}
-              type="button"
-              aria-pressed={o.id === props.value}
-              // The label alone. Without it the accessible name is the label
-              // and the hint run together ("OpusDeepest reasoning") — which is
-              // what a screen reader announces and what testUI and `am` address
-              // the row by. Same reason `Choice` takes a `name`.
-              aria-label={o.label}
-              class={`menu__item${o.id === props.value ? " selected" : ""}${
-                o.tone ? ` menu__item--${o.tone}` : ""
-              }`}
-              onClick={() => {
-                setOpen(false);
-                if (o.id !== props.value) props.onChange(o.id);
-              }}
-            >
-              <span class="menu__tick">
-                {o.id === props.value ? IconCheck({ size: 13 }) : null}
-              </span>
-              <span class="truncate">
-                <span class="menu__label truncate">{o.label}</span>
-                {o.hint && (
-                  <>
-                    <br />
-                    <span class="menu__hint">{o.hint}</span>
-                  </>
-                )}
-              </span>
-              {o.trailing}
-            </button>
-          ))}
-          {props.footer && <div class="menu__foot">{props.footer}</div>}
+          {
+            /* One array with the nulls filtered out: a footer that is absent
+              is still a child, an unkeyed one, and a list where some children
+              carry keys and some do not reconciles the unkeyed ones by
+              position. */
+          }
+          {[
+            ...props.options.map((o) => (
+              <button
+                key={o.id}
+                type="button"
+                aria-pressed={o.id === props.value}
+                // The label alone. Without it the accessible name is the label
+                // and the hint run together ("OpusDeepest reasoning") — which is
+                // what a screen reader announces and what testUI and `am` address
+                // the row by. Same reason `Choice` takes a `name`.
+                aria-label={o.label}
+                class={`menu__item${o.id === props.value ? " selected" : ""}${
+                  o.tone ? ` menu__item--${o.tone}` : ""
+                }`}
+                onClick={() => {
+                  setOpen(false);
+                  if (o.id !== props.value) props.onChange(o.id);
+                }}
+              >
+                {
+                  /* The tick is always rendered and hidden when it does not
+                    apply. A child that flips between an element and nothing
+                    changes what sits at child 0, and the reconciler then
+                    writes the next row's node into this one's slot. */
+                }
+                <span
+                  class="menu__tick"
+                  style={{
+                    visibility: o.id === props.value ? "visible" : "hidden",
+                  }}
+                >
+                  {IconCheck({ size: 13 })}
+                </span>
+                <span class="truncate">
+                  <span class="menu__label truncate">{o.label}</span>
+                  <span class="menu__hint" hidden={!o.hint}>
+                    {o.hint ?? ""}
+                  </span>
+                </span>
+                {o.trailing}
+              </button>
+            )),
+            props.footer
+              ? <div class="menu__foot" key="foot">{props.footer}</div>
+              : null,
+          ].filter(Boolean)}
         </div>
       )}
     </span>
@@ -258,6 +338,13 @@ export function Stat(
     numeric?: boolean;
     /** Clamp the width so one long value cannot wrap the whole strip. */
     clamp?: boolean;
+    /**
+     * A figure worth reading but not worth a row of its own on a narrow
+     * window. Hidden below the width where the strip starts wrapping into
+     * four lines — every one of these is also reported in the rail, where it
+     * carries a badge.
+     */
+    minor?: boolean;
     title?: string;
     children?: unknown;
   },
@@ -267,6 +354,7 @@ export function Stat(
     props.grow ? "stat--grow" : "",
     props.numeric ? "stat--num" : "",
     props.clamp ? "stat--clamp" : "",
+    props.minor ? "stat--minor" : "",
   ]
     .filter(Boolean).join(" ");
   return (
@@ -283,7 +371,14 @@ export function Stat(
  * single number.
  */
 export function Meter(
-  props: { value: number; max: number; tone?: "pressure" | "flat" },
+  props: {
+    value: number;
+    max: number;
+    tone?: "pressure" | "flat";
+    /** What the bar is measuring. A progressbar with a number and no name is
+     *  announced as "42 percent" and nothing else. */
+    label?: string;
+  },
 ): VNode {
   const p = percent(props.value, props.max);
   // "flat" is for bars that compare sizes to each other — the biggest bar is
@@ -299,6 +394,7 @@ export function Meter(
     <div
       class="meter"
       role="progressbar"
+      aria-label={props.label}
       aria-valuenow={Math.round(p)}
       aria-valuemin={0}
       aria-valuemax={100}
@@ -420,8 +516,26 @@ export function Segmented<T extends string>(
     onChange: (v: T) => void;
   },
 ): VNode {
+  /** Left and right walk the group, the way a radio group does everywhere
+   *  else. The value changes as it moves — that is what makes it a segmented
+   *  control rather than a menu. */
+  const walk = (e: KeyboardEvent) => {
+    if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+    const at = props.options.findIndex((o) => o.id === props.value);
+    if (at < 0) return;
+    const next = props.options[at + (e.key === "ArrowRight" ? 1 : -1)];
+    if (!next) return;
+    e.preventDefault();
+    props.onChange(next.id);
+    // Focus follows the value, so the next arrow press continues from here.
+    const group = e.currentTarget as HTMLElement;
+    group.querySelectorAll<HTMLElement>(".seg__btn")[
+      at + (e.key === "ArrowRight" ? 1 : -1)
+    ]?.focus();
+  };
+
   return (
-    <div class="seg" role="group">
+    <div class="seg" role="group" onKeyDown={walk}>
       {props.options.map((o) => (
         <button
           key={o.id}
@@ -445,11 +559,63 @@ export function Segmented<T extends string>(
  * The confirmation is the label changing for a moment — a toast for an action
  * this small is more interruption than information.
  */
-export function Copy(props: { text: string; label?: string }): VNode {
+/**
+ * A labelled on/off switch.
+ *
+ * `role="switch"` rather than a checkbox: the state is applied the moment it is
+ * flipped, with no form to submit, and that is exactly the distinction the two
+ * roles draw. It also means one accessible name — the label — which is what a
+ * screen reader announces and what `am trigger` addresses it by.
+ *
+ * The whole row is the target, not just the 34px track. A switch you have to
+ * aim at is a switch people mis-click, and the label is right there.
+ */
+export function Toggle(
+  props: {
+    label: string;
+    checked: boolean;
+    hint?: string;
+    disabled?: boolean;
+    onChange: (on: boolean) => void;
+  },
+): VNode {
+  return (
+    <button
+      type="button"
+      role="switch"
+      class={"toggle" + (props.checked ? " on" : "")}
+      aria-checked={props.checked}
+      aria-label={props.label}
+      disabled={props.disabled}
+      onClick={() => props.onChange(!props.checked)}
+    >
+      <span class="toggle__text">
+        <span class="toggle__label">{props.label}</span>
+        {props.hint && <span class="toggle__hint">{props.hint}</span>}
+      </span>
+      <span class="toggle__track">
+        <span class="toggle__knob" />
+      </span>
+    </button>
+  );
+}
+
+/**
+ * Copy to the clipboard, with a moment of "Copied" afterwards.
+ *
+ * `text` may be a function, and for anything big it should be: a whole
+ * transcript is megabytes of string, and a component prop is evaluated on
+ * every render whether or not anybody ever presses the button.
+ */
+export function Copy(
+  props: { text: string | (() => string); label?: string },
+): VNode {
   const [done, setDone] = useLocal(false);
 
   const copy = async () => {
-    const ok = await writeClipboard(props.text);
+    const ok = await writeClipboard(
+      typeof props.text === "function" ? props.text() : props.text,
+    );
     if (!ok) return;
     setDone(true);
     // Long enough to read, short enough that the button is ready again before
@@ -507,7 +673,15 @@ async function writeClipboard(text: string): Promise<boolean> {
  */
 export function PathActions(props: { path: string; label?: string }): VNode {
   return (
-    <span class="pathacts" onClick={(e: Event) => e.stopPropagation()}>
+    <span
+      class="pathacts"
+      // The wrapper swallows activation so it never reaches the row behind it
+      // — a row that selects a file, usually. Both kinds: a click, and the
+      // keyboard activation of a button inside, which reaches the row the same
+      // way and would otherwise open a file because somebody copied its path.
+      onClick={(e: Event) => e.stopPropagation()}
+      onKeyDown={(e: Event) => e.stopPropagation()}
+    >
       <button
         type="button"
         class="btn btn--ghost btn--sm btn--icon"
@@ -556,8 +730,14 @@ export function Search(
         onInput={(e) => props.onChange((e.target as HTMLInputElement).value)}
         // Escape clears without reaching for the mouse — the box is usually the
         // only thing standing between the reader and the full list again.
+        //
+        // …and stops there. Escape also closes dialogs and menus, and clearing
+        // a filter should not additionally shut the thing the filter is in.
         onKeyDown={(e: KeyboardEvent) => {
-          if (e.key === "Escape") props.onChange("");
+          if (e.key !== "Escape" || props.value === "") return;
+          e.preventDefault();
+          e.stopPropagation();
+          props.onChange("");
         }}
       />
     </span>
@@ -600,6 +780,90 @@ export function Tags(props: { items: string[]; max?: number }): VNode {
     <div class="tags">
       {shown.map((t) => <span key={t} class="tag">{t}</span>)}
       {rest > 0 && <span class="tag">+{rest} more</span>}
+    </div>
+  );
+}
+
+/**
+ * The dimmed backdrop both sheets sit on.
+ *
+ * Escape and a click outside both close, and the scroll behind is frozen while
+ * it is open — a dialog you can scroll the page behind reads as a rendering
+ * accident rather than a layer.
+ */
+export function Overlay(
+  props: { onClose: () => void; label: string; children?: unknown },
+): VNode {
+  const scrim = useRef<HTMLDivElement | null>(null);
+
+  onMount(() => {
+    const body = document.body;
+    const prev = body.style.overflow;
+    body.style.overflow = "hidden";
+    // What had focus before the dialog opened, so it can be handed back. A
+    // dialog that closes and leaves focus on `<body>` sends the next Tab to
+    // the top of the page, which is nowhere near where anybody was.
+    const before = document.activeElement as HTMLElement | null;
+
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        props.onClose();
+        return;
+      }
+      if (e.key !== "Tab") return;
+      // Keep Tab inside. `aria-modal` tells a screen reader the rest of the
+      // page is inert; it does not stop the browser tabbing into it, and a
+      // focus ring that wanders off behind the scrim is the point at which a
+      // keyboard user has to reach for the mouse.
+      const root = scrim.current;
+      if (!root) return;
+      const stops = [...root.querySelectorAll<HTMLElement>(
+        'a[href], button:not([disabled]), input:not([disabled]), textarea:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])',
+      )].filter((el) =>
+        el.offsetParent !== null || el === document.activeElement
+      );
+      if (stops.length === 0) return;
+      const first = stops[0];
+      const last = stops[stops.length - 1];
+      const on = document.activeElement;
+      if (e.shiftKey && (on === first || !root.contains(on))) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && (on === last || !root.contains(on))) {
+        e.preventDefault();
+        first.focus();
+      }
+    };
+
+    document.addEventListener("keydown", onKey);
+    onCleanup(() => {
+      body.style.overflow = prev;
+      document.removeEventListener("keydown", onKey);
+      before?.focus?.();
+    });
+  });
+
+  return (
+    <div
+      ref={scrim}
+      class="pal__scrim"
+      role="dialog"
+      aria-modal="true"
+      aria-label={props.label}
+      // Clicking the backdrop closes. The keyboard equivalent is Escape, which
+      // the document-level handler above owns — this one is here so the
+      // dismissal is reachable from a focused backdrop too, and so the pair of
+      // handlers reads as one control rather than a click with no keyboard
+      // counterpart.
+      onClick={(e) => {
+        if (e.target === e.currentTarget) props.onClose();
+      }}
+      onKeyDown={(e: KeyboardEvent) => {
+        if (e.key === "Escape") props.onClose();
+      }}
+    >
+      {props.children as VNode}
     </div>
   );
 }

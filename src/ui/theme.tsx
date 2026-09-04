@@ -14,6 +14,7 @@
  */
 import type { VNode } from "aio/air";
 import { workspace } from "../cell/workspace.ts";
+import { ACCENTS, prefs } from "../cell/prefs.ts";
 
 /** The light palette, defined once and applied from two places: an explicit
  *  `data-theme="light"` choice, and `prefers-color-scheme` when the user has
@@ -22,7 +23,7 @@ const LIGHT = `
   color-scheme: light;
   --bg: #eef1f6;
   --bg-grad: radial-gradient(1100px 620px at 78% -12%, #e7edfa 0%, transparent 62%),
-             radial-gradient(760px 480px at -8% 8%, #fbeee8 0%, transparent 58%);
+             radial-gradient(760px 480px at -8% 8%, color-mix(in srgb, var(--accent) 16%, #ffffff) 0%, transparent 58%);
   --panel: #ffffff;
   --panel-2: #f5f7fa;
   --raise: #e7ebf3;
@@ -33,7 +34,7 @@ const LIGHT = `
   --ink-dim: #838da2;
   --accent: #c65f3c;
   --accent-ink: #ffffff;
-  --accent-soft: rgba(198,95,60,.12);
+  --accent-soft: color-mix(in srgb, var(--accent) 12%, transparent);
   --info: #2f6fd0;
   --ok: #1f8f43;
   --warn: #9a6a06;
@@ -42,12 +43,89 @@ const LIGHT = `
   --shadow: 0 1px 2px rgba(16,24,40,.06), 0 10px 28px -14px rgba(16,24,40,.28);
 `;
 
+/**
+ * The rules that collapse a side panel to icons.
+ *
+ * Written once and emitted twice: a panel collapses either because the window
+ * is narrow or because somebody asked for it, and those are two different CSS
+ * selectors for one appearance. Keeping two hand-written copies is how the
+ * manual collapse ended up hiding the gauge labels and the automatic one did
+ * not — which is exactly the bug this generator exists to make impossible.
+ *
+ * Each takes the attribute selector to scope by — or an empty string inside a
+ * media query, where the whole document is already the scope.
+ *
+ * The scope is deliberately NOT prefixed with `:root` on the descendant rules.
+ * It reads better and it is what a browser would want, but happy-dom evaluates
+ * `:root[data-x] .y` as matching the root itself, which set `display: none` on
+ * `<html>` and made every UI test fail with "the element is not visible".
+ * The custom-property rule keeps `:root` because it has to win over the base
+ * declaration, and there it is a simple compound selector that parses fine.
+ */
+const dockTight = (at: string) => `
+:root${at} { --dock: 56px; }
+${at} .dock__head, ${at} .dock__foot { padding-inline: 6px; }
+${at} .dock__head span, ${at} .ptab__text, ${at} .dock__filter { display: none; }
+/* The state dot survives the collapse — it is the one thing a 56px column
+   still has room to say, and the only warning that another project is
+   blocked. It overlaps the initials rather than taking a column of its own. */
+${at} .ptab__main { grid-template-columns: 26px; justify-content: center; padding-right: 9px; }
+${at} .ptab__state { top: 6px; right: 6px; transform: none; }
+/* No room for two 20px buttons beside a 26px badge — a collapsed dock is a
+   switcher, and removal lives in Settings at this width. */
+${at} .ptab__acts { display: none; }
+${at} .dock__undo span:first-child { display: none; }
+${at} .dock__foot .wide { display: none; }
+`;
+
+const railTight = (at: string) => `
+:root${at} { --rail: 68px; }
+${at} .rail__head, ${at} .rail__foot { padding-inline: 8px; }
+${at} .brand__text, ${at} .navcard__label, ${at} .navcard__hint { display: none; }
+${at} .rail__foot .wide { display: none; }
+${at} .navcard { grid-template-columns: 30px; justify-content: center; }
+/* The group headings go entirely. Centred and letter-spaced they still did not
+   fit, so "Background" arrived as "BACKGRO" — a label that has been cut in
+   half says less than no label at all. */
+${at} .rail__group { display: none; }
+/* The gauges keep their bars and lose their words. The colour still says
+   whether anything is on fire. */
+${at} .gauge { grid-template-columns: minmax(0, 1fr); }
+${at} .gauge__k, ${at} .gauge__v, ${at} .gauge__d { display: none; }
+`;
+
+/** Both collapses, by choice and by width. The width thresholds are where each
+ *  panel's labels actually stop fitting, measured rather than guessed. */
+const TIGHT = `
+${dockTight('[data-dock="off"]')}
+${railTight('[data-rail="off"]')}
+
+@media (max-width: 1180px) {
+${dockTight("")}
+}
+
+@media (max-width: 1100px) {
+  /* The strip wraps into four rows before this point, which costs more of the
+     conversation than these three figures are worth — and every one of them is
+     also in the rail, with a badge. */
+  .stat--minor { display: none; }
+}
+
+@media (max-width: 900px) {
+${railTight("")}
+  .chat, .composer { padding-inline: 14px; }
+  .page__body, .page__head { padding-inline: 14px; }
+  .strip { padding-inline: 14px; }
+}
+`;
+
 const CSS = `
+
 :root {
   color-scheme: dark;
   --bg: #0a0c11;
   --bg-grad: radial-gradient(1100px 620px at 78% -12%, #1b2436 0%, transparent 62%),
-             radial-gradient(760px 480px at -8% 8%, #221a17 0%, transparent 58%);
+             radial-gradient(760px 480px at -8% 8%, color-mix(in srgb, var(--accent) 14%, #0a0c11) 0%, transparent 58%);
   --panel: #11141c;
   --panel-2: #161a24;
   --raise: #1c2130;
@@ -58,7 +136,7 @@ const CSS = `
   --ink-dim: #6b7589;
   --accent: #e07a58;
   --accent-ink: #1a0f0a;
-  --accent-soft: rgba(224,122,88,.14);
+  --accent-soft: color-mix(in srgb, var(--accent) 14%, transparent);
   --info: #63a4ff;
   --ok: #46c46b;
   --warn: #e3b341;
@@ -72,6 +150,16 @@ const CSS = `
   --ease: cubic-bezier(.22,.61,.36,1);
   --rail: 248px;
   --dock: 212px;
+
+  /* The reading measure: how wide a column of prose is allowed to grow. Used
+     by the transcript and the composer together, so the text you read and the
+     box you type in are the same width — see [data-width] below. */
+  --measure: 860px;
+  /* Whole-window zoom. A factor, applied with the CSS zoom property, so every
+     px in this sheet scales at once and no size has to be written twice. */
+  --zoom: 1;
+  /* How much air the furniture gets. 1 is comfortable; compact shrinks it. */
+  --air: 1;
 
   /* aio/ui kit reskin — the kit inherits this palette instead of fighting it */
   --aio-accent: var(--accent);
@@ -87,11 +175,21 @@ const CSS = `
 }
 
 :root[data-theme="light"] {${LIGHT}}
+/* "System" means the OS decides — but only between dark and light. An explicit
+   third or fourth palette is a choice, and a choice must not be overruled by a
+   media query: without the second exclusion, choosing High contrast on a
+   machine set to light mode silently repainted it light. */
 @media (prefers-color-scheme: light) {
-  :root:not([data-theme="dark"]) {${LIGHT}}
+  :root:not([data-theme="dark"]):not([data-theme="contrast"]) {${LIGHT}}
 }
 
 * { box-sizing: border-box; }
+
+/* Zoom, done in CSS rather than by asking Electron. Viewport units are NOT
+   scaled by the zoom property — 100vh stays the real window — so the one place
+   that uses them divides it back out. Without that, every zoom step above 1
+   grew a scrollbar the size of the overflow it had just created. */
+:root { zoom: var(--zoom, 1); }
 
 html, body, #root {
   height: 100%;
@@ -133,7 +231,7 @@ body {
 .shell {
   display: grid;
   grid-template-columns: var(--dock) minmax(0, 1fr) var(--rail);
-  height: 100vh;
+  height: calc(100vh / var(--zoom, 1));
 }
 
 .rail {
@@ -194,6 +292,8 @@ body {
   font: inherit; cursor: pointer; border-radius: inherit;
 }
 .ptab:hover { background: var(--panel-2); color: var(--ink); }
+/* Dragging a tab. The browser draws the ghost; this is the hole it left. */
+.ptab[draggable="true"]:active { cursor: grabbing; }
 .ptab.active {
   background: var(--accent-soft); color: var(--ink);
   border-color: color-mix(in srgb, var(--accent) 30%, transparent);
@@ -202,10 +302,27 @@ body {
   content: ""; position: absolute; left: -8px; top: 50%; transform: translateY(-50%);
   width: 3px; height: 22px; border-radius: 0 3px 3px 0; background: var(--accent);
 }
+/* The per-project mark. Its hue comes from the project's path (see hueOf), at
+   a saturation low enough that six of them side by side still read as one
+   quiet column rather than a box of crayons. The selected tab drops the hue
+   and takes the accent: exactly one tab is the current one, and that has to be
+   unmistakable. */
 .ptab__mark {
   width: 26px; height: 26px; border-radius: 7px; display: grid; place-items: center;
-  background: var(--raise); color: var(--ink-soft);
+  background: hsl(var(--hue, 0) 34% 42% / .22);
+  color: hsl(var(--hue, 0) 46% 72%);
   font-size: 11.5px; font-weight: 700; letter-spacing: -.02em; text-transform: uppercase;
+}
+:root[data-theme="light"] .ptab__mark { color: hsl(var(--hue, 0) 44% 34%); }
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]):not([data-theme="contrast"]) .ptab__mark { color: hsl(var(--hue, 0) 44% 34%); }
+}
+.ptab.active .ptab__acts {
+  background: linear-gradient(
+    90deg,
+    transparent,
+    color-mix(in srgb, var(--accent) 16%, var(--panel)) 55%
+  );
 }
 .ptab.active .ptab__mark { background: color-mix(in srgb, var(--accent) 22%, transparent); color: var(--accent); }
 .ptab__name { font-size: 12.5px; font-weight: 560; letter-spacing: -.005em; }
@@ -237,6 +354,12 @@ body {
 .ptab__acts {
   position: absolute; right: 5px; top: 50%; transform: translateY(-50%);
   display: flex; gap: 2px;
+  /* The buttons float over the project name, so they need a ground of their
+     own — three icons scattered across the words behind them read as damage.
+     The gradient fades in from the left so the name is not cut off with a
+     hard edge. */
+  padding-left: 18px; border-radius: 7px;
+  background: linear-gradient(90deg, transparent, var(--panel-2) 55%);
   /* Hidden means UNCLICKABLE. opacity 0 alone still hit-tests, so the tab
      carried invisible buttons that ate clicks aimed at the project. */
   opacity: 0; pointer-events: none;
@@ -277,6 +400,7 @@ body {
 .ptab--missing .ptab__name { text-decoration: line-through; text-decoration-color: color-mix(in srgb, var(--danger) 60%, transparent); }
 
 .brand { display: flex; align-items: center; gap: 10px; }
+/* The pressable half of it is declared further down, with the palette. */
 .brand__mark {
   width: 34px; height: 34px; border-radius: 10px; display: grid; place-items: center;
   background: linear-gradient(150deg, var(--accent), color-mix(in srgb, var(--accent) 55%, var(--violet)));
@@ -324,7 +448,13 @@ body {
 /* ── content ────────────────────────────────────────────────────────────── */
 
 .main { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
-.page { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; }
+/* A page arrives rather than appearing. Two hundred milliseconds and four
+   pixels — enough to say "this is a different page" and not enough to make
+   anybody wait for it. Deliberately a fade UP from transparent over the
+   layout's own background, never a repaint of the shell: a white frame
+   between two dark pages is the single worst thing a dark app can do. */
+.page { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; animation: pageIn .2s var(--ease); }
+@keyframes pageIn { from { opacity: 0; transform: translateY(4px); } }
 .page__body { flex: 1; min-height: 0; overflow-y: auto; padding: 18px 22px 26px; }
 .page__head { padding: 16px 22px 10px; display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
 .page__title { font-size: 17px; font-weight: 640; letter-spacing: -.015em; margin: 0; }
@@ -393,6 +523,10 @@ body {
 /* ── meter ──────────────────────────────────────────────────────────────── */
 
 .meter { height: 7px; border-radius: 99px; background: var(--raise); overflow: hidden; position: relative; }
+/* The bar animates to its new width rather than jumping. A context meter that
+   snaps looks like a redraw; one that moves reads as a measurement changing,
+   which is what it is. Reduced motion turns this off with everything else. */
+.meter__fill { transition: width .32s var(--ease), background .2s var(--ease); }
 .meter__fill { height: 100%; border-radius: 99px; transition: width .45s var(--ease), background .3s var(--ease); }
 .meter__fill--ok { background: linear-gradient(90deg, var(--info), color-mix(in srgb, var(--info) 60%, var(--violet))); }
 .meter__fill--warn { background: linear-gradient(90deg, var(--warn), var(--accent)); }
@@ -473,7 +607,7 @@ button.rowitem:hover { background: var(--panel-2); }
 .filepane { min-height: 0; overflow: auto; padding: 12px 16px 20px; }
 
 .treerow {
-  display: grid; grid-template-columns: 16px minmax(0, 1fr) auto; align-items: center; gap: 7px;
+  display: grid; grid-template-columns: 16px minmax(0, 1fr) 12px auto; align-items: center; gap: 7px;
   width: 100%; text-align: left; font: inherit; color: var(--ink-soft);
   background: none; border: 0; cursor: pointer;
   padding: 3px 12px 3px 0; line-height: 1.5;
@@ -485,6 +619,17 @@ button.rowitem:hover { background: var(--panel-2); }
 .treerow.selected .treerow__icon, .treerow--dir .treerow__icon { color: var(--ink-soft); }
 .treerow__name { font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .treerow--dir .treerow__name { font-weight: 560; }
+/* One letter, in the margin, in git's own vocabulary: M for modified, A for a
+   file git has not seen before. Colour AND a letter, so it survives a
+   colour-blind reader and a black-and-white screenshot alike. */
+.treerow__git {
+  width: 12px; flex: none; text-align: center;
+  font-family: var(--mono); font-size: 10px; font-weight: 700;
+  color: transparent;
+}
+.treerow__git--modified { color: var(--warn); }
+.treerow__git--new { color: var(--ok); }
+
 .treerow__size { font-size: 10.5px; color: var(--ink-dim); font-variant-numeric: tabular-nums; white-space: nowrap; }
 /* The overlay this panel exists for: a file the session read, or changed.
    Sized by content with a floor, not pinned to the icon's width: the same cell
@@ -506,8 +651,9 @@ button.rowitem:hover { background: var(--panel-2); }
 
 /* ── chat ───────────────────────────────────────────────────────────────── */
 
+.chatwrap { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .chat { flex: 1; min-height: 0; overflow-y: auto; padding: 20px 22px 8px; scroll-behavior: smooth; }
-.thread { max-width: 860px; margin: 0 auto; display: flex; flex-direction: column; gap: 18px; }
+.thread { max-width: var(--measure); margin: 0 auto; display: flex; flex-direction: column; gap: 18px; }
 
 .msg { display: grid; grid-template-columns: 30px minmax(0,1fr); gap: 12px; animation: rise .22s var(--ease); }
 @keyframes rise { from { opacity: 0; transform: translateY(6px); } }
@@ -635,6 +781,9 @@ button.rowitem:hover { background: var(--panel-2); }
   border-radius: var(--radius-sm); padding: 7px 9px;
 }
 .perm__toggle { justify-self: start; padding-left: 0; }
+/* The digit on an approval button. Dimmer than the label — it is a hint about
+   how to press the button, not part of what the button says. */
+.perm__actions .kbd { margin-left: 6px; opacity: .55; font-size: 10px; }
 .perm__actions { display: flex; align-items: center; gap: 8px; }
 .perm__deny { display: grid; gap: 8px; }
 .perm__hint { font-size: 11.5px; color: var(--ink-dim); }
@@ -657,7 +806,7 @@ button.rowitem:hover { background: var(--panel-2); }
 
 .composer { padding: 10px 22px 18px; }
 .composer__inner {
-  max-width: 860px; margin: 0 auto;
+  max-width: var(--measure); margin: 0 auto;
   border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel);
   box-shadow: var(--shadow); transition: border-color .16s var(--ease), box-shadow .16s var(--ease);
 }
@@ -720,6 +869,10 @@ button.rowitem:hover { background: var(--panel-2); }
 }
 .input--search::-webkit-search-cancel-button { filter: invert(.5); }
 .field { display: grid; gap: 6px; }
+/* Air between consecutive controls. Without it a field's hint sits directly
+   under the control it explains AND directly above the next field's label, and
+   the reader has to work out which one it belongs to. */
+.field + .field, .field + .stack, .stack + .field { margin-top: 14px; }
 .field__label { font-size: 12px; font-weight: 600; color: var(--ink-soft); }
 .field__hint { font-size: 11.5px; color: var(--ink-dim); }
 
@@ -795,7 +948,9 @@ button.rowitem:hover { background: var(--panel-2); }
    block it produced its own line break AND kept the <br>, so every option in
    an open menu was double-spaced and a six-option list filled half the window. */
 .menu__label { font-weight: 560; }
-.menu__hint { font-size: 11.5px; color: var(--ink-dim); font-weight: 500; }
+/* Always rendered, so the row keeps one shape; a block so it still sits
+   under the label rather than beside it. */
+.menu__hint { display: block; font-size: 11.5px; color: var(--ink-dim); font-weight: 500; }
 .menu__foot {
   margin-top: 3px; padding: 7px 8px 3px; border-top: 1px solid var(--line-soft);
   font-size: 11.5px; color: var(--ink-dim);
@@ -840,38 +995,644 @@ button.rowitem:hover { background: var(--panel-2); }
   * { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; scroll-behavior: auto !important; }
 }
 
-/* Two collapse steps, because there are now two panels to give up. The dock
-   goes to icons first — a project is recognisable from its initial and its
-   colour — and the rail follows only when the window is genuinely small. */
-@media (max-width: 1180px) {
-  :root { --dock: 56px; }
-  .dock__head, .dock__foot { padding-inline: 6px; }
-  .dock__head span, .ptab__text { display: none; }
-  /* The state dot survives the collapse — it is the one thing a 56px column
-     still has room to say, and the only warning that another project is
-     blocked. It overlaps the initials rather than taking a column of its own. */
-  .ptab__main { grid-template-columns: 26px; justify-content: center; padding-right: 9px; }
-  .ptab__state { top: 6px; right: 6px; transform: none; }
-  /* No room for two 20px buttons beside a 26px badge — the collapsed dock is a
-     switcher, and removal lives in Settings at this width. */
-  .ptab__acts { display: none; }
-  .dock__undo span:first-child { display: none; }
+/* The byline furniture: the time, and the per-message actions. Both are quiet
+   until the pointer is on the message — a transcript is for reading, and a row
+   of buttons on every paragraph is a row of buttons nobody reads past. The
+   time can be pinned on in the appearance settings, for anyone who wants it
+   always on. */
+.msg__time {
+  margin-left: 8px; font-weight: 500; color: var(--ink-dim);
+  opacity: 0; transition: opacity .14s var(--ease);
+}
+.msg:hover .msg__time, [data-stamps="on"] .msg__time { opacity: 1; }
+
+.msg__acts {
+  display: inline-flex; gap: 4px; margin-left: 8px; vertical-align: -3px;
+  opacity: 0; transition: opacity .14s var(--ease);
+}
+.msg:hover .msg__acts, .msg__acts:focus-within { opacity: 1; }
+.msg__acts .btn { padding: 2px 7px; font-size: 11px; font-weight: 500; text-transform: none; letter-spacing: 0; }
+
+/* Back to the bottom of a growing transcript. Floats over the chat, above the
+   composer, and exists only while you are somewhere else. */
+.jump {
+  position: absolute; left: 50%; transform: translateX(-50%);
+  bottom: 12px; z-index: 5;
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 6px 12px; border-radius: 99px; cursor: pointer;
+  font: inherit; font-size: 12px; font-weight: 560;
+  background: var(--panel); color: var(--ink);
+  border: 1px solid var(--line); box-shadow: var(--shadow);
+  animation: rise .18s var(--ease);
+}
+.jump:hover { border-color: color-mix(in srgb, var(--accent) 50%, var(--line)); }
+/* Something actually arrived while you were reading back. Worth the accent —
+   "there is more below" and "three people said something" are different
+   messages, and only the second one is news. */
+.jump--new {
+  background: var(--accent); color: var(--accent-ink);
+  border-color: var(--accent);
 }
 
-@media (max-width: 900px) {
-  :root { --rail: 68px; }
-  .rail__head, .rail__foot { padding-inline: 8px; }
-  .brand__text, .navcard__label, .navcard__hint, .rail__foot .wide { display: none; }
-  .navcard { grid-template-columns: 30px; justify-content: center; }
-  .rail__group { text-align: center; padding-inline: 0; letter-spacing: .04em; }
-  .chat, .composer { padding-inline: 14px; }
-  .page__body, .page__head { padding-inline: 14px; }
+/* A column of related controls. One gap, declared once, so every stack of
+   switches in the app is spaced the same. */
+.stack { display: grid; gap: 8px; }
+
+/* A switch. The row is the hit target; the track on the right is the picture of
+   the state, not the button. */
+.toggle {
+  width: 100%; display: flex; align-items: center; gap: 12px; text-align: left;
+  padding: 8px 10px; border: 1px solid var(--line); border-radius: var(--radius-sm);
+  background: var(--panel-2); color: var(--ink); font: inherit; cursor: pointer;
+  transition: border-color .15s var(--ease), background .15s var(--ease);
 }
+.toggle:hover:not(:disabled) { border-color: color-mix(in srgb, var(--accent) 40%, var(--line)); }
+.toggle:disabled { opacity: .5; cursor: not-allowed; }
+.toggle__text { flex: 1; min-width: 0; }
+.toggle__label { display: block; font-size: 13px; font-weight: 540; }
+.toggle__hint { display: block; font-size: 11.5px; color: var(--ink-dim); }
+.toggle__track {
+  flex: none; width: 34px; height: 20px; border-radius: 99px;
+  background: var(--raise); border: 1px solid var(--line);
+  display: flex; align-items: center; padding: 2px;
+  transition: background .16s var(--ease), border-color .16s var(--ease);
+}
+.toggle__knob {
+  width: 14px; height: 14px; border-radius: 99px; background: var(--ink-dim);
+  transition: transform .16s var(--ease), background .16s var(--ease);
+}
+.toggle.on .toggle__track { background: var(--accent-soft); border-color: color-mix(in srgb, var(--accent) 55%, transparent); }
+.toggle.on .toggle__knob { transform: translateX(14px); background: var(--accent); }
+
+/* The accent swatches. A colour picker whose options are colours — no names
+   needed to choose, names kept for the screen reader. */
+.swatches { display: flex; flex-wrap: wrap; gap: 8px; }
+.swatch {
+  width: 30px; height: 30px; border-radius: 9px; cursor: pointer;
+  border: 2px solid transparent; background: none; padding: 3px;
+  transition: transform .14s var(--ease), border-color .14s var(--ease);
+}
+.swatch span { display: block; width: 100%; height: 100%; border-radius: 6px; }
+.swatch:hover { transform: translateY(-1px); }
+.swatch.selected { border-color: var(--ink-soft); }
+
+/* A number you can nudge: minus, the value, plus. Used by zoom, and shaped so
+   the value never moves as it changes width. */
+.stepper { display: inline-flex; align-items: center; gap: 6px; }
+.stepper__v {
+  min-width: 58px; text-align: center; font-family: var(--mono); font-size: 12.5px;
+  color: var(--ink-soft);
+}
+
+/* ── find in conversation ───────────────────────────────────────────────────
+   A bar over the transcript, not a dialog: you keep reading while you search,
+   and the matches are behind it. */
+
+.find {
+  position: absolute; top: 10px; right: 18px; z-index: 6;
+  display: flex; align-items: center; gap: 4px;
+  padding: 5px 6px 5px 10px;
+  background: var(--panel); border: 1px solid var(--line);
+  border-radius: 99px; box-shadow: var(--shadow);
+  animation: rise .16s var(--ease);
+}
+.find__icon { color: var(--ink-dim); display: grid; place-items: center; }
+.find__input {
+  width: 210px; border: 0; background: none; outline: none;
+  color: var(--ink); font: inherit; font-size: 13px;
+}
+.find__input::placeholder { color: var(--ink-dim); }
+.find__count {
+  font-family: var(--mono); font-size: 11px; color: var(--ink-dim);
+  min-width: 44px; text-align: right;
+}
+
+/* A matched message, and the one you are on. The current match gets the
+   accent; the others get a quiet rail so you can see how far apart they are
+   without being shouted at. */
+.msg--hit .msg__body, .msg--found .msg__body {
+  border-left: 2px solid var(--line);
+  padding-left: 10px; margin-left: -12px;
+}
+.msg--found .msg__body { border-left-color: var(--accent); }
+
+/* ── toasts ─────────────────────────────────────────────────────────────────
+   Bottom right, above everything, out of the way of the composer — which is
+   bottom centre and is where the hands are. */
+
+.toasts {
+  position: fixed; right: 16px; bottom: 16px; z-index: 70;
+  display: flex; flex-direction: column-reverse; gap: 8px;
+  max-width: min(420px, calc(100vw - 32px));
+  pointer-events: none;
+}
+.toast {
+  pointer-events: auto;
+  display: flex; align-items: center; gap: 10px;
+  padding: 9px 10px 9px 12px; font-size: 13px;
+  background: var(--panel); color: var(--ink);
+  border: 1px solid var(--line); border-left-width: 3px;
+  border-radius: var(--radius-sm); box-shadow: var(--shadow);
+  animation: toastIn .18s var(--ease);
+}
+@keyframes toastIn { from { opacity: 0; transform: translateY(8px); } }
+.toast--ok { border-left-color: var(--ok); }
+.toast--warn { border-left-color: var(--warn); }
+.toast--danger { border-left-color: var(--danger); }
+.toast__icon { display: grid; place-items: center; color: var(--ink-dim); }
+.toast--ok .toast__icon { color: var(--ok); }
+.toast--warn .toast__icon { color: var(--warn); }
+.toast--danger .toast__icon { color: var(--danger); }
+.toast__text { flex: 1; min-width: 0; }
+
+/* ── high contrast ──────────────────────────────────────────────────────────
+   A fourth palette, not a filter over dark. Three things change and they are
+   the three that actually make text hard to read: the ink goes to full white
+   on near-black, every hairline becomes a line you can see, and the muted
+   greys that carry secondary text move up until they pass on their own rather
+   than by being next to something brighter.
+
+   Colour still exists — it just stops being the only thing carrying meaning:
+   a working dot is brighter AND still a dot, a danger pill is redder AND still
+   says what it is. */
+:root[data-theme="contrast"] {
+  color-scheme: dark;
+  --bg: #000000;
+  --bg-grad: none;
+  --panel: #0c0c0f;
+  --panel-2: #151519;
+  --raise: #24242b;
+  --line: #4a4a55;
+  --line-soft: #33333c;
+  --ink: #ffffff;
+  --ink-soft: #d6d9e2;
+  --ink-dim: #a8adba;
+  --accent: #ff9a70;
+  --accent-ink: #000000;
+  --accent-soft: color-mix(in srgb, var(--accent) 26%, transparent);
+  --info: #8cc2ff;
+  --ok: #5fe08a;
+  --warn: #ffd34d;
+  --danger: #ff8b80;
+  --violet: #c4a4ff;
+  --shadow: 0 0 0 1px #4a4a55, 0 12px 32px -12px #000;
+}
+/* Borders that were decoration become structure. */
+:root[data-theme="contrast"] .panel,
+:root[data-theme="contrast"] .toolchip,
+:root[data-theme="contrast"] .bubble,
+:root[data-theme="contrast"] .rowitem,
+:root[data-theme="contrast"] .btn { border-color: var(--line); }
+:root[data-theme="contrast"] .navcard.active,
+:root[data-theme="contrast"] .ptab.active {
+  outline: 1px solid var(--accent);
+}
+/* Focus has to survive on a black ground with white text on it. */
+:root[data-theme="contrast"] :focus-visible {
+  outline: 3px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* ── command palette ────────────────────────────────────────────────────────
+   One overlay, two sheets: the palette and the shortcut map. It is deliberately
+   near the top of the window rather than centred — the eye is already up there
+   after pressing the key, and a list that grows downward never moves the row
+   you were about to click. */
+
+.pal__scrim {
+  position: fixed; inset: 0; z-index: 60;
+  display: flex; justify-content: center; align-items: flex-start;
+  padding: 10vh 16px 16px;
+  background: color-mix(in srgb, #000 46%, transparent);
+  backdrop-filter: blur(3px);
+  animation: palIn .12s var(--ease);
+}
+@keyframes palIn { from { opacity: 0; } }
+
+.pal {
+  width: min(680px, 100%); max-height: 74vh;
+  display: flex; flex-direction: column; min-height: 0;
+  background: var(--panel); border: 1px solid var(--line);
+  border-radius: var(--radius); box-shadow: var(--shadow);
+  overflow: hidden;
+  animation: palRise .16s var(--ease);
+}
+@keyframes palRise { from { opacity: 0; transform: translateY(-8px) scale(.99); } }
+
+.pal__search {
+  display: flex; align-items: center; gap: 10px;
+  padding: 12px 14px; border-bottom: 1px solid var(--line-soft);
+}
+.pal__icon { color: var(--ink-dim); display: grid; place-items: center; }
+.pal__input {
+  flex: 1; min-width: 0; border: 0; background: none; outline: none;
+  color: var(--ink); font: inherit; font-size: 15px;
+}
+.pal__input::placeholder { color: var(--ink-dim); }
+
+.pal__list { flex: 1; min-height: 0; overflow-y: auto; padding: 6px; }
+.pal__group {
+  font-size: 9.5px; text-transform: uppercase; letter-spacing: .1em; font-weight: 700;
+  color: var(--ink-dim); padding: 10px 10px 4px;
+}
+.pal__row {
+  width: 100%; display: grid; grid-template-columns: 22px minmax(0,1fr) auto;
+  align-items: center; gap: 10px; text-align: left;
+  padding: 7px 10px; border: 1px solid transparent; border-radius: var(--radius-sm);
+  background: none; color: var(--ink); font: inherit; cursor: pointer;
+}
+.pal__row.selected {
+  background: var(--accent-soft);
+  border-color: color-mix(in srgb, var(--accent) 30%, transparent);
+}
+.pal__row--danger.selected { background: color-mix(in srgb, var(--danger) 12%, transparent); border-color: color-mix(in srgb, var(--danger) 34%, transparent); }
+.pal__rowicon { color: var(--ink-dim); display: grid; place-items: center; }
+.pal__row.selected .pal__rowicon { color: var(--accent); }
+.pal__label { display: block; font-size: 13.5px; font-weight: 540; }
+.pal__hint {
+  display: block; font-size: 11.5px; color: var(--ink-dim);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.pal__keys { display: inline-flex; gap: 3px; flex: none; }
+.pal__none { padding: 22px 12px; text-align: center; color: var(--ink-dim); font-size: 13px; }
+.pal__foot {
+  display: flex; gap: 16px; padding: 8px 14px;
+  border-top: 1px solid var(--line-soft); background: var(--panel-2);
+  font-size: 11px; color: var(--ink-dim);
+}
+.pal__foot .kbd { font-size: 10px; }
+
+.pal__title {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 13px 14px; border-bottom: 1px solid var(--line-soft);
+  font-size: 14px; font-weight: 640;
+}
+.pal__help {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 6px 10px; font-size: 13px; color: var(--ink-soft);
+}
+
+/* The offer to create a folder that is not there. Sits under the field it is
+   about, in the accent rather than in a warning colour: nothing has gone
+   wrong, there is simply a decision to make. */
+.absent {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  margin-top: 8px; padding: 8px 10px; font-size: 12.5px;
+  border: 1px solid color-mix(in srgb, var(--accent) 34%, transparent);
+  background: var(--accent-soft); border-radius: var(--radius-sm);
+}
+.absent .truncate { flex: 1; min-width: 140px; }
+.absent code { font-size: 12px; }
+
+/* A folded code block. The fade says there is more without pretending the
+   block ends — a hard cut reads as the end of the file. */
+.md__pre--folded { padding-bottom: 30px; }
+.md__pre--folded code {
+  -webkit-mask-image: linear-gradient(180deg, #000 calc(100% - 46px), transparent);
+  mask-image: linear-gradient(180deg, #000 calc(100% - 46px), transparent);
+}
+.md__more {
+  position: absolute; left: 0; right: 0; bottom: 0;
+  border: 0; border-top: 1px solid var(--line-soft);
+  background: var(--panel-2); color: var(--ink-soft);
+  font: inherit; font-family: var(--font); font-size: 11.5px; font-weight: 560;
+  padding: 5px 0; cursor: pointer; border-radius: 0 0 var(--radius-sm) var(--radius-sm);
+}
+.md__more:hover { color: var(--accent); }
+
+/* Struck-through text. Muted as well as struck: the point of the mark is that
+   this is the version that no longer applies. */
+.md del { color: var(--ink-dim); text-decoration-color: var(--ink-dim); }
+
+/* Task lists. The box is the marker, so the bullet goes — a checklist with
+   bullets AND boxes is two markers for one item. */
+.md__list--tasks { list-style: none; padding-left: 2px; }
+.md__task { position: relative; }
+.md__box {
+  display: inline-grid; place-items: center;
+  width: 14px; height: 14px; margin-right: 7px; vertical-align: -2px;
+  border: 1px solid var(--line); border-radius: 4px;
+  background: var(--panel-2); color: var(--accent-ink);
+  font-size: 10px; line-height: 1; flex: none;
+}
+.md__box.on { background: var(--accent); border-color: var(--accent); }
+
+/* A code span that names a file. It stays a code span — same type, same tint —
+   and only picks up the hover of something you can press, because that is the
+   whole claim being made: this one opens. */
+.md__path {
+  font: inherit; cursor: pointer; text-align: left;
+  border: 1px solid transparent;
+}
+.md__path:hover {
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  color: var(--accent);
+}
+
+/* A day divider in the transcript. A rule with the day's name sitting in it —
+   quiet enough to be furniture, present enough to answer "when was this". */
+.daymark {
+  display: flex; align-items: center; gap: 12px;
+  margin: 4px 0; color: var(--ink-dim);
+  font-size: 10.5px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase;
+}
+.daymark::before, .daymark::after {
+  content: ""; flex: 1; height: 1px; background: var(--line-soft);
+}
+
+/* The brand doubles as the palette's front door, so it has to look pressable
+   without becoming a button-shaped thing in the corner of every screenshot. */
+.brand {
+  position: relative;
+  width: 100%; border: 1px solid transparent; background: none; color: inherit;
+  font: inherit; text-align: left; cursor: pointer; border-radius: var(--radius-sm);
+  padding: 4px; margin: -4px;
+  transition: background .14s var(--ease), border-color .14s var(--ease);
+}
+.brand:hover { background: var(--panel-2); border-color: var(--line-soft); }
+/* Taken out of the flow: it appears on hover, and a hint that reserves width
+   while invisible was quietly clipping the app's own name. */
+.brand__key {
+  position: absolute; right: 6px; top: 50%; transform: translateY(-50%);
+  display: flex; gap: 3px; opacity: 0;
+  padding-left: 14px;
+  background: linear-gradient(90deg, transparent, var(--panel-2) 45%);
+  transition: opacity .14s var(--ease);
+}
+.brand:hover .brand__key, .brand:focus-visible .brand__key { opacity: 1; }
+.brand__key .kbd { font-size: 9.5px; }
+
+/* ── slash commands ─────────────────────────────────────────────────────────
+   A menu above the composer, the same width as it. Above rather than below,
+   because below is where the composer is and there is nothing under it. */
+
+.slash {
+  max-width: var(--measure); margin: 0 auto 6px;
+  border: 1px solid var(--line); border-radius: var(--radius);
+  background: var(--panel); box-shadow: var(--shadow);
+  overflow: hidden;
+  animation: rise .14s var(--ease);
+}
+.slash__row {
+  width: 100%; display: flex; align-items: baseline; gap: 10px;
+  padding: 6px 12px; border: 0; background: none; color: var(--ink);
+  font: inherit; text-align: left; cursor: pointer;
+}
+.slash__row.selected { background: var(--accent-soft); }
+.slash__name { font-family: var(--mono); font-size: 12.5px; font-weight: 600; flex: none; }
+.slash__row.selected .slash__name { color: var(--accent); }
+.slash__hint { font-size: 11.5px; color: var(--ink-dim); min-width: 0; }
+
+/* What a turn took, under the answer it belongs to. Deliberately the quietest
+   thing in the transcript: it is a receipt, and a receipt that competes with
+   the answer is a receipt in the way. */
+.turnfoot {
+  display: flex; flex-wrap: wrap; gap: 12px;
+  font-family: var(--mono); font-size: 10.5px; color: var(--ink-dim);
+  padding-left: 2px;
+}
+
+/* The way from a tool call to the file it touched. Quiet until the chip is
+   hovered — it is an answer to a question you only have after reading the
+   call. */
+.toolchip__open {
+  display: inline-flex; align-items: center; gap: 5px;
+  margin-top: 4px; padding: 2px 8px;
+  border: 1px solid var(--line); border-radius: 99px;
+  background: var(--panel-2); color: var(--ink-dim);
+  font: inherit; font-size: 10.5px; cursor: pointer;
+  /* Dimmed rather than hidden. A control that does not exist until the pointer
+     finds it is a control that keyboard users, screen readers and tests never
+     find at all — and this one is worth knowing about. */
+  opacity: .45; transition: opacity .14s var(--ease), color .14s var(--ease);
+}
+div:hover > .toolchip__open, .toolchip__open:focus-visible { opacity: 1; }
+.toolchip__open:hover { color: var(--accent); }
+
+/* ── diffs ──────────────────────────────────────────────────────────────────
+   A tinted line and a sign in the gutter. Both, deliberately: a red line and a
+   green line are the same line to a good fraction of readers, and this is the
+   view somebody uses to decide whether to approve a change. */
+
+.diff {
+  border: 1px solid var(--line-soft); border-radius: var(--radius-sm);
+  background: var(--panel-2); overflow: hidden;
+}
+.diff__stat {
+  display: flex; gap: 10px; padding: 5px 10px;
+  border-bottom: 1px solid var(--line-soft);
+  font-family: var(--mono); font-size: 11px;
+}
+.diff__plus { color: var(--ok); }
+.diff__minus { color: var(--danger); }
+.diff__body {
+  margin: 0; padding: 6px 0; overflow-x: auto;
+  font-family: var(--mono); font-size: 12px; line-height: 1.55;
+}
+.diff__line { padding: 0 10px 0 0; white-space: pre; }
+.diff__sign {
+  display: inline-block; width: 20px; text-align: center;
+  color: var(--ink-dim); user-select: none;
+}
+.diff__line--add { background: color-mix(in srgb, var(--ok) 13%, transparent); }
+.diff__line--add .diff__sign { color: var(--ok); }
+.diff__line--del { background: color-mix(in srgb, var(--danger) 13%, transparent); }
+.diff__line--del .diff__sign { color: var(--danger); }
+.diff__gap {
+  padding: 3px 10px 3px 30px; color: var(--ink-dim); font-size: 11px;
+  background: var(--panel); border-block: 1px solid var(--line-soft);
+}
+
+/* ── machine gauges ─────────────────────────────────────────────────────────
+   Three columns: what it is, how full, and the number. Deliberately not a
+   chart — a sparkline of the last minute is prettier and answers a question
+   nobody standing here is asking, which is "is the machine busy right now". */
+
+.machine { display: grid; gap: 5px; }
+.gauge {
+  display: grid; grid-template-columns: 34px minmax(0, 1fr) 34px;
+  align-items: center; gap: 7px; font-size: 10.5px;
+}
+.gauge__k { color: var(--ink-dim); font-weight: 700; letter-spacing: .05em; }
+.gauge__v { color: var(--ink-soft); text-align: right; font-size: 10.5px; }
+.gauge__d { grid-column: 2 / -1; color: var(--ink-dim); font-size: 10.5px; }
+.gauge__bar .meter { height: 4px; }
+
+/* The wide version, in Settings, has room for the detail line beside the bar
+   rather than under it. */
+.machine--wide { gap: 9px; }
+.machine--wide .gauge { grid-template-columns: 44px minmax(0, 1fr) 42px; font-size: 12px; }
+.machine--wide .gauge__bar .meter { height: 6px; }
+.machine--wide .gauge__v { font-size: 12px; }
+.machine--wide .gauge__d { font-size: 11.5px; }
+
+/* Collapsed rail: the bars alone. A label of three letters is the first thing
+   to go, and the colour still says whether anything is on fire. */
+[data-rail="off"] .gauge { grid-template-columns: minmax(0, 1fr); }
+[data-rail="off"] .gauge__k, [data-rail="off"] .gauge__v, [data-rail="off"] .gauge__d { display: none; }
+
+/* ── folder picker ──────────────────────────────────────────────────────────
+   The palette's chrome with a path bar on top and a decision bar underneath.
+   It reuses the palette classes on purpose: two overlays that look like two
+   different apps is the kind of thing nobody can name and everybody feels. */
+
+.pick__crumbs {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 10px; border-bottom: 1px solid var(--line-soft);
+  background: var(--panel-2);
+}
+.pick__trail {
+  flex: 1; min-width: 0; display: flex; align-items: center; gap: 1px;
+  overflow-x: auto; white-space: nowrap;
+  scrollbar-width: none;
+}
+.pick__trail::-webkit-scrollbar { display: none; }
+.pick__crumb {
+  border: 0; background: none; color: var(--ink-soft); cursor: pointer;
+  font: inherit; font-size: 12px; padding: 3px 6px; border-radius: 6px;
+}
+.pick__crumb:hover { background: var(--raise); color: var(--ink); }
+.pick__crumb:last-child { color: var(--ink); font-weight: 600; }
+.pick__crumb + .pick__crumb::before { content: "/"; color: var(--ink-dim); margin-right: 8px; }
+
+.pick__row {
+  display: flex; align-items: center; gap: 6px;
+  border: 1px solid transparent; border-radius: var(--radius-sm); padding-right: 6px;
+}
+.pick__row.selected {
+  background: var(--accent-soft);
+  border-color: color-mix(in srgb, var(--accent) 30%, transparent);
+}
+.pick__open {
+  flex: 1; min-width: 0;
+  display: grid; grid-template-columns: 22px minmax(0,1fr); align-items: center; gap: 10px;
+  text-align: left; padding: 7px 10px; border: 0; background: none;
+  color: var(--ink); font: inherit; cursor: pointer; border-radius: inherit;
+}
+.pick__row.selected .pal__rowicon { color: var(--accent); }
+/* The second action stays out of the way until the row is the one in play —
+   a Choose button on every row turns the list into a wall of buttons. */
+.pick__choose { opacity: 0; flex: none; }
+.pick__row.selected .pick__choose, .pick__row:focus-within .pick__choose { opacity: 1; }
+
+.pick__foot {
+  display: flex; align-items: center; gap: 8px;
+  padding: 10px 12px; border-top: 1px solid var(--line-soft); background: var(--panel-2);
+}
+.pick__foot .toggle { flex: 1; }
+
+/* ── appearance switches ────────────────────────────────────────────────────
+   Everything below is driven by a data-attribute on the root element, set from
+   the prefs cell in Theme — one place that maps a stored choice onto CSS, so
+   no component has to carry inline styles for how the app should look. */
+
+/* The reading measure. Narrow is the one to reach for on a wide monitor: a
+   line of text stops being scannable somewhere around 90 characters, and a
+   maximised window is far past that. */
+:root[data-width="narrow"] { --measure: 660px; }
+:root[data-width="wide"] { --measure: 860px; }
+:root[data-width="full"] { --measure: 100%; }
+
+/* Compact density. Not a smaller font — that is what zoom is for — but less
+   air around the furniture, for a laptop screen where the list is the point. */
+:root[data-density="compact"] {
+  --air: .72;
+  --radius: 10px;
+  --radius-sm: 7px;
+}
+[data-density="compact"] .page__body { padding: 12px 18px 18px; }
+[data-density="compact"] .page__head { padding: 11px 18px 7px; }
+[data-density="compact"] .navcard { padding: 6px 9px; }
+[data-density="compact"] .navcard__hint { display: none; }
+[data-density="compact"] .ptab__main { padding: 5px 30px 5px 8px; }
+[data-density="compact"] .ptab__sub { display: none; }
+[data-density="compact"] .thread { gap: 12px; }
+[data-density="compact"] .chat { padding: 12px 18px 6px; }
+[data-density="compact"] .composer { padding: 8px 18px 12px; }
+[data-density="compact"] .rowitem { padding: 7px 10px; }
+[data-density="compact"] .panel__body { padding: 11px 13px; }
+[data-density="compact"] .strip { padding: 6px 18px; }
+[data-density="compact"] .msg { gap: 9px; }
+
+/* Motion. Three states on purpose: the OS setting is the right default, but a
+   person who wants the app still on a machine that says otherwise — or moving
+   on one that says otherwise — should not have to change an OS setting to get
+   it. "full" therefore overrides the media query, and "reduced" overrides the
+   absence of it. */
+@media (prefers-reduced-motion: reduce) {
+  :root:not([data-motion="full"]) *,
+  :root:not([data-motion="full"]) *::before,
+  :root:not([data-motion="full"]) *::after {
+    animation-duration: .001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+:root[data-motion="reduced"] *,
+:root[data-motion="reduced"] *::before,
+:root[data-motion="reduced"] *::after {
+  animation-duration: .001ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: .001ms !important;
+  scroll-behavior: auto !important;
+}
+
+/* Wrapped code. Off by default: a wrapped line of code lies about where the
+   line ends, which matters when the text is a command somebody will paste. */
+:root[data-codewrap="on"] .md__pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+
+/* ── narrow windows, and collapsed panels ───────────────────────────────────
+   Last on purpose: these are overrides, and an override that appears before
+   the rule it is overriding loses on source order. That is exactly how
+   the rule hiding a minor stat sat in the sheet doing nothing while the rule
+   that displays every stat, two hundred lines below it, won every time. */
+${TIGHT}
 `.trim();
 
 /**
  * Renders the stylesheet and keeps `data-theme` in sync with the user's choice.
  * "system" removes the attribute so `prefers-color-scheme` decides — a real
+ * third state, not a coin flip made once at boot.
+ */
+/**
+ * Per-accent overrides, generated from the one table that names them.
+ *
+ * Only `--accent` differs: `--accent-soft` is mixed from it, `--accent-ink` is
+ * a property of the *palette* (dark ink on a bright accent, white ink on a deep
+ * one) rather than of the hue. So one value per accent per palette is the whole
+ * of it, and adding an accent is one row in `ACCENTS`.
+ */
+const ACCENT_CSS = ACCENTS.map((a) =>
+  [
+    ':root[data-accent="' + a.id + '"] { --accent: ' + a.dark + "; }",
+    ':root[data-theme="light"][data-accent="' + a.id + '"] { --accent: ' +
+    a.light + "; }",
+    '@media (prefers-color-scheme: light) { :root:not([data-theme="dark"]):not([data-theme="contrast"])[data-accent="' +
+    a.id + '"] { --accent: ' + a.light + "; } }",
+  ].join("\n")
+).join("\n");
+
+/**
+ * The whole stylesheet, as it is served.
+ *
+ * Exported so a test can parse it. This sheet is a template literal built from
+ * several pieces, and the failure it is prone to is silent: one unbalanced
+ * brace and the CSSOM discards the rule *after* it, which shows up weeks later
+ * as one control that ignores its own margin. Nothing else should read this.
+ */
+export const themeCss = (): string => CSS + "\n" + ACCENT_CSS;
+
+/**
+ * Renders the stylesheet and keeps the root element's attributes in sync with
+ * every stored appearance choice.
+ *
+ * Attributes rather than inline styles, and one component rather than many:
+ * a preference is a fact about the whole window, so it is applied once at the
+ * root and read by CSS wherever it happens to matter. Nothing below this line
+ * has to know that "compact" exists.
+ *
+ * "system" *removes* `data-theme` so `prefers-color-scheme` decides — a real
  * third state, not a coin flip made once at boot.
  */
 export function Theme(): VNode {
@@ -882,6 +1643,18 @@ export function Theme(): VNode {
   if (root) {
     if (mode === "system") root.removeAttribute("data-theme");
     else root.setAttribute("data-theme", mode);
+    root.setAttribute("data-accent", prefs.accent);
+    root.setAttribute("data-density", prefs.density);
+    root.setAttribute("data-motion", prefs.motion);
+    root.setAttribute("data-width", prefs.chatWidth);
+    root.setAttribute("data-codewrap", prefs.codeWrap ? "on" : "off");
+    root.setAttribute("data-dock", prefs.dockCollapsed ? "off" : "on");
+    root.setAttribute("data-rail", prefs.railCollapsed ? "off" : "on");
+    root.setAttribute("data-stamps", prefs.timestamps ? "on" : "off");
+    // The one value that is a number rather than a choice. Written as a custom
+    // property so the sheet can both apply it and divide it back out of the
+    // single viewport-relative height.
+    root.style.setProperty("--zoom", String(prefs.zoom));
   }
-  return <style data-cc-theme="">{CSS}</style>;
+  return <style data-cc-theme="">{themeCss()}</style>;
 }

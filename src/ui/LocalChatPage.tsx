@@ -9,12 +9,18 @@
  */
 import { afterRender, onMount, useLocal, useRef, type VNode } from "aio/air";
 import { Markdown } from "./Markdown.tsx";
+import { JumpToLatest, MsgMeta, useStickToBottom } from "./thread.tsx";
+import { FindBar, findIndex, findQuery } from "./find.tsx";
+import { hits } from "../lib/transcript.ts";
+import { dropDraft, swapDraft } from "./compose.ts";
+import { BranchStat, ContextStat, EngineStat, ProjectStat } from "./strip.tsx";
 import {
   DEFAULT_URLS,
   detectedEngines,
   local,
   localChat,
   localConfig,
+  localSpeed,
 } from "../cell/local.ts";
 import { LOCAL_PERMISSIONS, permissionOf } from "../lib/agent.ts";
 import { workspace } from "../cell/workspace.ts";
@@ -23,16 +29,19 @@ import { clock, modelLabel, tailPath, tokens } from "../lib/format.ts";
 import {
   Banner,
   Choice,
+  Elapsed,
   Empty,
   Menu,
   Meter,
   Pill,
   Segmented,
+  Stat,
 } from "./parts.tsx";
 import {
   IconAlert,
   IconChevron,
   IconLogo,
+  IconModel,
   IconRefresh,
   IconSend,
   IconShield,
@@ -76,72 +85,94 @@ export function LocalChatPage(): VNode {
   const id = workspace.activeId;
   const cfg = localConfig(id);
   const chat = localChat(id);
-  const ref = useRef<HTMLDivElement>(null!);
-  const stick = useRef(true);
+  // Same scrolling contract as the Claude thread, from the same code — and the
+  // same find bar, over the same kind of match.
+  const scroll = useStickToBottom(chat.messages.length);
+  const q = findQuery();
+  const found = q.trim() === ""
+    ? []
+    : chat.messages.filter((m) => hits(m.text, q)).map((m) => m.id);
+  const current = found.length > 0
+    ? found[Math.min(findIndex(), found.length - 1)]
+    : "";
 
-  // Follow the stream only while the reader is already at the bottom — same
-  // contract as the Claude thread.
   afterRender(() => {
-    const el = ref.current;
-    if (el && stick.current) el.scrollTop = el.scrollHeight;
+    if (current === "") return;
+    const el = scroll.ref.current?.querySelector<HTMLElement>(
+      `[data-msg="${CSS.escape(current)}"]`,
+    );
+    el?.scrollIntoView({ block: "center", behavior: "smooth" });
   });
-  const onScroll = () => {
-    const el = ref.current;
-    if (!el) return;
-    stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 140;
-  };
 
   return (
     <div class="page">
       <LocalStrip />
-      <div class="chat" ref={ref} onScroll={onScroll}>
-        <div class="thread">
-          <NoToolsBanner />
-          {chat.error && (
-            <Banner tone="warn">
-              {chat.error}
-              {
-                /* An error a reader can act on, from the page they are already
+      <div class="chatwrap">
+        <div class="chat" ref={scroll.ref} onScroll={scroll.onScroll}>
+          <div class="thread">
+            <NoToolsBanner />
+            {chat.error && (
+              <Banner tone="warn">
+                {chat.error}
+                {
+                  /* An error a reader can act on, from the page they are already
                   on. A saved address that has gone dead is the commonest local
                   failure there is, and the scan usually already knows where the
                   server actually is — so the fix is a button, not a trip to
                   Settings to retype a port. */
-              }
-              <UnreachableFix />
-            </Banner>
-          )}
-          {chat.messages.length === 0 && !chat.streaming
-            ? (
-              <Empty
-                icon={IconLogo({ size: 20 })}
-                title={`${ENGINE_NAMES[cfg.engine] ?? cfg.engine} · ${
-                  modelLabel(cfg.model) || "no model"
-                }`}
-                hint={!cfg.model
-                  ? "Refresh the model list above, or check the server address in Settings."
-                  : /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])([:/]|$)/
-                      .test(cfg.baseUrl)
-                  ? "Everything runs on your machine. Pick a mode above and say what you need."
-                  : `Conversations go to ${cfg.baseUrl}. Pick a mode above and say what you need.`}
-              />
-            )
-            : chat.messages.map((m) => <Row key={m.id} m={m} />)}
-          {chat.streaming && (
-            <article class="msg">
-              <div class="msg__avatar msg__avatar--assistant">
-                {IconLogo({ size: 15 })}
-              </div>
-              <div class="msg__body">
-                <div class="msg__who" title={cfg.model}>
-                  {modelLabel(cfg.model) || "model"}
+                }
+                <UnreachableFix />
+              </Banner>
+            )}
+            {chat.messages.length === 0 && !chat.streaming
+              ? (
+                <Empty
+                  icon={IconLogo({ size: 20 })}
+                  title={`${ENGINE_NAMES[cfg.engine] ?? cfg.engine} · ${
+                    modelLabel(cfg.model) || "no model"
+                  }`}
+                  hint={!cfg.model
+                    ? "Refresh the model list above, or check the server address in Settings."
+                    : /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])([:/]|$)/
+                        .test(cfg.baseUrl)
+                    ? "Everything runs on your machine. Pick a mode above and say what you need."
+                    : `Conversations go to ${cfg.baseUrl}. Pick a mode above and say what you need.`}
+                />
+              )
+              : chat.messages.map((m) => (
+                <Row
+                  key={m.id}
+                  m={m}
+                  hit={m.id === current
+                    ? "current"
+                    : found.includes(m.id)
+                    ? "yes"
+                    : ""}
+                />
+              ))}
+            {chat.streaming && (
+              <article class="msg">
+                <div class="msg__avatar msg__avatar--assistant">
+                  {IconLogo({ size: 15 })}
                 </div>
-                <div class="bubble">
-                  <Markdown source={chat.streaming} />
+                <div class="msg__body">
+                  <div class="msg__who" title={cfg.model}>
+                    {modelLabel(cfg.model) || "model"}
+                  </div>
+                  <div class="bubble">
+                    <Markdown source={chat.streaming} />
+                  </div>
                 </div>
-              </div>
-            </article>
-          )}
+              </article>
+            )}
+          </div>
         </div>
+        <FindBar total={found.length} />
+        <JumpToLatest
+          away={scroll.away}
+          behind={scroll.behind}
+          onClick={scroll.toBottom}
+        />
       </div>
       <CommandPrompt />
       <LocalComposer />
@@ -256,59 +287,18 @@ function LocalStrip(): VNode {
   const [armAgent, setArmAgent] = useLocal(false);
 
   return (
-    <div
-      style={{
-        display: "flex",
-        gap: "10px",
-        alignItems: "center",
-        flexWrap: "wrap",
-        padding: "10px 22px",
-        borderBottom: "1px solid var(--line)",
-      }}
-    >
+    <div class="strip">
       {
-        /* Both switchers live here rather than only in Settings. Engine and
-          model are the two choices a local session is actually steered by —
-          the wrong one is discovered mid-conversation, and the fix belongs
-          where the discovery happens. Switching back to Claude Code from here
-          keeps this conversation exactly as it is. */
+        /* Project, branch, engine, model — the same four, in the same places,
+          as the Claude strip. This row used to lead with the engine, so
+          switching a project onto a local model moved every control on it. */
       }
-      <Menu
-        label="Engine"
-        value={cfg.engine}
-        title="What runs this project"
-        onOpen={() => void local.detect()}
-        options={ENGINE_OPTIONS.map((e) => ({
-          id: e.id,
-          label: e.label,
-          hint: e.id === "claude"
-            ? e.hint
-            : detectedEngines().find((d) => d.engine === e.id)?.reachable
-            ? "Running now"
-            : e.hint,
-          trailing: e.id !== "claude" &&
-              detectedEngines().find((d) => d.engine === e.id)?.reachable
-            ? <span class="dot dot--ready" />
-            : null,
-        }))}
-        // Chained, not fired side by side. A dispatch that has not committed
-        // is not visible to the next one, so `syncEngine` could read the
-        // engine the project was on a moment ago and refresh nothing.
-        onChange={(v) =>
-          void local.setEngine(id, v).then(() =>
-            v === "claude" ? undefined : local.syncEngine(id)
-          )}
-      />
+      <ProjectStat />
+      <BranchStat />
+      <EngineStat />
 
-      {
-        /* Held at its natural width up to a cap: the model name is the one
-          value on this strip that is read rather than glanced at, and a flex
-          row will happily ellipse it while leaving empty space to its right. */
-      }
-      <span
-        class="modelmenu"
-        style={{ flex: "none", width: "max-content", maxWidth: "24em" }}
-      >
+      <Stat label="Model" clamp>
+        {IconModel({ size: 14 })}
         <Menu
           label="Model"
           value={cfg.model}
@@ -327,37 +317,59 @@ function LocalStrip(): VNode {
             ? "No models listed — check the server address in Settings."
             : `${chat.models.length} loaded on the server`}
         />
-      </span>
-      <button
-        type="button"
-        class="btn btn--ghost btn--sm btn--icon"
-        aria-label="Refresh models"
-        title="Re-read the model list from the server"
-        onClick={() => void local.syncEngine(id)}
-      >
-        {IconRefresh({ size: 13 })}
-      </button>
+        <button
+          type="button"
+          class="btn btn--ghost btn--sm btn--icon"
+          aria-label="Refresh models"
+          title="Re-read the model list from the server"
+          onClick={() => void local.syncEngine(id)}
+        >
+          {IconRefresh({ size: 13 })}
+        </button>
+        {chat.toolsOk === false && (
+          <span title="This server refuses tool calls — only Chat can work until it is restarted with Jinja templating on">
+            <Pill tone="danger">{IconAlert({ size: 11 })} no tools</Pill>
+          </span>
+        )}
+      </Stat>
 
-      {chat.toolsOk === false && (
-        <span title="This server refuses tool calls — only Chat can work until it is restarted with Jinja templating on">
-          <Pill tone="danger">{IconAlert({ size: 11 })} no tools</Pill>
-        </span>
+      {
+        /* Mode sits where Effort sits on the Claude strip, and Permissions
+          where Permissions sits. Neither means the same thing on both sides —
+          but "what may it do" is asked in the same place either way. */
+      }
+      <Stat label="Mode">
+        <Segmented
+          value={cfg.mode}
+          options={MODES}
+          onChange={(v) => {
+            if (v === "agent" && cfg.mode !== "agent") {
+              setArmAgent(true);
+              return;
+            }
+            setArmAgent(false);
+            local.setMode(id, v);
+          }}
+        />
+      </Stat>
+
+      {cfg.mode === "agent" && (
+        <Stat label="Permissions">
+          <PermissionBadge id={id} />
+        </Stat>
       )}
 
-      <Segmented
-        value={cfg.mode}
-        options={MODES}
-        onChange={(v) => {
-          if (v === "agent" && cfg.mode !== "agent") {
-            setArmAgent(true);
-            return;
-          }
-          setArmAgent(false);
-          local.setMode(id, v);
-        }}
+      <ContextStat
+        used={chat.usedTokens}
+        max={cfg.ctx}
+        measured={false}
+        title={`Estimated context use against the ${
+          tokens(cfg.ctx)
+        }-token window set in Settings`}
       />
+
       {armAgent && (
-        <span style={{ display: "flex", gap: "6px", alignItems: "center" }}>
+        <Stat label="Confirm" grow>
           <span class="field__hint">
             Agent mode lets the model write files in this project, and ask to
             run commands. Every command is shown in full before it runs.
@@ -372,49 +384,41 @@ function LocalStrip(): VNode {
           >
             Enable agent mode
           </button>
-        </span>
+        </Stat>
       )}
-      {cfg.mode === "agent" && (() => {
-        const perm = permissionOf(cfg);
-        if (perm === "ask") {
-          return (
-            <span title="Writes files itself; asks before running a command">
-              <Pill tone="warn">can write files</Pill>
-            </span>
-          );
-        }
-        // Both unasked modes get a one-click way back to being asked — the
-        // point of a badge that says what is switched off is that the switch
-        // is where you read about it.
-        return (
-          <button
-            type="button"
-            class="btn btn--ghost btn--sm"
-            title={perm === "bypass"
-              ? "Every command runs, with no checks at all. Click to be asked again."
-              : "Commands run without asking; destructive ones are refused. Click to be asked again."}
-            onClick={() => local.setPermission(id, "ask")}
-          >
-            <Pill tone={perm === "bypass" ? "danger" : "warn"}>
-              {IconAlert({ size: 11 })}{" "}
-              {perm === "bypass" ? "no checks" : "runs commands unasked"}
-            </Pill>
-          </button>
-        );
-      })()}
-
-      <span
-        style={{ marginLeft: "auto", minWidth: "170px" }}
-        title={`Estimated context use against the ${
-          tokens(cfg.ctx)
-        }-token window set in Settings`}
-      >
-        <span class="field__hint">
-          Context {tokens(chat.usedTokens)} / {tokens(cfg.ctx)}
-        </span>
-        <Meter value={chat.usedTokens} max={cfg.ctx} />
-      </span>
     </div>
+  );
+}
+
+/**
+ * What the agent may do without being asked, and the way back to being asked.
+ *
+ * The point of a badge that names what is switched off is that the switch is
+ * where you read about it — so both unasked modes are a button, not a label.
+ */
+function PermissionBadge(props: { id: string }): VNode {
+  const perm = permissionOf(localConfig(props.id));
+  if (perm === "ask") {
+    return (
+      <span title="Writes files itself; asks before running a command">
+        <Pill tone="warn">can write files</Pill>
+      </span>
+    );
+  }
+  return (
+    <button
+      type="button"
+      class="btn btn--ghost btn--sm"
+      title={perm === "bypass"
+        ? "Every command runs, with no checks at all. Click to be asked again."
+        : "Commands run without asking; destructive ones are refused. Click to be asked again."}
+      onClick={() => local.setPermission(props.id, "ask")}
+    >
+      <Pill tone={perm === "bypass" ? "danger" : "warn"}>
+        {IconAlert({ size: 11 })}{" "}
+        {perm === "bypass" ? "no checks" : "runs commands unasked"}
+      </Pill>
+    </button>
   );
 }
 
@@ -517,13 +521,18 @@ function NoToolsBanner(): VNode | null {
 
 /* ── thread ───────────────────────────────────────────────────────────────── */
 
-function Row(props: { m: LocalMsg }): VNode {
+function Row(props: { m: LocalMsg; hit?: string }): VNode {
   const m = props.m;
   if (m.role === "tool") return <ToolResult m={m} />;
   const user = m.role === "user";
   return (
     <article
-      class="msg"
+      class={"msg" + (props.hit === "current"
+        ? " msg--found"
+        : props.hit === "yes"
+        ? " msg--hit"
+        : "")}
+      data-msg={m.id}
       style={m.evicted ? { opacity: 0.55 } : undefined}
       title={m.evicted
         ? "No longer in the model's context — folded into the running summary"
@@ -533,12 +542,9 @@ function Row(props: { m: LocalMsg }): VNode {
         {user ? IconUser({ size: 15 }) : IconLogo({ size: 15 })}
       </div>
       <div class="msg__body">
-        <div class="msg__who">
+        <div class="msg__who" key="who">
           {user ? "You" : "Model"}
-          <span style={{ color: "var(--ink-dim)", fontWeight: 500 }}>
-            {"  "}
-            {clock(m.at)}
-          </span>
+          <MsgMeta at={m.at} text={m.text} editable={user} />
         </div>
         {m.text.trim() !== "" && (
           <div class="bubble">
@@ -602,6 +608,7 @@ function LocalComposer(): VNode {
   const id = workspace.activeId;
   const chat = localChat(id);
   const busy = chat.status === "working";
+  const speed = localSpeed(id);
 
   const submit = () => {
     const el = ref.current;
@@ -609,9 +616,21 @@ function LocalComposer(): VNode {
     const text = el.value;
     if (!text.trim()) return;
     el.value = "";
+    dropDraft(id);
     setHasText(false);
     void local.send(text, id);
   };
+
+  // Same contract as the Claude composer: a draft belongs to the project it
+  // was written for, and this textarea outlives a project switch.
+  const shownFor = useRef(id);
+  afterRender(() => {
+    const el = ref.current;
+    if (!el || shownFor.current === id) return;
+    el.value = swapDraft(shownFor.current, id, el.value);
+    shownFor.current = id;
+    setHasText(el.value.trim().length > 0);
+  });
 
   return (
     <div class="composer">
@@ -626,29 +645,64 @@ function LocalComposer(): VNode {
           onInput={() =>
             setHasText((ref.current?.value.trim().length ?? 0) > 0)}
           onKeyDown={(e: KeyboardEvent) => {
-            if (e.key !== "Enter" || e.shiftKey) return;
+            if (e.key !== "Enter") return;
+            // Ctrl+Enter sends too — the habit people arrive with from every
+            // other chat app, and unambiguous in a message box.
+            if (e.shiftKey && !(e.ctrlKey || e.metaKey)) return;
             if (e.isComposing || e.keyCode === 229) return; // IME accept
             e.preventDefault();
             submit();
           }}
         />
         <div class="composer__bar">
-          <span class="composer__hint">
-            <span class="kbd">Enter</span> to send ·{" "}
-            <span class="kbd">Shift</span>+<span class="kbd">Enter</span>{" "}
-            for a new line
-          </span>
-          {busy && (
-            <button
-              type="button"
-              class="btn btn--sm btn--danger"
-              onClick={() => void local.stop(id)}
-              title="Abort the current turn"
-            >
-              {IconStop({ size: 13 })} Stop
-            </button>
-          )}
+          {
+            /* The same two states as the Claude composer: a clock while a turn
+              runs, and what the last one cost in time when it is over. A local
+              model on a busy GPU can take minutes, and "the model is working"
+              reads identically at two seconds and at four minutes. */
+          }
+          {busy
+            ? (
+              <span
+                key="working"
+                class="composer__hint"
+                title="Time since this turn was sent."
+              >
+                Working <Elapsed startedAt={chat.startedAt} fallbackMs={0} />
+              </span>
+            )
+            : (
+              <span key="idle" class="composer__hint">
+                <span class="kbd">Enter</span> to send ·{" "}
+                <span class="kbd">Shift</span>+<span class="kbd">Enter</span>
+                {" "}
+                for a new line
+                {speed !== null && (
+                  <span
+                    title="Tokens a second over the whole of the last turn, as the server reported it."
+                    style={{ color: "var(--ink-dim)" }}
+                  >
+                    {" · "}
+                    {speed >= 10 ? Math.round(speed) : speed.toFixed(1)} tok/s
+                  </span>
+                )}
+              </span>
+            )}
+          {busy
+            ? (
+              <button
+                key="stop"
+                type="button"
+                class="btn btn--sm btn--danger"
+                onClick={() => void local.stop(id)}
+                title="Abort the current turn"
+              >
+                {IconStop({ size: 13 })} Stop
+              </button>
+            )
+            : <span key="stop" hidden />}
           <button
+            key="send"
             type="button"
             class="btn btn--primary btn--sm"
             disabled={!hasText || busy}

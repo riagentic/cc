@@ -91,8 +91,22 @@ export type ProjectSession = {
   usage: Usage;
   cost: number;
   turns: number;
+  /**
+   * What the last "clear the transcript" took away, kept once so the decision
+   * can be taken back.
+   *
+   * Cleared as soon as anything new arrives: the undo is for the moment right
+   * after pressing the button, not for merging a week-old transcript into a
+   * live one.
+   */
+  cleared: Message[];
   turnStartedAt: number | null;
   lastTurnMs: number;
+  /** Output tokens the last completed turn produced. Paired with
+   *  `lastTurnMs`, this is the only honest way to say how fast the model is
+   *  going: a rate computed from a turn still in flight is a rate over a
+   *  denominator that keeps growing. */
+  lastTurnOutput: number;
   /** An interrupt was asked for and the CLI has not reported the turn yet. */
   interrupting: boolean;
   /** How the last turn ended, straight from the result event. */
@@ -133,8 +147,10 @@ export const blank = (): ProjectSession => ({
   usage: { ...EMPTY_USAGE },
   cost: 0,
   turns: 0,
+  cleared: [],
   turnStartedAt: null,
   lastTurnMs: 0,
+  lastTurnOutput: 0,
   interrupting: false,
   turnEnd: null,
   agentStats: null,
@@ -405,6 +421,9 @@ export function assistant(s: ProjectSession, evt: Evt) {
   if (twin && twin.role === "assistant") {
     twin.blocks.push(...blocks);
   } else {
+    // A new message ends the window in which the last clear can be undone —
+    // and lets go of the transcript it was holding.
+    s.cleared = [];
     s.messages.push({
       id,
       role: "assistant",
@@ -593,7 +612,24 @@ export function result(s: ProjectSession, evt: Evt) {
   // and one user turn produces several results (each sub-agent finishing wakes
   // the model again). Summing them reported a $0.06 session as $0.79. Take the
   // highest figure the CLI has reported: monotonic, and never behind.
+  const before = s.cost;
   s.cost = Math.max(s.cost, num(evt.total_cost_usd));
+
+  // Attach what this turn took to the message it ended. A transcript is read
+  // backwards, and "that answer took four minutes" is only useful next to the
+  // answer it is about — a single "last turn" figure is useless the moment
+  // anything else happens.
+  const last = s.messages[s.messages.length - 1];
+  if (last && last.role === "assistant") {
+    last.turn = {
+      ms: num(evt.duration_ms),
+      tokens: usageOf(evt.usage, 0).output,
+      // The difference between two session totals is the only per-turn cost
+      // the CLI offers. Clamped at zero: the total is monotonic, so a negative
+      // difference would be a report about a total that went backwards.
+      usd: Math.max(0, s.cost - before),
+    };
+  }
   s.sessionId = str(evt.session_id) ?? s.sessionId;
   s.resumeId = s.sessionId;
   // The CLI queues a turn sent while one is running and says how many it holds.
@@ -615,6 +651,9 @@ export function result(s: ProjectSession, evt: Evt) {
   // still resident in the window; the CLI simply had nothing to say about them.
   // Keep the last real figure, and take the window it now reports either way.
   const measured = usageOf(evt.usage, window);
+  // The turn's own output, before the line below may discard `measured`
+  // wholesale: an aborted turn reports nothing, and nothing is not a speed.
+  if (measured.output > 0) s.lastTurnOutput = measured.output;
   s.usage = contextUsedOf(measured) > 0
     ? measured
     : { ...s.usage, contextWindow: window };
@@ -775,6 +814,7 @@ export function reset(s: ProjectSession) {
   s.cost = 0;
   s.turns = 0;
   s.lastTurnMs = 0;
+  s.lastTurnOutput = 0;
   s.turnStartedAt = null;
   s.interrupting = false;
   s.turnEnd = null;

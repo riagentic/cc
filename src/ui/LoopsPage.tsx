@@ -172,7 +172,10 @@ function NewLoop(): VNode {
             flexWrap: "wrap",
           }}
         >
-          <span style={{ fontSize: "12px", color: "var(--ink-dim)" }}>
+          <span
+            key="every"
+            style={{ fontSize: "12px", color: "var(--ink-dim)" }}
+          >
             Every
           </span>
           {PRESETS.map((p) => (
@@ -186,6 +189,7 @@ function NewLoop(): VNode {
             </button>
           ))}
           <input
+            key="seconds"
             class="input"
             type="number"
             min={MIN_EVERY_SEC}
@@ -195,11 +199,15 @@ function NewLoop(): VNode {
             onInput={(e) =>
               setSec(Number((e.target as HTMLInputElement).value) || sec)}
           />
-          <span style={{ fontSize: "12px", color: "var(--ink-dim)" }}>
+          <span
+            key="unit"
+            style={{ fontSize: "12px", color: "var(--ink-dim)" }}
+          >
             seconds
           </span>
-          <span style={{ flex: 1 }} />
+          <span key="spacer" style={{ flex: 1 }} />
           <button
+            key="save"
             type="button"
             class="btn btn--sm"
             disabled={!prompt.trim()}

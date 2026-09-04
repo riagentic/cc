@@ -33,6 +33,26 @@ export type Message = {
   at: number;
   /** Set when the message came from inside a sub-agent. */
   parentToolUseId: string | null;
+  /**
+   * What the turn this message ended cost, attached when the CLI reports the
+   * result.
+   *
+   * On the message rather than in one "last turn" field, because a transcript
+   * is read backwards: "that answer took four minutes and eighty cents" is
+   * only useful next to the answer it is about. Absent on every message that
+   * did not end a turn, which is most of them.
+   */
+  turn?: TurnCost;
+};
+
+/** What one turn took. Every figure comes from the CLI's own result event. */
+export type TurnCost = {
+  ms: number;
+  /** Output tokens the turn produced, as reported. `0` when it did not say. */
+  tokens: number;
+  /** Dollars for this turn — the difference between two session totals, which
+   *  is the only per-turn figure the CLI makes available. */
+  usd: number;
 };
 
 /** What a sub-agent was asked to do, and what it cost — reported by the CLI on

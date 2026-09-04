@@ -10,7 +10,7 @@ import { assert, assertEquals } from "@std/assert";
 import { join } from "@std/path";
 import { bootCells } from "aio/testing";
 import { readFilePreview, readTree } from "../../cell/catalog.server.ts";
-import { touchedPaths, tree } from "../../cell/tree.ts";
+import { gitMark, touchedPaths, tree } from "../../cell/tree.ts";
 import { session } from "../../cell/session.ts";
 import { workspace } from "../../cell/workspace.ts";
 
@@ -247,5 +247,94 @@ Deno.test("the touch overlay reports the session's own file calls", async () => 
     assertEquals(touched.has("/p/c.ts"), false);
   } finally {
     h.dispose();
+  }
+});
+
+Deno.test("tree — git marks the files it considers changed", async () => {
+  const dir = await Deno.makeTempDir();
+  const h = await bootCells([workspace, tree]);
+  try {
+    const run = async (...args: string[]) => {
+      await new Deno.Command("git", {
+        args,
+        cwd: dir,
+        stdout: "null",
+        stderr: "null",
+      })
+        .output();
+    };
+    await run("init", "-q");
+    await run("config", "user.email", "t@example.com");
+    await run("config", "user.name", "t");
+    await Deno.writeTextFile(`${dir}/tracked.txt`, "one\n");
+    await run("add", ".");
+    await run("commit", "-qm", "first");
+
+    // One file changed since that commit, one git has never seen.
+    await Deno.writeTextFile(`${dir}/tracked.txt`, "two\n");
+    await Deno.writeTextFile(`${dir}/fresh.txt`, "new\n");
+
+    await workspace.addProject(dir);
+    await tree.refresh();
+
+    assertEquals(gitMark(`${dir}/tracked.txt`), "modified");
+    assertEquals(gitMark(`${dir}/fresh.txt`), "new");
+    // Everything else is unmarked — the absence has to mean something too.
+    assertEquals(gitMark(`${dir}/nothing-here.txt`), "");
+
+    // …and a project that is a SUBDIRECTORY of its repository still gets the
+    // right paths. Porcelain output is relative to the repository root, and
+    // joining it onto the project path pointed at files that do not exist —
+    // which is most of the time, because most projects are not repo roots.
+    await Deno.mkdir(`${dir}/inner`);
+    await Deno.writeTextFile(`${dir}/inner/deep.txt`, "deep\n");
+    await workspace.addProject(`${dir}/inner`);
+    await tree.refresh();
+    assertEquals(gitMark(`${dir}/inner/deep.txt`), "new");
+  } finally {
+    h.dispose();
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("tree — a changed file carries its committed version", async () => {
+  const dir = await Deno.makeTempDir();
+  const h = await bootCells([workspace, tree]);
+  try {
+    const run = async (...args: string[]) => {
+      await new Deno.Command("git", {
+        args,
+        cwd: dir,
+        stdout: "null",
+        stderr: "null",
+      }).output();
+    };
+    await run("init", "-q");
+    await run("config", "user.email", "t@example.com");
+    await run("config", "user.name", "t");
+    await Deno.writeTextFile(`${dir}/a.txt`, "before\n");
+    await Deno.writeTextFile(`${dir}/same.txt`, "unchanged\n");
+    await run("add", ".");
+    await run("commit", "-qm", "first");
+    await Deno.writeTextFile(`${dir}/a.txt`, "after\n");
+    await Deno.writeTextFile(`${dir}/fresh.txt`, "brand new\n");
+
+    await workspace.addProject(dir);
+    await tree.refresh();
+
+    await tree.select(`${dir}/a.txt`);
+    assertEquals(tree.previewHead, "before\n", "the committed version");
+
+    // An unchanged file has nothing to compare against, and asking would spawn
+    // a subprocess to be told so.
+    await tree.select(`${dir}/same.txt`);
+    assertEquals(tree.previewHead, "");
+
+    // Neither does a file git has never seen.
+    await tree.select(`${dir}/fresh.txt`);
+    assertEquals(tree.previewHead, "");
+  } finally {
+    h.dispose();
+    await Deno.remove(dir, { recursive: true });
   }
 });

@@ -5,11 +5,14 @@ import {
   baseName,
   bytes,
   clock,
+  dayLabel,
+  differentDay,
   duration,
   listKey,
   modelLabel,
   oneLine,
   pct,
+  perSecond,
   stateShape,
   tailPath,
   tildePath,
@@ -241,4 +244,35 @@ Deno.test("modelLabel — a GGUF path is a name, not eighty characters of direct
   assertEquals(modelLabel(""), "");
   // Never shortens to nothing.
   assertEquals(modelLabel("/a/.gguf"), "/a/.gguf");
+});
+
+Deno.test("a day is named the way a person would say it", () => {
+  const now = new Date(2026, 1, 14, 12, 0).getTime();
+  const at = (days: number, h = 12) =>
+    new Date(2026, 1, 14 - days, h).getTime();
+
+  assertEquals(dayLabel(at(0), now), "Today");
+  assertEquals(dayLabel(at(1), now), "Yesterday");
+  // Just after midnight is still yesterday, not "22 hours ago".
+  assertEquals(dayLabel(at(1, 23), now), "Yesterday");
+  // Inside the week, the weekday says more than the date.
+  assertEquals(dayLabel(at(3), now), "Wednesday");
+  // Past it, the date.
+  assertEquals(dayLabel(at(20), now).includes("Jan"), true);
+});
+
+Deno.test("two times on the same day are the same day", () => {
+  const morning = new Date(2026, 1, 14, 1, 0).getTime();
+  const night = new Date(2026, 1, 14, 23, 59).getTime();
+  const nextDay = new Date(2026, 1, 15, 0, 1).getTime();
+  assertEquals(differentDay(morning, night), false);
+  // …and one minute later is not, even though it is two minutes away.
+  assertEquals(differentDay(night, nextDay), true);
+});
+
+Deno.test("a rate needs a real numerator and a real denominator", () => {
+  assertEquals(perSecond(0, 4000), null);
+  assertEquals(perSecond(200, 0), null);
+  assertEquals(perSecond(200, 100), null, "too short to be a measurement");
+  assertEquals(perSecond(200, 4000), 50);
 });

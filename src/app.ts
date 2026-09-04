@@ -5,6 +5,9 @@
 // `"client": "electron"`). `--client=browser` and `--client=server-only` are
 // there for development and headless driving via `deno task am`.
 import "./cell/workspace.ts";
+import "./cell/prefs.ts";
+import "./cell/browse.ts";
+import "./cell/metrics.ts";
 import "./cell/session.ts";
 import "./cell/jobs.ts";
 import "./cell/loops.ts";

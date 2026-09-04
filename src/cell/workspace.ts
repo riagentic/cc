@@ -18,7 +18,26 @@ import type {
 import { baseName } from "../lib/format.ts";
 import { EFFORTS, MODELS, PERMISSION_MODES } from "../lib/stream.ts";
 
-export type Theme = "system" | "dark" | "light";
+/**
+ * The palette. `contrast` is a fourth choice rather than a toggle on top of
+ * dark: it is a different set of values for the same tokens (harder edges,
+ * more separation, no colour carrying meaning on its own), and expressing it
+ * as a modifier would mean every token needing two definitions.
+ */
+export type Theme = "system" | "dark" | "light" | "contrast";
+
+/** The palettes, in the order the picker offers them. Also the guard: a value
+ *  that is not one of these is not a palette, whatever the control plane says. */
+export const THEMES: { id: Theme; label: string; hint: string }[] = [
+  { id: "system", label: "System", hint: "Follows your OS setting" },
+  { id: "dark", label: "Dark", hint: "The default" },
+  { id: "light", label: "Light", hint: "For a bright room" },
+  {
+    id: "contrast",
+    label: "High contrast",
+    hint: "Harder edges, stronger text",
+  },
+];
 
 type WorkspaceState = {
   projects: Project[];
@@ -47,6 +66,15 @@ type WorkspaceState = {
   autoForget: boolean;
   /** This session's undo buffer for removed projects. */
   forgotten: Project[];
+  /**
+   * The folder the last add could not find, resolved.
+   *
+   * A field rather than something parsed back out of `error`: the offer to
+   * create it has to name a real path, and reconstructing one from a sentence
+   * is how a "Create it" button ends up making a directory called
+   * "Not a directory: /home/x". Empty when the last add did not fail this way.
+   */
+  absentPath: string;
 };
 
 /** What a project falls back to before anything has configured it. */
@@ -171,6 +199,11 @@ async function probeAll(s: Draft): Promise<void> {
     : null;
 
   // ── write ──
+  //
+  // Every write below goes through `$live`. Reads on a transactional method
+  // are pinned at entry, and this function awaits the disk three times before
+  // it writes — long enough that another action routinely touches `error` in
+  // between, which the commit guard then refuses. Found by the fuzzer, twice.
   const live = now(s);
   for (const p of live.projects) {
     const exists = gone.get(p.id);
@@ -266,7 +299,10 @@ async function applyAddProject(
   const io = await import("./claude.server.ts");
   const typed = tidy(path);
   if (!typed) {
-    s.error = "Enter a project directory.";
+    // Through `$live` like every other write here: the dynamic import above is
+    // an await, so this draft's reads are already pinned to before it.
+    now(s).error = "Enter a project directory.";
+    now(s).absentPath = "";
     log.warn("workspace", "empty project path rejected", {});
     return false;
   }
@@ -282,12 +318,24 @@ async function applyAddProject(
     : { model: "", effort: "", permissionMode: "" };
 
   // ── write ──
+  //
+  // Every write below goes through `$live`. Reads on a transactional method
+  // are pinned at entry, and this function awaits the disk three times before
+  // it writes — long enough that another action routinely touches `error` in
+  // between, which the commit guard then refuses. Found by the fuzzer, twice.
+  const live0 = now(s);
   if (!exists) {
-    s.error = `Not a directory: ${clean}`;
+    live0.error = `There is no folder at ${clean}.`;
+    // Named, so the page can offer to make it. A path somebody typed that does
+    // not exist yet is nearly always a project they are about to start, and
+    // "no such directory" with no way forward is the least useful answer to
+    // that.
+    live0.absentPath = clean;
     log.warn("workspace", "project path is not a directory", { path: clean });
     return false;
   }
-  s.error = null;
+  live0.error = null;
+  live0.absentPath = "";
 
   // The list is read *here*, after the awaits, not before them: whichever add
   // committed while this one was gathering is part of the answer to "is this
@@ -441,6 +489,8 @@ export const workspace = cell("workspace", {
     cliVersion: "",
     cliMissing: false,
     error: null as string | null,
+    /** See the type above — the path a "create it" offer would act on. */
+    absentPath: "",
     /**
      * Drop a project's tab by itself once its folder is really gone.
      *
@@ -466,7 +516,7 @@ export const workspace = cell("workspace", {
   // Everything here is a user choice worth surviving a restart. `error` is not:
   // a stale error banner on boot is a lie about the current state. Neither is
   // `forgotten`: it is this session's undo buffer.
-  persist: { exclude: ["error", "forgotten"] },
+  persist: { exclude: ["error", "forgotten", "absentPath"] },
 
   /**
    * v1 kept `model`, `permissionMode`, `effort`, `allowedDirs` and
@@ -630,6 +680,80 @@ export const workspace = cell("workspace", {
     },
 
     /**
+     * Make the folder, then add it.
+     *
+     * The offer that follows a failed add. Deliberately a separate method
+     * rather than a flag on `addProject`: creating a directory is a change to
+     * the user's disk, and it happens because somebody read the path in the
+     * message and pressed the button — never as a side effect of a typo.
+     */
+    async createProject(s: Draft, path: unknown): Promise<string | null> {
+      const wanted = tidy(path);
+      if (!wanted) {
+        // `$live` even here, with no await in front of it: an async method
+        // commits in a later microtask whatever it does, so its reads are
+        // pinned from the moment it is entered. The fuzzer proved it.
+        const why = "Enter a project directory.";
+        now(s).error = why;
+        return why;
+      }
+      const io = await import("./claude.server.ts");
+      const failed = await io.makeDir(wanted);
+      if (failed !== null) {
+        // Through `$live`: reads here are pinned at method entry, and making a
+        // directory takes long enough that another action routinely writes
+        // `error` in between — which the commit guard then refuses. The
+        // fuzzer found this one.
+        const why = `Could not create it: ${failed}`;
+        now(s).error = why;
+        log.warn("workspace", "could not create a project folder", {
+          path: wanted,
+          error: failed,
+        });
+        return why;
+      }
+      log.info("workspace", "created a project folder", { path: wanted });
+      // The outcome is RETURNED, not left for the caller to read off the cell.
+      // A caller in the browser reads state that the patch for this method may
+      // not have reached yet, so it would be reading the previous answer; the
+      // return value crosses the bridge with the call.
+      if (await applyAddProject(s, wanted)) reprojected(now(s).activeId); // aiol-ok
+      return null;
+    },
+
+    /**
+     * Move a project to another position in the list.
+     *
+     * The order is the user's, not the order they happened to add things in:
+     * it decides which tab Ctrl+1 reaches, and the tabs somebody uses every
+     * day belong at the top. Persisted with everything else here, because an
+     * order that resets on restart is not an order.
+     *
+     * Both arguments are checked rather than trusted — this is reachable from
+     * the control plane, where an index is whatever the caller typed.
+     */
+    moveProject(s: WorkspaceState, id: unknown, to: unknown) {
+      if (typeof id !== "string" || typeof to !== "number") return;
+      const from = s.projects.findIndex((p) => p.id === id);
+      if (from < 0) return;
+      // Clamped, not rejected: a drag to the end of the list is a real
+      // gesture, and it arrives as an index one past the last row.
+      const target = Math.max(
+        0,
+        Math.min(s.projects.length - 1, Math.trunc(to)),
+      );
+      if (target === from) return;
+      const [moved] = s.projects.splice(from, 1);
+      s.projects.splice(target, 0, moved);
+    },
+
+    /** Drop the offer to create a folder — the user typed something else, or
+     *  changed their mind. */
+    forgetAbsent(s: WorkspaceState) {
+      s.absentPath = "";
+    },
+
+    /**
      * Drop every project whose folder is gone.
      *
      * A button, not a timer. Absence is a momentary observation about a
@@ -693,10 +817,19 @@ export const workspace = cell("workspace", {
      * Hooks, MCP, Memory, Tree — reads a different cell. A failure lands in the
      * same error banner as everything else here rather than in a console.
      */
-    async openPath(s: WorkspaceState, path: string) {
+    /**
+     * Hand a path to the desktop to open.
+     *
+     * The reason is *returned* as well as stored: the callers are spread
+     * across the app — a row in the tree, a path inside an answer — and the
+     * error banner is on the Settings page. A caller that is nowhere near a
+     * banner can say so where the click happened.
+     */
+    async openPath(s: WorkspaceState, path: string): Promise<string | null> {
       const io = await import("./claude.server.ts");
       const why = await io.openPath(path);
       s.error = why;
+      return why;
     },
 
     /** Whether a project whose folder is really gone drops out by itself. */
@@ -770,8 +903,13 @@ export const workspace = cell("workspace", {
       if (p) p.permissionMode = mode as PermissionMode;
     },
 
-    setTheme(s: WorkspaceState, theme: Theme) {
-      s.theme = theme;
+    setTheme(s: WorkspaceState, theme: string) {
+      // Guarded, like every other setter here. This one arrives from the
+      // control plane too, and a palette that is not a palette reaches CSS as
+      // an attribute nothing matches — leaving the window in whichever theme
+      // the media query happens to pick, with a stored value nothing can undo.
+      if (!THEMES.some((t) => t.id === theme)) return;
+      s.theme = theme as Theme;
     },
 
     /** Grant Claude Code another directory. Verified to exist before it is
@@ -826,8 +964,41 @@ export const workspace = cell("workspace", {
       }
     },
 
+    /**
+     * Save an exported transcript, and answer with the path it landed on.
+     *
+     * The answer is returned rather than written to state for the same reason
+     * `createProject` returns its outcome: the caller is a button in a
+     * transcript, and reading a cell straight after dispatching to it reads
+     * the previous answer on a browser client.
+     */
+    async saveExport(
+      s: Draft,
+      name: unknown,
+      text: unknown,
+    ): Promise<{ path: string | null; error: string | null }> {
+      if (typeof name !== "string" || typeof text !== "string") {
+        return { path: null, error: "Nothing to save." };
+      }
+      const io = await import("./claude.server.ts");
+      const done = await io.writeExport(name, text);
+      if (done.error !== null) {
+        now(s).error = `Could not save it: ${done.error}`;
+        log.warn("workspace", "could not write an export", {
+          error: done.error,
+        });
+      } else {
+        log.info("workspace", "wrote an export", { path: done.path });
+      }
+      return done;
+    },
+
     dismissError(s: WorkspaceState) {
       s.error = null;
+      // The offer to create a folder belongs to the message that named it.
+      // Leaving it behind would be an orphan button about a path nothing on
+      // screen still mentions.
+      s.absentPath = "";
     },
   },
 });

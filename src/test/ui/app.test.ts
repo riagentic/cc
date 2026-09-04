@@ -21,6 +21,7 @@ import { listKey } from "../../lib/format.ts";
 import { loops } from "../../cell/loops.ts";
 import { tree } from "../../cell/tree.ts";
 import { catalog } from "../../cell/catalog.ts";
+import { closeFind, openFind } from "../../ui/find.tsx";
 
 const SESSION = "441e5bea-4547-42f1-9a5c-11d495c662ff";
 
@@ -1090,18 +1091,22 @@ testUI(App, "Settings filters down to the panel you asked for", async (ui) => {
   await open(ui);
   ui.SettingsLink.click();
   await ui.waitFor(() => ui.html().includes("Allowed directories"));
+  // The panel HEADING, not the word anywhere on the page: the stylesheet is
+  // part of `html()` too, and a CSS comment that happens to name a panel would
+  // otherwise make this test pass or fail on prose.
+  const shows = (title: string) => ui.html().includes(">" + title + "<");
   // Everything is there before anything is typed.
-  assertEquals(ui.html().includes("Appearance"), true);
+  assertEquals(shows("Appearance"), true);
 
   ui.FilterSettingsInput.setValue("theme");
   await ui.waitFor(() => !ui.html().includes("Allowed directories"));
-  assertEquals(ui.html().includes("Appearance"), true);
+  assertEquals(shows("Appearance"), true);
 
   // A word that is not in any title still finds the panel it belongs to —
   // nobody searches for "Permissions" when what they want is "bypass".
   ui.FilterSettingsInput.setValue("bypass");
   await ui.waitFor(() => ui.html().includes("Prompts come to you"));
-  assertEquals(ui.html().includes("Appearance"), false);
+  assertEquals(shows("Appearance"), false);
 
   // And a filter is never a way to end up on a blank page with no explanation.
   ui.FilterSettingsInput.setValue("zzzz");
@@ -1209,3 +1214,441 @@ testUI(
     await ui.waitFor(() => !ui.html().includes("Everything the model has"));
   },
 );
+
+/* ── the transcript's own furniture ───────────────────────────────────────── */
+
+testUI(
+  App,
+  "a finished turn reports how fast it actually went",
+  async (ui) => {
+    await open(ui);
+    session.ingest(init);
+    await session.send("hi");
+    session.ingest({
+      type: "result",
+      is_error: false,
+      // 10 output tokens in 2 seconds is 5 a second — and the point of showing
+      // it is precisely that a turn can be this slow without anything being
+      // broken.
+      duration_ms: 2_000,
+      num_turns: 1,
+      total_cost_usd: 0.01,
+      usage: { input_tokens: 2, output_tokens: 10 },
+    });
+    await ui.waitFor(() => ui.html().includes("tok/s"));
+    assertEquals(ui.html().includes("5.0 tok/s"), true);
+  },
+);
+
+testUI(
+  App,
+  "an aborted turn reports no speed rather than a wrong one",
+  async (ui) => {
+    await open(ui);
+    session.ingest(init);
+    await session.send("hi");
+    // An interrupt reports a duration and no usage at all. Dividing nothing by
+    // two seconds is zero tokens a second, which is not what happened.
+    session.ingest({
+      type: "result",
+      is_error: false,
+      duration_ms: 2_000,
+      num_turns: 1,
+      total_cost_usd: 0.01,
+    });
+    await ui.waitFor(() => !ui.html().includes("Working"));
+    assertEquals(ui.html().includes("tok/s"), false);
+  },
+);
+
+testUI(
+  App,
+  "every message carries its time and a way to copy it",
+  async (ui) => {
+    await open(ui);
+    session.ingest(init);
+    await session.send("hello there");
+    await ui.waitFor(() => ui.html().includes("hello there"));
+    const html = ui.html();
+    // The byline furniture is in the DOM at all times and hidden with CSS, so
+    // it is reachable from the keyboard and by a test — a control that only
+    // exists on hover is a control a screen reader never finds.
+    assertEquals(html.includes("msg__time"), true);
+    assertEquals(html.includes("msg__acts"), true);
+  },
+);
+
+/* ── adding a project ─────────────────────────────────────────────────────── */
+
+testUI(
+  App,
+  "a folder that is not there yet is an offer, not a dead end",
+  async (ui) => {
+    await open(ui);
+    const parent = await Deno.makeTempDir();
+    const wanted = `${parent}/brand-new`;
+    try {
+      ui.AddProjectButton.click();
+      await ui.settle();
+      ui.ProjectDirectoryInput.type(wanted);
+      await ui.settle();
+      ui.AddButton.click();
+
+      // The path is not a directory, so nothing is added — and the app says
+      // what it could do about that instead of stopping at "no such folder".
+      await ui.waitFor(() => ui.html().includes("Nothing is at"));
+      assertEquals(ui.html().includes("Create it"), true);
+
+      ui.CreateItButton.click();
+      await ui.expectCell(
+        workspace,
+        (w) => w.projects.some((p: { path: string }) => p.path === wanted),
+      );
+      assertEquals((await Deno.stat(wanted)).isDirectory, true);
+      // …and the offer goes away once it has been taken.
+      await ui.waitFor(() => !ui.html().includes("Nothing is at"));
+    } finally {
+      await Deno.remove(parent, { recursive: true });
+    }
+  },
+);
+
+testUI(
+  App,
+  "browsing for a folder lists folders, and only folders",
+  async (ui) => {
+    await open(ui);
+    ui.AddProjectButton.click();
+    await ui.settle();
+    ui.BrowseForAFolderButton.click();
+    // The picker opens on the parent of the selected project and reads the real
+    // disk — this repository's own parent directory, in the test run.
+    await ui.waitFor(() => ui.html().includes("Filter folders"));
+    await ui.waitFor(() => ui.html().includes("Use this folder"));
+  },
+);
+
+testUI(
+  App,
+  "a long code block is folded, and unfolds on request",
+  async (ui) => {
+    await open(ui);
+    session.ingest(init);
+    const long = Array.from({ length: 60 }, (_, n) => `line ${n + 1}`).join(
+      "\n",
+    );
+    session.ingest({
+      type: "assistant",
+      message: {
+        id: "msg_long",
+        content: [{
+          type: "text",
+          text: "here it is\n\n```\n" + long + "\n```",
+        }],
+      },
+    });
+    // Asserted on the rendered element rather than on the code text: the
+    // highlighter splits every line into several nodes, so no line of it
+    // appears contiguously in the HTML.
+    await ui.waitFor(() =>
+      ui.html().includes('class="md__pre md__pre--folded"')
+    );
+    assertEquals(ui.html().includes("Show all"), true);
+
+    ui.ShowTheWholeCodeBlockButton.click();
+    await ui.waitFor(() =>
+      !ui.html().includes('class="md__pre md__pre--folded"')
+    );
+    assertEquals(ui.html().includes("Fold"), true);
+  },
+);
+
+testUI(App, "a path in the answer is something you can open", async (ui) => {
+  await open(ui);
+  session.ingest(init);
+  session.ingest({
+    type: "assistant",
+    message: {
+      id: "msg_path",
+      content: [{
+        type: "text",
+        // One real path and one thing that merely has a slash in it.
+        text: "see `src/cell/session.ts:412` — it is an and/or thing",
+      }],
+    },
+  });
+  await ui.waitFor(() => ui.html().includes("session.ts"));
+  // The rendered element, not the word: the stylesheet is part of `html()`
+  // and names the class twice on its own.
+  const html = ui.html();
+  const buttons = html.match(/class="md__code md__path"/g) ?? [];
+  assertEquals(buttons.length, 1, "the path became a button, and only it did");
+});
+
+/* ── undo ─────────────────────────────────────────────────────────────────── */
+
+testUI(
+  App,
+  "clearing the transcript is a decision you can take back",
+  async (ui) => {
+    await open(ui);
+    session.ingest(init);
+    await session.send("keep this");
+    await ui.waitFor(() => ui.html().includes("keep this"));
+
+    ui.SettingsLink.click();
+    await ui.waitFor(() => ui.html().includes("Transcript"));
+    ui.ClearTheViewButton.click();
+
+    // The notice, and the way back — a transcript is the record of real work
+    // and this app holds no other copy of it.
+    await ui.waitFor(() => ui.html().includes("Transcript cleared"));
+    await ui.expectCell(session, (s) => s.messages.length === 0);
+    ui.UndoButton.click();
+    await ui.expectCell(session, (s) => s.messages.length === 1);
+
+    ui.ChatLink.click();
+    await ui.waitFor(() => ui.html().includes("keep this"));
+  },
+);
+
+testUI(App, "Ctrl+Enter sends, and Shift+Enter still does not", async (ui) => {
+  await open(ui);
+  // No CLI is spawned on this path: the binary does not exist, so `send`
+  // reports a failed start. What is under test is which keystroke sends.
+  const previous = Deno.env.get("CLAUDE_BIN");
+  Deno.env.set("CLAUDE_BIN", "/nonexistent/claude-binary");
+  try {
+    const box = ui.MessageClaudeCodeInput;
+    box.type("first");
+    await ui.settle();
+
+    box.press("Enter", { shiftKey: true });
+    await ui.settle();
+    await ui.expectCell(session, (s) => s.messages.length === 0);
+
+    box.press("Enter", { ctrlKey: true });
+    await ui.waitFor(() => ui.html().includes("first"));
+    await ui.expectCell(session, (s) => s.messages.length === 1);
+  } finally {
+    if (previous === undefined) Deno.env.delete("CLAUDE_BIN");
+    else Deno.env.set("CLAUDE_BIN", previous);
+  }
+});
+
+testUI(
+  App,
+  "find walks the conversation and counts the matches",
+  async (ui) => {
+    await open(ui);
+    session.ingest(init);
+    for (
+      const [n, text] of [["a", "alpha needle"], ["b", "beta"], [
+        "c",
+        "gamma needle",
+      ]]
+    ) {
+      session.ingest({
+        type: "assistant",
+        message: { id: `msg_${n}`, content: [{ type: "text", text }] },
+      });
+    }
+    await ui.waitFor(() => ui.html().includes("gamma"));
+
+    openFind();
+    await ui.waitFor(() => ui.html().includes("Find in this conversation"));
+    ui.FindInThisConversationInput.setValue("needle");
+    await ui.waitFor(() => ui.html().includes("1 / 2"));
+
+    // The current match is marked apart from the others, so "next" is visible
+    // rather than something you have to take on trust.
+    assertEquals((ui.html().match(/msg--found/g) ?? []).length >= 1, true);
+    ui.NextMatchButton.click();
+    await ui.waitFor(() => ui.html().includes("2 / 2"));
+    // …and wraps, because a search has a natural cycle.
+    ui.NextMatchButton.click();
+    await ui.waitFor(() => ui.html().includes("1 / 2"));
+
+    closeFind();
+    await ui.waitFor(() => !ui.html().includes("Find in this conversation"));
+  },
+);
+
+testUI(App, "a draft belongs to the project it was written for", async (ui) => {
+  await open(ui);
+  const other = await Deno.makeTempDir();
+  try {
+    const first = workspace.activeId;
+    ui.MessageClaudeCodeInput.type("for the first project");
+    await ui.settle();
+
+    await workspace.addProject(other);
+    await ui.settle();
+    // The box is one textarea that survives the switch — without the draft
+    // swap, those words would still be sitting there aimed at another
+    // codebase, which is worse than losing them.
+    assertEquals(ui.MessageClaudeCodeInput.value, "");
+
+    ui.MessageClaudeCodeInput.type("for the second");
+    await ui.settle();
+
+    workspace.select(first);
+    await ui.settle();
+    assertEquals(ui.MessageClaudeCodeInput.value, "for the first project");
+  } finally {
+    await Deno.remove(other, { recursive: true });
+  }
+});
+
+testUI(App, "a menu can be driven entirely from the keyboard", async (ui) => {
+  await open(ui);
+  session.ingest(init);
+  await ui.waitFor(() => ui.html().includes("Sonnet"));
+
+  ui.ModelButton.click();
+  await ui.waitFor(() => ui.html().includes("Deepest reasoning"));
+  // Opening focuses the current row, so the arrows work without a click first
+  // — which is the one thing a keyboard user cannot do.
+  await ui.waitFor(() =>
+    (ui.document.activeElement as HTMLElement | null)?.className.includes(
+      "menu__item",
+    ) === true
+  );
+  const opened = ui.document.activeElement as HTMLElement;
+  assertEquals(opened.getAttribute("aria-label"), "Sonnet");
+
+  // Typing jumps, the way every native menu has for thirty years.
+  ui.HaikuButton.press("h");
+  await ui.settle();
+  assertEquals(
+    (ui.document.activeElement as HTMLElement).getAttribute("aria-label"),
+    "Haiku",
+  );
+});
+
+testUI(
+  App,
+  "an approval can be answered with the digits the CLI uses",
+  async (ui) => {
+    await open(ui);
+    session.ingest(init);
+    session.ingest(
+      assistantTool("toolu_perm", "Bash", {
+        command: "curl -s https://example.com",
+        description: "Fetch it",
+      }),
+    );
+    session.ingest(canUseTool);
+    await ui.waitFor(() => ui.html().includes("needs your approval"));
+
+    // The digits are on the buttons, so nobody has to be told they exist.
+    const html = ui.html();
+    assertEquals(html.includes("kbd"), true);
+
+    // 3 opens the deny box rather than denying outright — the reason is worth
+    // asking for, and the model reads it as the tool's error. The key is
+    // pressed on a control inside the card and handled by the card, which is
+    // where focus actually is while somebody decides.
+    ui.DenyButton.press("3");
+    await ui.waitFor(() => ui.html().includes("Tell Claude why"));
+    await ui.expectCell(session, (s) => s.permissions[0].status === "pending");
+  },
+);
+
+testUI(App, "an edit is shown as what it changes", async (ui) => {
+  await open(ui);
+  session.ingest(init);
+  session.ingest(assistantTool("toolu_edit", "Edit", {
+    file_path: "/tmp/cc-test/main.ts",
+    old_string: "const a = 1;\nconst b = 2;",
+    new_string: "const a = 1;\nconst b = 3;",
+  }));
+  await ui.waitFor(() => ui.html().includes("Edit"));
+
+  // Open the call. The raw input is two walls of escaped string with the
+  // difference somewhere inside them.
+  ui.EditCallButton.click();
+  await ui.waitFor(() => ui.html().includes("diff__line--add"));
+  const html = ui.html();
+  assertEquals(html.includes("diff__line--del"), true);
+  // One line each way, and the count says so.
+  assertEquals(html.includes(">+1<"), true);
+});
+
+testUI(
+  App,
+  "with no projects, the first screen is about getting one",
+  async (ui) => {
+    await open(ui);
+    // Every project removed — the state a brand-new install boots into.
+    for (const p of [...workspace.projects]) workspace.removeProject(p.id);
+    await ui.waitFor(() => ui.html().includes("Point it at a codebase"));
+    // Not three suggested prompts with nowhere to run them.
+    assertEquals(ui.html().includes("Explain this codebase"), false);
+    assertEquals(typeof ui.BrowseForAFolderButton.click, "function");
+  },
+);
+
+testUI(
+  App,
+  "a finished turn leaves its receipt under the answer",
+  async (ui) => {
+    await open(ui);
+    session.ingest(init);
+    session.ingest({
+      type: "assistant",
+      message: { id: "msg_r", content: [{ type: "text", text: "the answer" }] },
+    });
+    await ui.waitFor(() => ui.html().includes("the answer"));
+    session.ingest({
+      type: "result",
+      is_error: false,
+      duration_ms: 4_000,
+      num_turns: 1,
+      total_cost_usd: 0.25,
+      usage: { output_tokens: 400 },
+    });
+    // Under the answer it belongs to, not in one "last turn" field that is
+    // useless the moment anything else happens.
+    await ui.waitFor(() => ui.html().includes("turnfoot"));
+    const html = ui.html();
+    assertEquals(html.includes("400 out"), true);
+    assertEquals(html.includes("100 tok/s"), true);
+    assertEquals(html.includes("$0.25"), true);
+  },
+);
+
+testUI(
+  App,
+  "a loaded command can be used from the list it is in",
+  async (ui) => {
+    await open(ui);
+    // The CLI names its commands at startup; the page marks those "loaded", and
+    // only those get a Use button.
+    session.ingest({ ...init, slash_commands: ["review", "compact"] });
+    ui.CommandsLink.click();
+    await ui.waitFor(() => ui.html().includes("review"));
+
+    // The first Use button in the list — the entries are sorted, so that is
+    // "compact" rather than the "review" typed first above.
+    ui.UseButton.click();
+    // It lands in the message box, on the chat page, ready to edit.
+    await ui.waitFor(() => ui.MessageClaudeCodeInput.value.startsWith("/"));
+    assertEquals(ui.MessageClaudeCodeInput.value, "/compact ");
+  },
+);
+
+testUI(App, "a tool call that names a file leads to that file", async (ui) => {
+  await open(ui);
+  session.ingest(init);
+  session.ingest(assistantTool("toolu_file", "Read", {
+    file_path: "/tmp/cc-test/main.ts",
+  }));
+  await ui.waitFor(() => ui.html().includes("in tree"));
+
+  ui.ShowInTreeButton.click();
+  // The transcript says what was done; the tree says what the file looks like
+  // now, and going between them used to mean copying a path by hand.
+  await ui.waitFor(() => ui.html().includes("Touched"));
+  await ui.expectCell(tree, (s) => s.selected === "/tmp/cc-test/main.ts");
+});

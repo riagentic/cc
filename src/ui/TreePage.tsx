@@ -10,11 +10,11 @@
  * transcript.
  */
 import { useLocal, type VNode } from "aio/air";
-import { touchedPaths, tree } from "../cell/tree.ts";
+import { gitMark, touchedPaths, tree } from "../cell/tree.ts";
 import { activeProject, workspace } from "../cell/workspace.ts";
 import type { Touch, TreeNode } from "../type/claude.ts";
 import { bytes, listKey, tildePath } from "../lib/format.ts";
-import { highlight } from "../lib/highlight.ts";
+import { highlight, langOfFile } from "../lib/highlight.ts";
 import {
   Banner,
   Empty,
@@ -26,6 +26,7 @@ import {
   Segmented,
 } from "./parts.tsx";
 import { PageHead } from "./RunViews.tsx";
+import { DiffView } from "./Diff.tsx";
 import {
   IconEye,
   IconFile,
@@ -36,35 +37,6 @@ import {
   IconTree,
 } from "./icons.tsx";
 
-/** The fence language for a file, from its extension. The highlighter answers
- *  "I have no dialect for this" by rendering plain, so an unknown extension
- *  costs nothing and a wrong guess would cost colour on the wrong tokens. */
-const LANGS: Record<string, string> = {
-  ts: "ts",
-  tsx: "ts",
-  js: "js",
-  jsx: "js",
-  mjs: "js",
-  json: "json",
-  jsonc: "json",
-  md: "md",
-  css: "css",
-  html: "html",
-  sh: "bash",
-  bash: "bash",
-  py: "python",
-  rs: "rust",
-  go: "go",
-  toml: "toml",
-  yml: "yaml",
-  yaml: "yaml",
-};
-
-const langOf = (name: string): string => {
-  const dot = name.lastIndexOf(".");
-  return dot > 0 ? LANGS[name.slice(dot + 1).toLowerCase()] ?? "" : "";
-};
-
 /** A list key for a node — see {@link listKey}: a `/` in a key makes the row
  *  unaddressable from `am trigger` and from every UI test. */
 const rowKey = listKey;
@@ -74,6 +46,10 @@ function TreeRow(
 ): VNode {
   const n = props.node;
   const touchClass = props.touch ? ` treerow--${props.touch}` : "";
+
+  // Directories are not marked: git reports files, and a folder wearing an "M"
+  // would be a claim about everything inside it.
+  const mark = n.dir ? "" : gitMark(n.path);
 
   return (
     <button
@@ -95,6 +71,14 @@ function TreeRow(
           : IconFile({ size: 13 })}
       </span>
       <span class="treerow__name">{n.name}</span>
+      {
+        /* What git thinks, next to what the session did. They answer different
+          questions — "is this yours to review" and "did the agent touch it" —
+          and a file can easily be one and not the other. */
+      }
+      <span class={"treerow__git" + (mark ? ` treerow__git--${mark}` : "")}>
+        {mark === "modified" ? "M" : mark === "new" ? "A" : ""}
+      </span>
       <span class="treerow__touch">
         {props.touch === "written"
           ? (
@@ -125,6 +109,10 @@ function TreeRow(
 function FilePane(): VNode {
   const path = tree.selected;
   const p = tree.preview;
+  // The committed version, when there is one. "Changes" is offered only for a
+  // file git considers changed — see the cell, which only fetches it then.
+  const head = tree.previewHead;
+  const [showDiff, setShowDiff] = useLocal(false);
 
   if (!path) {
     return (
@@ -146,7 +134,7 @@ function FilePane(): VNode {
   }
 
   const name = path.slice(path.lastIndexOf("/") + 1);
-  const tokens = highlight(p.text, langOf(name));
+  const tokens = highlight(p.text, langOfFile(name));
 
   return (
     <div style={{ display: "grid", gap: "10px", minWidth: 0 }}>
@@ -173,16 +161,37 @@ function FilePane(): VNode {
             opening it. The pane knew the path and made you retype it. */
         }
         <PathActions path={path} label={name} />
+        {
+          /* Only for a file git says has changed — for anything else the
+            switch would offer a diff with nothing in it. */
+        }
+        {head !== "" && (
+          <Segmented
+            value={showDiff ? "diff" : "file"}
+            options={[
+              { id: "file", label: "File" },
+              { id: "diff", label: "Changes" },
+            ]}
+            onChange={(v) => setShowDiff(v === "diff")}
+          />
+        )}
       </div>
-      <pre class="codeview">
-        <code>
-          {tokens.map((t, i) => (
-            <span key={i} class={t.kind === "plain" ? undefined : `tok--${t.kind}`}>
-              {t.text}
-            </span>
-          ))}
-        </code>
-      </pre>
+      {showDiff && head !== ""
+        ? <DiffView before={head} after={p.text} />
+        : (
+          <pre class="codeview">
+            <code>
+              {tokens.map((t, i) => (
+                <span
+                  key={i}
+                  class={t.kind === "plain" ? undefined : `tok--${t.kind}`}
+                >
+                  {t.text}
+                </span>
+              ))}
+            </code>
+          </pre>
+        )}
     </div>
   );
 }

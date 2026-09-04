@@ -52,7 +52,7 @@ import {
   toolTitle,
   usageOf,
 } from "../lib/stream.ts";
-import { oneLine } from "../lib/format.ts";
+import { oneLine, perSecond } from "../lib/format.ts";
 import {
   assistant,
   blank,
@@ -250,8 +250,10 @@ export const session = cell("session", {
     usage: { ...EMPTY_USAGE },
     cost: 0,
     turns: 0,
+    cleared: [] as Message[],
     turnStartedAt: null as number | null,
     lastTurnMs: 0,
+    lastTurnOutput: 0,
     interrupting: false,
     turnEnd: null as TurnEnd | null,
     agentStats: null as AgentStats | null,
@@ -579,6 +581,9 @@ export const session = cell("session", {
       // perfectly usable, and restarting it would silently discard its context.
       if (s.pid === null) await session.start();
 
+      // A new message ends the window in which the last clear can be undone —
+      // and lets go of the transcript it was holding.
+      s.cleared = [];
       s.messages.push({
         id: `local-${crypto.randomUUID()}`,
         role: "user",
@@ -797,15 +802,79 @@ export const session = cell("session", {
       }
     },
 
+    /**
+     * Empty the transcript on screen. The CLI keeps its own memory.
+     *
+     * What was cleared is kept, once, so this is a decision that can be taken
+     * back. A transcript is the record of real work and there is no other copy
+     * of it in this app — a button that destroys one with no way back is a
+     * button people are right to be afraid of.
+     */
     clearTranscript(s: SessionState) {
-      s.messages = [];
-      s.streaming = null;
+      const cur = at(s, currentKey(s));
+      if (cur.messages.length > 0) cur.cleared = cur.messages;
+      cur.messages = [];
+      cur.streaming = null;
       note(
         s,
         "session",
         "Transcript cleared",
         "view only — the model still remembers",
       );
+    },
+
+    /** Put back what the last clear took away. A no-op once anything new has
+     *  arrived: the undo is for the moment right after, not for merging a
+     *  week-old transcript into a live one. */
+    undoClear(s: SessionState) {
+      const cur = at(s, currentKey(s));
+      if (cur.cleared.length === 0 || cur.messages.length > 0) return;
+      cur.messages = cur.cleared;
+      cur.cleared = [];
+    },
+
+    /**
+     * Send the last thing you said, again.
+     *
+     * The turn that failed is not retried — its text is. The CLI keeps its own
+     * context, so re-sending the prompt continues the same conversation rather
+     * than replaying anything, and an API overload (the usual reason a turn
+     * dies) leaves nothing else to undo.
+     *
+     * Refused while a turn is running: "again" would mean queueing a duplicate
+     * behind the one that is already working.
+     */
+    async retry(s: SessionState) {
+      const cur = at(s, currentKey(s));
+      if (cur.status === "working") return;
+      const last = [...cur.messages].reverse().find((m) =>
+        m.role === "user" && m.parentToolUseId === null
+      );
+      const text = last?.blocks
+        .filter((b) => b.kind === "text")
+        .map((b) => b.text)
+        .join("\n")
+        .trim();
+      if (!text) return;
+      cur.error = null;
+      await session.send(text);
+    },
+
+    /**
+     * End every project's process, not just the one on screen.
+     *
+     * The transcripts stay — a stopped session is a process that is gone, not
+     * a conversation that was deleted, and Resume brings its context back.
+     * There are as many processes as there are projects you have started, and
+     * the only other way to end them all is to quit the app.
+     */
+    async stopAll(s: SessionState) {
+      const keys = [s.activeKey, ...Object.keys(s.parked)].filter(Boolean);
+      for (const key of keys) {
+        // `endSession` publishes "offline" before awaiting the teardown, so
+        // the list goes quiet immediately rather than one project at a time.
+        await endSession(s, key, "stopped every session", "");
+      }
     },
 
     dismissError(s: SessionState) {
@@ -906,6 +975,18 @@ export const busyTaskCount = (): number =>
 
 /** Tokens occupying the context window after the most recent request. Cache
  *  reads count — they are still resident in the window. */
+/**
+ * How fast the last turn produced text, in output tokens per second — or
+ * `null` when there is nothing honest to divide.
+ *
+ * Over the whole turn, deliberately, including the time the model spent
+ * running tools and waiting on the API. That is the number a person is
+ * actually feeling. A "pure decode speed" would be larger, truer to the
+ * hardware, and a worse answer to "why is this slow".
+ */
+export const lastSpeed = (): number | null =>
+  perSecond(view().lastTurnOutput, view().lastTurnMs);
+
 export const contextUsed = (): number => contextUsedOf(view().usage);
 
 export const contextWindow = (): number =>

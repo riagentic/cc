@@ -1045,3 +1045,33 @@ testCell(
     t.expect.state((s) => s.meta.plugins.length === 0);
   },
 );
+
+testCell(session, "retry re-sends the last thing you said", async (t) => {
+  t.init();
+  // No CLI on this path: the spawn fails, which is what makes the turn end in
+  // an error — the state retry exists for.
+  const previous = Deno.env.get("CLAUDE_BIN");
+  Deno.env.set("CLAUDE_BIN", "/nonexistent/claude-binary");
+  try {
+    await t.send.send("the question");
+    t.expect.state((s) => s.messages.length === 1);
+
+    await t.send.retry();
+    // The same words, again — a second user message, not a replay of the turn.
+    t.expect.state((s) => s.messages.length === 2);
+    t.expect.state((s) =>
+      s.messages.every((m) =>
+        m.blocks.some((b) => b.kind === "text" && b.text === "the question")
+      )
+    );
+  } finally {
+    if (previous === undefined) Deno.env.delete("CLAUDE_BIN");
+    else Deno.env.set("CLAUDE_BIN", previous);
+  }
+});
+
+testCell(session, "retry with nothing to retry does nothing", async (t) => {
+  t.init();
+  await t.send.retry();
+  t.expect.state((s) => s.messages.length === 0);
+});

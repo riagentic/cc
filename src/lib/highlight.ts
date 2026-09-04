@@ -230,3 +230,50 @@ export function highlight(src: string, lang = ""): Token[] {
   flush();
   return out;
 }
+
+/**
+ * The fence language for a file, from its extension.
+ *
+ * Lives here rather than in the one page that first needed it: three surfaces
+ * now guess a language from a file name — the tree's preview, a Write tool
+ * call, and an edit — and three copies of this table would drift the first
+ * time somebody added a language to one of them.
+ *
+ * The highlighter answers "I have no dialect for this" by rendering plain, so
+ * an unknown extension costs nothing and a wrong guess would cost colour on
+ * the wrong tokens.
+ */
+const LANGS: Record<string, string> = {
+  ts: "ts",
+  tsx: "ts",
+  mts: "ts",
+  js: "js",
+  jsx: "js",
+  mjs: "js",
+  cjs: "js",
+  json: "json",
+  jsonc: "json",
+  md: "md",
+  markdown: "md",
+  css: "css",
+  html: "html",
+  htm: "html",
+  sh: "bash",
+  bash: "bash",
+  zsh: "bash",
+  py: "python",
+  rs: "rust",
+  go: "go",
+  toml: "toml",
+  yml: "yaml",
+  yaml: "yaml",
+  sql: "sql",
+  c: "c",
+  h: "c",
+};
+
+export const langOfFile = (name: string): string => {
+  const base = name.slice(name.lastIndexOf("/") + 1);
+  const dot = base.lastIndexOf(".");
+  return dot > 0 ? LANGS[base.slice(dot + 1).toLowerCase()] ?? "" : "";
+};

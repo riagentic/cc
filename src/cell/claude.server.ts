@@ -554,6 +554,187 @@ export async function openPath(path: unknown): Promise<string | null> {
   }
 }
 
+/** One folder, as the picker shows it. */
+export type DirEntry = {
+  name: string;
+  path: string;
+  /** A repository — the thing somebody adding a project is almost always
+   *  looking for, so it is worth a mark of its own. */
+  git: boolean;
+  hidden: boolean;
+};
+
+/**
+ * The subdirectories of `path`, sorted the way a person reads them.
+ *
+ * Directories only: this exists to choose a project, and a list of files would
+ * be a thousand rows of things that cannot be picked. Repositories are marked
+ * rather than filtered — a project is often the parent of several, and
+ * sometimes a plain folder with no git in it at all.
+ *
+ * Unreadable entries are skipped rather than thrown: a home directory
+ * routinely contains one folder the user cannot enter, and one `EACCES` must
+ * not empty the whole list.
+ */
+export async function listDirs(
+  path: string,
+): Promise<{ path: string; entries: DirEntry[]; error: string | null }> {
+  const dir = resolvePath(path);
+  const entries: DirEntry[] = [];
+  try {
+    for await (const e of Deno.readDir(dir)) {
+      // A symlink to a directory is a directory as far as this is concerned —
+      // `~/code` being a link to another disk is completely ordinary, and
+      // `isDirectory` is false for the link itself.
+      const isDir = e.isDirectory ||
+        (e.isSymlink && await isDirectory(join(dir, e.name)));
+      if (!isDir) continue;
+      const full = join(dir, e.name);
+      entries.push({
+        name: e.name,
+        path: full,
+        git: await isDirectory(join(full, ".git")),
+        hidden: e.name.startsWith("."),
+      });
+    }
+  } catch (e) {
+    return {
+      path: dir,
+      entries: [],
+      error: e instanceof Deno.errors.NotFound
+        ? "That folder does not exist."
+        : e instanceof Deno.errors.PermissionDenied
+        ? "You do not have permission to read that folder."
+        : e instanceof Error
+        ? e.message
+        : String(e),
+    };
+  }
+  // Case-insensitive, and numbers in order: "v2" before "v10", which is what
+  // anybody with versioned folders expects and what a plain sort gets wrong.
+  entries.sort((a, b) =>
+    a.name.localeCompare(b.name, undefined, {
+      sensitivity: "base",
+      numeric: true,
+    })
+  );
+  return { path: dir, entries, error: null };
+}
+
+/**
+ * Create a directory, and everything above it that is missing.
+ *
+ * Returns the reason it could not be created, or `null` on success — including
+ * for a directory that was already there, which is the outcome the caller
+ * wanted either way.
+ */
+export async function makeDir(path: string): Promise<string | null> {
+  const dir = resolvePath(path);
+  try {
+    await Deno.mkdir(dir, { recursive: true });
+    return null;
+  } catch (e) {
+    if (e instanceof Deno.errors.AlreadyExists) return null;
+    return e instanceof Error ? e.message : String(e);
+  }
+}
+
+/**
+ * Write an exported file into the app's own directory, and answer with where
+ * it went.
+ *
+ * The app's directory, not the project's: an export is a copy made for a
+ * person, and dropping untracked Markdown into somebody's repository is the
+ * kind of helpfulness that ends up in a commit by accident. `~/.claude-control`
+ * is already where this app keeps its things.
+ *
+ * The name is sanitised rather than trusted — it is built from a project name,
+ * which is a directory name, which can contain anything a filesystem allows.
+ */
+export async function writeExport(
+  name: string,
+  text: string,
+): Promise<{ path: string | null; error: string | null }> {
+  const safe = name.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") ||
+    "transcript";
+  const dir = join(homeDir(), ".claude-control", "exports");
+  const path = join(dir, safe);
+  try {
+    await Deno.mkdir(dir, { recursive: true });
+    await Deno.writeTextFile(path, text);
+    return { path, error: null };
+  } catch (e) {
+    return { path: null, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+/**
+ * Which files in a repository git considers changed.
+ *
+ * Returned as absolute paths, so a caller comparing against a tree of absolute
+ * paths does no string surgery of its own. Modified and untracked are kept
+ * apart because they mean different things to a reader deciding what to
+ * review: one has a previous version to diff against and the other does not.
+ *
+ * Empty for anything that is not a repository — not an error. A project
+ * without git is ordinary, and this is decoration on a file list.
+ */
+export async function gitChanged(
+  path: string,
+): Promise<{ modified: string[]; untracked: string[] }> {
+  // Porcelain output is relative to the REPOSITORY ROOT, not to the directory
+  // git was run in — and a project is very often a subdirectory of its repo,
+  // or a plain folder inside somebody's home that happens to be under one. So
+  // the root is asked for first; joining against the project path produced
+  // confident absolute paths to files that do not exist.
+  const top = await run("git", ["rev-parse", "--show-toplevel"], path);
+  if (top === null) return { modified: [], untracked: [] };
+  const root = top.trim();
+  // `-uall`, because git collapses an untracked directory to its own name by
+  // default — a whole new folder arrived as one entry called "inner/", and
+  // every file inside it went unmarked. A file list wants files. Ignored paths
+  // are still excluded, so the usual node_modules is not walked.
+  const out = await run(
+    "git",
+    ["status", "--porcelain=v1", "-z", "-uall"],
+    path,
+  );
+  if (out === null) return { modified: [], untracked: [] };
+  const modified: string[] = [];
+  const untracked: string[] = [];
+  // `-z` because a path with a space in it is normal and a path with a NEWLINE
+  // in it is legal; the line-based format quotes those, and parsing quotes is
+  // how you end up with a file called "\"weird name\"".
+  for (const entry of out.split("\0")) {
+    if (entry.length < 4) continue;
+    const code = entry.slice(0, 2);
+    const name = entry.slice(3);
+    // A rename reads as "R  new -> old" across two NUL-separated fields; the
+    // first is the one that exists now, which is the one a file list shows.
+    (code === "??" ? untracked : modified).push(join(root, name));
+  }
+  return { modified, untracked };
+}
+
+/**
+ * The committed version of a file, or `null` when there is not one.
+ *
+ * `null` covers every "there is nothing to compare against" case at once: not
+ * a repository, never committed, deleted from the index. The caller shows the
+ * file plainly in all of them, which is the right answer to all of them.
+ */
+export async function gitFileAtHead(path: string): Promise<string | null> {
+  const dir = path.slice(0, path.lastIndexOf("/")) || "/";
+  const top = await run("git", ["rev-parse", "--show-toplevel"], dir);
+  if (top === null) return null;
+  const root = top.trim();
+  if (!path.startsWith(root + "/")) return null;
+  const rel = path.slice(root.length + 1);
+  // `--` and a path that is explicitly relative to the root: without the
+  // separator a file called "HEAD" is a revision, and git resolves it as one.
+  return await run("git", ["show", `HEAD:${rel}`], root);
+}
+
 export async function isDirectory(path: string): Promise<boolean> {
   const stat = await Deno.stat(path).catch(() => null);
   return stat?.isDirectory === true;

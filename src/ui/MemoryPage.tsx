@@ -114,7 +114,11 @@ export function MemoryPage(): VNode {
                     window
                   </span>
                 </div>
-                <Meter value={total / 4} max={window} />
+                <Meter
+                  value={total / 4}
+                  max={window}
+                  label="Memory files as a share of the context window"
+                />
                 <div class="field__hint" style={{ marginTop: "6px" }}>
                   Token count is an estimate (≈4 bytes per token) — the CLI
                   reports exact usage only once a turn completes.
@@ -164,6 +168,7 @@ export function MemoryPage(): VNode {
                               style={{ marginTop: "5px", maxWidth: "420px" }}
                             >
                               <Meter
+                                label="Size against the largest memory file"
                                 value={f.bytes}
                                 max={largest}
                                 tone="flat"

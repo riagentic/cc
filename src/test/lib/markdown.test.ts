@@ -10,8 +10,15 @@ import {
   type Inline,
   parseInline,
   parseMarkdown,
+  pathish,
   safeHref,
 } from "../../lib/markdown.ts";
+
+/** The plain text of a run of inline nodes — enough for these assertions. */
+const text = (nodes: Inline[]): string =>
+  nodes.map((n) =>
+    n.t === "text" || n.t === "code" ? n.v : text(n.v as Inline[])
+  ).join("");
 
 const kinds = (src: string): string[] => parseMarkdown(src).map((b) => b.t);
 const items = (b: Block): unknown => (b as { items?: unknown }).items;
@@ -217,4 +224,54 @@ Deno.test("autolinking never touches code, labels or half-addresses", () => {
       text,
     );
   }
+});
+
+Deno.test("task lists keep the state, not the brackets", () => {
+  const blocks = parseMarkdown("- [x] shipped\n- [ ] not yet\n- plain");
+  const list = blocks[0];
+  assertEquals(list.t, "list");
+  if (list.t !== "list") return;
+  assertEquals(list.checks, [true, false, null]);
+  // The marker is not part of the text any more.
+  assertEquals(text(list.items[0]), "shipped");
+  assertEquals(text(list.items[1]), "not yet");
+  assertEquals(text(list.items[2]), "plain");
+});
+
+Deno.test("a bullet that merely starts with a bracket is not a task", () => {
+  // "[x] is undefined" is a sentence an agent writes about code, and turning
+  // it into a ticked box would change what it says.
+  const blocks = parseMarkdown("- [x]is undefined\n- [y] maybe");
+  const list = blocks[0];
+  if (list.t !== "list") throw new Error("expected a list");
+  assertEquals(list.checks, [null, null]);
+});
+
+Deno.test("strikethrough needs two tildes, so a home path survives", () => {
+  const struck = parseInline("~~gone~~ but ~/code/app stays");
+  assertEquals(struck[0].t, "del");
+  const home = parseInline("look in ~/code/app for it");
+  assertEquals(home.every((n) => n.t !== "del"), true);
+});
+
+Deno.test("pathish offers a button only for something that opens", () => {
+  // Yes: real-looking files, with or without a line number.
+  assertEquals(pathish("src/app.ts"), { path: "src/app.ts", line: 0 });
+  assertEquals(pathish("src/cell/session.ts:412"), {
+    path: "src/cell/session.ts",
+    line: 412,
+  });
+  assertEquals(pathish("src/a.ts:12:5"), { path: "src/a.ts", line: 12 });
+  assertEquals(pathish("/etc/hosts"), { path: "/etc/hosts", line: 0 });
+  assertEquals(pathish("~/code/app"), { path: "~/code/app", line: 0 });
+  assertEquals(pathish("./run.sh"), { path: "./run.sh", line: 0 });
+
+  // No: the things model output is full of that merely contain a slash.
+  assertEquals(pathish("and/or"), null);
+  assertEquals(pathish("24/7"), null);
+  assertEquals(pathish("Result<T/E>"), null);
+  assertEquals(pathish("npm run build"), null, "a command, not a path");
+  assertEquals(pathish("--model"), null);
+  assertEquals(pathish("https://example.com/x"), null, "that is a link");
+  assertEquals(pathish(""), null);
 });

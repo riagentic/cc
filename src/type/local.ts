@@ -125,6 +125,16 @@ export type LocalChat = {
   summary: string;
   /** Prompt tokens the last request actually carried (est. if unreported). */
   usedTokens: number;
+  /** When the turn on screen started, or `0` when none is running. Drives the
+   *  same working clock the Claude side has — a turn that has been going for
+   *  four minutes and one that started two seconds ago look identical
+   *  otherwise, and only one of them is a reason to worry. */
+  startedAt: number;
+  /** How long the last turn took, and how many tokens it produced — `0` for
+   *  either when the server did not say. Together they are a speed; apart they
+   *  are nothing, which is why neither is shown alone. */
+  lastMs: number;
+  lastTokens: number;
   models: string[];
   error: string | null;
   /** The command the agent is waiting to be allowed to run, if any. The turn

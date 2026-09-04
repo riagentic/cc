@@ -27,6 +27,41 @@ Three columns, split by how often you use them:
 - **Right — sections.** The thing you click constantly, on the side the pointer
   already rests.
 
+## Getting around
+
+Everything has a name, and every name is one keystroke away.
+
+- **Ctrl K** — the command palette: every action in the app, by name. Also the
+  brand in the top corner, for the days you have forgotten the chord.
+- **?** — the keyboard map, printed from the same table the keys are installed
+  from, so it cannot list one that does nothing.
+- **Ctrl 1…9** picks a project, **Ctrl ]** and **Ctrl [** step through them, and
+  a tab can be dragged (or moved with **Alt+Up** / **Alt+Down**) — the order
+  decides which one Ctrl 1 reaches.
+- **Ctrl F** searches the conversation you are looking at: "3 of 11", Enter and
+  Shift+Enter to walk it.
+- **Ctrl I** puts the cursor in the message box, **/** in the page's filter.
+- **Esc** interrupts the running turn, on either engine.
+- **Ctrl B** and **Ctrl Shift B** collapse the side panels; **Ctrl Shift L**
+  cycles the theme; **Ctrl** with the wheel, or **Ctrl +/−/0**, zooms the whole
+  window.
+
+Typing `/` in the message box offers the commands the session actually accepts.
+An approval prompt takes **1**, **2** and **3** the way the CLI does — and never
+takes Enter, which is the key most likely to arrive by accident.
+
+## How it looks
+
+Dark, light, or **high contrast** — a real fourth palette, not a filter, for a
+bad screen in a bright room. Six accents. Zoom from 70% to 180%. A comfortable
+or compact density, a reading width for the transcript, and a motion setting
+that follows the operating system unless you say otherwise.
+
+Four gauges in the rail — processor, memory, GPU and video memory — sampled only
+while something is showing them, because a GPU reading costs a process launch. A
+reading that cannot be taken is a dash, never a zero: "no GPU tool installed"
+and "GPU idle" are opposite facts.
+
 ## Settings belong to the project
 
 Two codebases rarely want the same answer. The one you are shipping wants Opus
@@ -292,6 +327,20 @@ Usage limits come from the CLI's own `rate_limit_event`, every window it reports
 (`five_hour`, `seven_day`, …) with the time each one resets — not just the
 single figure it chooses to headline, which can read 0% while another window is
 nearly full.
+
+## Reading what it wrote
+
+An **edit is a diff**, in the transcript and in the approval prompt — with a
+sign in the gutter as well as colour, because that prompt is where somebody
+decides whether to let a change happen. A **Write** shows the file, coloured by
+its extension; a **Bash** shows the command as a shell sees it, which also makes
+it copyable. A code block longer than a screenful folds, so a file dumped into
+an answer cannot bury the sentence underneath it.
+
+A path in an answer — `src/cell/session.ts:412` — is a button that opens it. A
+checklist is checkboxes. A conversation can be copied or saved as Markdown, tool
+calls included, and clearing one is undoable, because this app holds no other
+copy of it.
 
 ## Permissions
 

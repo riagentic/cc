@@ -21,6 +21,13 @@ import { LOCAL_PERMISSIONS, permissionOf } from "../lib/agent.ts";
 import { pct, tildePath, tokens, until, usd } from "../lib/format.ts";
 import { Dot, Elapsed, Menu, Meter, Pill, Stat, useNow } from "./parts.tsx";
 import {
+  BranchStat,
+  ContextStat,
+  ENGINE_OPTIONS,
+  EngineStat,
+  ProjectStat,
+} from "./strip.tsx";
+import {
   IconAgents,
   IconAlert,
   IconBranch,
@@ -33,16 +40,6 @@ import {
   IconTasks,
   IconThinking,
 } from "./icons.tsx";
-
-/** Engines a project can run on, named the way the Settings switch names them.
- *  Kept here rather than imported from the local page so the strip does not
- *  depend on the local conversation module for four strings. */
-const ENGINE_OPTIONS = [
-  { id: "claude", label: "Claude Code", hint: "The CLI, with every feature" },
-  { id: "lmstudio", label: "LM Studio", hint: "Local · OpenAI-compatible" },
-  { id: "ollama", label: "Ollama", hint: "Local · OpenAI-compatible" },
-  { id: "llamacpp", label: "llama.cpp", hint: "Local · OpenAI-compatible" },
-] as const;
 
 export function StatusStrip(): VNode {
   const project = activeProject();
@@ -92,34 +89,14 @@ export function StatusStrip(): VNode {
 
   return (
     <div class="strip">
-      <Stat label="Project" clamp title={project?.path}>
-        {IconFolder({ size: 14 })}
-        {
-          /* Switchable, like everything else the strip names. The dock is the
-            place you pick a project deliberately; this is the place you notice
-            you are in the wrong one, and it would be perverse to make you
-            travel to fix what you just read here. */
-        }
-        <Menu
-          label="Project"
-          value={project?.id ?? ""}
-          title={project ? project.path : "Pick a project"}
-          trigger={
-            <span class="truncate">
-              {project ? tildePath(project.path, workspace.home) : "None"}
-            </span>
-          }
-          options={workspace.projects.map((p) => ({
-            id: p.id,
-            label: p.name,
-            hint: p.missing
-              ? "Folder is gone"
-              : p.branch ?? tildePath(p.path, workspace.home),
-            tone: p.missing ? ("danger" as const) : undefined,
-          }))}
-          onChange={(id) => workspace.select(id)}
-        />
-        {elsewhere && (
+      {
+        /* Project, branch, engine and model, in this order, on both engines'
+          strips — see `strip.tsx`. Switching a project from Claude Code to a
+          local model used to move every control on this row. */
+      }
+      <ProjectStat
+        key="project"
+        note={elsewhere && (
           <span
             class="pill pill--warn"
             style={{ padding: "1px 7px" }}
@@ -128,20 +105,9 @@ export function StatusStrip(): VNode {
             session elsewhere
           </span>
         )}
-      </Stat>
-
-      <Stat
-        label="Branch"
-        title={project?.dirty ? "Uncommitted changes" : undefined}
-      >
-        {IconBranch({ size: 14 })}
-        <span class="truncate">{project?.branch ?? "—"}</span>
-        {project?.dirty && (
-          <span class="pill pill--warn" style={{ padding: "1px 7px" }}>
-            dirty
-          </span>
-        )}
-      </Stat>
+      />
+      <BranchStat key="branch" />
+      <EngineStat key="engine" />
 
       {
         /* The three the strip used to only *report*. A control surface that
@@ -151,7 +117,7 @@ export function StatusStrip(): VNode {
           They apply to the NEXT session, which the trigger's title says and
           the strip marks below while one is running. */
       }
-      <Stat label="Model">
+      <Stat key="model" label="Model">
         {IconModel({ size: 14 })}
         <Menu
           label="Model"
@@ -188,7 +154,7 @@ export function StatusStrip(): VNode {
         )}
       </Stat>
 
-      <Stat label="Effort">
+      <Stat key="effort" label="Effort">
         {IconThinking({ size: 14 })}
         <Menu
           label="Effort"
@@ -206,7 +172,7 @@ export function StatusStrip(): VNode {
         />
       </Stat>
 
-      <Stat label="Permissions">
+      <Stat key="permissions" label="Permissions">
         {IconShield({ size: 14 })}
         {onLocal
           ? (
@@ -262,70 +228,14 @@ export function StatusStrip(): VNode {
           )}
       </Stat>
 
-      <Stat label="Engine">
-        {IconPlug({ size: 14 })}
-        <Menu
-          label="Engine"
-          value={localConfig(project?.id ?? workspace.activeId).engine}
-          title="What runs this project"
-          // Look for local servers the moment someone opens the list — the
-          // answer is only interesting to a person about to choose, and it is
-          // stale by the time it would have been useful at boot.
-          onOpen={() => void local.detect()}
-          options={ENGINE_OPTIONS.map((e) => ({
-            id: e.id,
-            label: e.label,
-            hint: e.id === "claude"
-              ? e.hint
-              : detectedEngines().find((d) => d.engine === e.id)?.reachable
-              ? "Running now"
-              : local.detecting
-              ? "Looking…"
-              : e.hint,
-            trailing: e.id !== "claude" &&
-                detectedEngines().find((d) => d.engine === e.id)?.reachable
-              ? <span class="dot dot--ready" />
-              : null,
-          }))}
-          // Chained: a dispatch that has not committed is invisible to the
-          // next one, so a side-by-side `syncEngine` can read the engine the
-          // project was on a moment ago.
-          onChange={(engine) => {
-            const target = project?.id ?? workspace.activeId;
-            void local.setEngine(target, engine).then(() =>
-              engine === "claude" ? undefined : local.syncEngine(target)
-            );
-          }}
-        />
-      </Stat>
+      <ContextStat key="context" used={used} max={max} measured={measured} />
 
-      <Stat
-        label={measured ? "Context" : "Context (est.)"}
-        grow
-        numeric
-        title={measured
-          ? "Tokens resident in the context window after the last request"
-          : "Window size is the model default until the first turn reports it"}
-      >
-        <div style={{ width: "100%", display: "grid", gap: "3px" }}>
-          <div style={{ display: "flex", gap: "8px", alignItems: "baseline" }}>
-            <span>{tokens(used)}</span>
-            <span style={{ color: "var(--ink-dim)" }}>/ {tokens(max)}</span>
-            <span style={{ flex: 1 }} />
-            <span style={{ color: "var(--ink-dim)" }}>
-              {pct(used, max).toFixed(pct(used, max) < 10 ? 1 : 0)}%
-            </span>
-          </div>
-          <Meter value={used} max={max} />
-        </div>
-      </Stat>
-
-      <Stat label="Agents" numeric>
+      <Stat key="agents" label="Agents" numeric minor>
         {IconAgents({ size: 14 })}
         <span>{agents}</span>
       </Stat>
 
-      <Stat label="Tasks" numeric>
+      <Stat key="tasks" label="Tasks" numeric minor>
         {IconTasks({ size: 14 })}
         <span>{tasks}</span>
       </Stat>
@@ -342,12 +252,17 @@ export function StatusStrip(): VNode {
         />
       </Stat>
 
-      <Stat label="Cost" numeric title="Session total reported by the CLI">
+      <Stat
+        key="cost"
+        label="Cost"
+        numeric
+        title="Session total reported by the CLI"
+      >
         {IconCoins({ size: 14 })}
         <span>{usd(view().cost)}</span>
       </Stat>
 
-      <Stat label="Session">
+      <Stat key="session" label="Session">
         <Dot status={view().status} />
         <span class="truncate">
           {holds > 0 ? "waiting for you" : view().status}
@@ -367,19 +282,23 @@ export function StatusStrip(): VNode {
         /* Thinking is the one number that moves during a long turn. Shown only
           while it is moving — an idle strip should carry nothing spurious. */
       }
-      {view().thinkingTokens > 0 && view().status === "working" && (
-        <Stat
-          label="Thinking"
-          numeric
-          title="The CLI's running token estimate for the reasoning in this turn"
-        >
-          {IconThinking({ size: 14 })}
-          <span>{tokens(view().thinkingTokens)}</span>
-        </Stat>
-      )}
+      {!(view().thinkingTokens > 0 && view().status === "working")
+        ? <span key="thinking" hidden />
+        : (
+          <Stat
+            key="thinking"
+            label="Thinking"
+            numeric
+            title="The CLI's running token estimate for the reasoning in this turn"
+          >
+            {IconThinking({ size: 14 })}
+            <span>{tokens(view().thinkingTokens)}</span>
+          </Stat>
+        )}
 
-      {tight && limit && (
+      {!(tight && limit) ? <span key="limit" hidden /> : (
         <Stat
+          key="limit"
           label="Usage limit"
           numeric
           title={`${
@@ -398,8 +317,9 @@ export function StatusStrip(): VNode {
         </Stat>
       )}
 
-      {holds > 0 && (
+      {holds === 0 ? <span key="holds" hidden /> : (
         <Stat
+          key="holds"
           label="Approval"
           title="Claude Code is blocked until you answer — the prompt is above this page, wherever you are"
         >
@@ -409,8 +329,9 @@ export function StatusStrip(): VNode {
         </Stat>
       )}
 
-      {activeSettings().skipPermissions && (
+      {!activeSettings().skipPermissions ? <span key="skip" hidden /> : (
         <Stat
+          key="skip"
           label="Permissions"
           title="Running with --dangerously-skip-permissions: every check is off"
         >

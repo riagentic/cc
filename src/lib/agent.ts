@@ -543,6 +543,15 @@ export type StreamAcc = {
   finish: string | null;
   /** Prompt tokens as the server reported them, when it did. */
   promptTokens: number | null;
+  /**
+   * Completion tokens as the server reported them.
+   *
+   * `null` when it did not — which is common, and is why the speed figure this
+   * feeds is absent rather than estimated. A tokens-per-second number computed
+   * from a character count would be wrong by whatever the tokeniser happens to
+   * do with this model's vocabulary, and wrong in a way nobody could see.
+   */
+  completionTokens: number | null;
 };
 
 export const newAcc = (): StreamAcc => ({
@@ -550,6 +559,7 @@ export const newAcc = (): StreamAcc => ({
   toolCalls: [],
   finish: null,
   promptTokens: null,
+  completionTokens: null,
 });
 
 /** Ceilings on what one streamed reply may accumulate. The stream comes from
@@ -571,6 +581,9 @@ export function foldChunk(acc: StreamAcc, chunk: unknown): StreamAcc {
   const usage = c.usage as Record<string, unknown> | undefined;
   if (usage && typeof usage.prompt_tokens === "number") {
     acc.promptTokens = usage.prompt_tokens;
+  }
+  if (usage && typeof usage.completion_tokens === "number") {
+    acc.completionTokens = usage.completion_tokens;
   }
   const choice = Array.isArray(c.choices)
     ? c.choices[0] as Record<string, unknown> | undefined
