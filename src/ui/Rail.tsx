@@ -22,11 +22,13 @@ import {
   view,
 } from "../cell/session.ts";
 import { activeProject, activeSettings, workspace } from "../cell/workspace.ts";
+import { activeIsLocal, localChat, localConfig } from "../cell/local.ts";
+import { ENGINE_NAMES } from "./LocalChatPage.tsx";
 import { blockedJobs, jobs } from "../cell/jobs.ts";
 import { activeLoops, projectLoops } from "../cell/loops.ts";
 import { catalog, mcpEntries, memoryBytes } from "../cell/catalog.ts";
 import { storage } from "../cell/storage.ts";
-import { bytes } from "../lib/format.ts";
+import { bytes, modelLabel } from "../lib/format.ts";
 import { Badge, Dot } from "./parts.tsx";
 import {
   IconActivity,
@@ -114,6 +116,10 @@ const Group = (props: { children: unknown }): VNode => (
 
 export function Rail(): VNode {
   const project = activeProject();
+  // On a local engine most cards describe the Claude Code CLI — sub-agents,
+  // tasks, jobs, capabilities, its storage. Hiding them is the honest rail:
+  // a card whose page can only say "not running here" is noise, not signal.
+  const isLocal = activeIsLocal();
   const agents = runningAgents().length;
   const tasks = runningTasks().length + runningTools().length;
   const holds = pendingPermissions().length;
@@ -151,7 +157,13 @@ export function Rail(): VNode {
           exact
           icon={IconChat({ size: 16 })}
           label="Chat"
-          hint={holds > 0
+          hint={isLocal
+            ? `${
+              ENGINE_NAMES[localConfig(workspace.activeId).engine] ?? ""
+            } · ${
+              modelLabel(localConfig(workspace.activeId).model) || "no model"
+            }`
+            : holds > 0
             ? `${holds} approval${holds > 1 ? "s" : ""} needed`
             : project
             ? project.name
@@ -165,67 +177,77 @@ export function Rail(): VNode {
             ? <Badge value="live" tone="live" />
             : undefined}
         />
-        <NavCard
-          to="/agents"
-          icon={IconAgents({ size: 16 })}
-          label="Sub-agents"
-          hint={agents > 0 ? `${agents} running` : "Idle"}
-          badge={agents > 0 ? <Badge value={agents} tone="live" /> : undefined}
-        />
-        <NavCard
-          to="/tasks"
-          icon={IconTasks({ size: 16 })}
-          label="Tasks"
-          hint={tasks > 0
-            ? `${tasks} running`
-            : holds > 0
-            ? `${holds} waiting for you`
-            : "Idle"}
-          badge={tasks > 0
-            ? <Badge value={tasks} tone="live" />
-            : holds > 0
-            ? <Badge value={holds} tone="danger" />
-            : undefined}
-        />
-        <NavCard
-          to="/activity"
-          icon={IconActivity({ size: 16 })}
-          label="Activity"
-          hint={`${view().activity.length} events`}
-        />
+        {!isLocal && (
+          <>
+            <NavCard
+              to="/agents"
+              icon={IconAgents({ size: 16 })}
+              label="Sub-agents"
+              hint={agents > 0 ? `${agents} running` : "Idle"}
+              badge={agents > 0
+                ? <Badge value={agents} tone="live" />
+                : undefined}
+            />
+            <NavCard
+              to="/tasks"
+              icon={IconTasks({ size: 16 })}
+              label="Tasks"
+              hint={tasks > 0
+                ? `${tasks} running`
+                : holds > 0
+                ? `${holds} waiting for you`
+                : "Idle"}
+              badge={tasks > 0
+                ? <Badge value={tasks} tone="live" />
+                : holds > 0
+                ? <Badge value={holds} tone="danger" />
+                : undefined}
+            />
+            <NavCard
+              to="/activity"
+              icon={IconActivity({ size: 16 })}
+              label="Activity"
+              hint={`${view().activity.length} events`}
+            />
+          </>
+        )}
 
-        <Group>Background</Group>
-        <NavCard
-          to="/jobs"
-          icon={IconJobs({ size: 16 })}
-          label="Jobs"
-          machine
-          // Blocked leads, because a blocked job is the one that will sit there
-          // forever if nobody is told about it.
-          hint={blocked > 0
-            ? `${blocked} waiting on you`
-            : working > 0
-            ? `${working} working`
-            : jobs.jobs.length > 0
-            ? `${jobs.jobs.length} total`
-            : "None"}
-          badge={blocked > 0
-            ? <Badge value={blocked} tone="danger" />
-            : working > 0
-            ? <Badge value={working} tone="live" />
-            : undefined}
-        />
-        <NavCard
-          to="/loops"
-          icon={IconLoop({ size: 16 })}
-          label="Loops"
-          hint={armed > 0
-            ? `${armed} armed`
-            : loops > 0
-            ? `${loops} paused`
-            : "None"}
-          badge={armed > 0 ? <Badge value={armed} /> : undefined}
-        />
+        {!isLocal && <Group>Background</Group>}
+        {!isLocal && (
+          <>
+            <NavCard
+              to="/jobs"
+              icon={IconJobs({ size: 16 })}
+              label="Jobs"
+              machine
+              // Blocked leads, because a blocked job is the one that will sit there
+              // forever if nobody is told about it.
+              hint={blocked > 0
+                ? `${blocked} waiting on you`
+                : working > 0
+                ? `${working} working`
+                : jobs.jobs.length > 0
+                ? `${jobs.jobs.length} total`
+                : "None"}
+              badge={blocked > 0
+                ? <Badge value={blocked} tone="danger" />
+                : working > 0
+                ? <Badge value={working} tone="live" />
+                : undefined}
+            />
+            <NavCard
+              to="/loops"
+              icon={IconLoop({ size: 16 })}
+              label="Loops"
+              hint={armed > 0
+                ? `${armed} armed`
+                : loops > 0
+                ? `${loops} paused`
+                : "None"}
+              badge={armed > 0 ? <Badge value={armed} /> : undefined}
+            />
+          </>
+        )}
 
         <Group>Project</Group>
         <NavCard
@@ -234,107 +256,145 @@ export function Rail(): VNode {
           label="Tree"
           hint={project ? project.name : "No project"}
         />
-        <NavCard
-          to="/memory"
-          icon={IconMemory({ size: 16 })}
-          label="Memory"
-          hint={catalog.memory.length > 0
-            ? bytes(memoryBytes())
-            : "Not scanned"}
-        />
+        {!isLocal && (
+          <NavCard
+            to="/memory"
+            icon={IconMemory({ size: 16 })}
+            label="Memory"
+            hint={catalog.memory.length > 0
+              ? bytes(memoryBytes())
+              : "Not scanned"}
+          />
+        )}
 
-        <Group>Capabilities</Group>
-        <NavCard
-          to="/skills"
-          icon={IconSpark({ size: 16 })}
-          label="Skills"
-          hint={`${view().meta.skills.length || catalog.skills.length} loaded`}
-        />
-        <NavCard
-          to="/commands"
-          icon={IconCommand({ size: 16 })}
-          label="Commands"
-          hint={`${
-            view().meta.commands.length || catalog.commands.length
-          } available`}
-        />
-        <NavCard
-          to="/mcp"
-          icon={IconPlug({ size: 16 })}
-          label="MCP"
-          hint={servers.length === 0
-            ? "None configured"
-            : `${connected}/${servers.length} connected`}
-        />
-        <NavCard
-          to="/plugins"
-          icon={IconPlugin({ size: 16 })}
-          label="Plugins"
-          machine
-          hint={catalog.plugins.length > 0
-            ? `${catalog.plugins.length} installed`
-            : "None"}
-        />
-        <NavCard
-          to="/hooks"
-          icon={IconHook({ size: 16 })}
-          label="Hooks"
-          hint={catalog.hooks.length > 0
-            ? `${catalog.hooks.length} configured`
-            : "None"}
-        />
-        <NavCard
-          to="/storage"
-          icon={IconFolder({ size: 16 })}
-          label="Storage"
-          machine
-          hint={storage.scannedAt > 0
-            ? bytes(storage.totalBytes)
-            : "Not scanned"}
-        />
+        {!isLocal && <Group>Capabilities</Group>}
+        {!isLocal && (
+          <>
+            <NavCard
+              to="/skills"
+              icon={IconSpark({ size: 16 })}
+              label="Skills"
+              hint={`${
+                view().meta.skills.length || catalog.skills.length
+              } loaded`}
+            />
+            <NavCard
+              to="/commands"
+              icon={IconCommand({ size: 16 })}
+              label="Commands"
+              hint={`${
+                view().meta.commands.length || catalog.commands.length
+              } available`}
+            />
+            <NavCard
+              to="/mcp"
+              icon={IconPlug({ size: 16 })}
+              label="MCP"
+              hint={servers.length === 0
+                ? "None configured"
+                : `${connected}/${servers.length} connected`}
+            />
+            <NavCard
+              to="/plugins"
+              icon={IconPlugin({ size: 16 })}
+              label="Plugins"
+              machine
+              hint={catalog.plugins.length > 0
+                ? `${catalog.plugins.length} installed`
+                : "None"}
+            />
+            <NavCard
+              to="/hooks"
+              icon={IconHook({ size: 16 })}
+              label="Hooks"
+              hint={catalog.hooks.length > 0
+                ? `${catalog.hooks.length} configured`
+                : "None"}
+            />
+            <NavCard
+              to="/storage"
+              icon={IconFolder({ size: 16 })}
+              label="Storage"
+              machine
+              hint={storage.scannedAt > 0
+                ? bytes(storage.totalBytes)
+                : "Not scanned"}
+            />
+          </>
+        )}
         <NavCard
           to="/settings"
           icon={IconSettings({ size: 16 })}
           label="Settings"
-          hint={`${activeSettings().model} · ${activeSettings().permissionMode}${
-            activeSettings().effort ? ` · ${activeSettings().effort}` : ""
-          }`}
+          hint={isLocal
+            ? `${
+              ENGINE_NAMES[localConfig(workspace.activeId).engine] ?? "local"
+            } · ${localConfig(workspace.activeId).mode}`
+            : `${activeSettings().model} · ${activeSettings().permissionMode}${
+              activeSettings().effort ? ` · ${activeSettings().effort}` : ""
+            }`}
         />
       </div>
 
       <div class="rail__foot">
-        <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-          <Dot status={view().status} />
-          <span
-            class="wide"
-            style={{ flex: 1, fontSize: "12px", color: "var(--ink-soft)" }}
-          >
-            {STATUS_TEXT[view().status] ?? view().status}
-          </span>
-          {view().status === "offline" || view().status === "error"
-            ? (
-              <button
-                type="button"
-                class="btn btn--sm btn--icon"
-                title="Start session"
-                aria-label="Start session"
-                onClick={() => session.start()}
+        {isLocal
+          ? (
+            <div
+              style={{ display: "flex", alignItems: "center", gap: "8px" }}
+            >
+              <Dot
+                status={localChat(workspace.activeId).status === "working"
+                  ? "working"
+                  : "ready"}
+              />
+              <span
+                class="wide"
+                style={{
+                  flex: 1,
+                  fontSize: "12px",
+                  color: "var(--ink-soft)",
+                }}
               >
-                {IconPlay({ size: 15 })}
-              </button>
-            )
-            : (
-              <button
-                type="button"
-                class="btn btn--sm btn--icon"
-                title="Stop session"
-                aria-label="Stop session"
-                onClick={() => session.stop()}
+                {localChat(workspace.activeId).status === "working"
+                  ? "Working"
+                  : "Ready"}
+              </span>
+            </div>
+          )
+          : (
+            <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+              <Dot status={view().status} />
+              <span
+                class="wide"
+                style={{ flex: 1, fontSize: "12px", color: "var(--ink-soft)" }}
               >
-                {IconPower({ size: 15 })}
-              </button>
-            )}
-        </div>
+                {STATUS_TEXT[view().status] ?? view().status}
+              </span>
+              {view().status === "offline" || view().status === "error"
+                ? (
+                  <button
+                    type="button"
+                    class="btn btn--sm btn--icon"
+                    title="Start session"
+                    aria-label="Start session"
+                    onClick={() => session.start()}
+                  >
+                    {IconPlay({ size: 15 })}
+                  </button>
+                )
+                : (
+                  <button
+                    type="button"
+                    class="btn btn--sm btn--icon"
+                    title="Stop session"
+                    aria-label="Stop session"
+                    onClick={() => session.stop()}
+                  >
+                    {IconPower({ size: 15 })}
+                  </button>
+                )}
+            </div>
+          )}
       </div>
     </nav>
   );

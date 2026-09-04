@@ -38,102 +38,49 @@ import {
   blocksOf,
   contextUsed as contextUsedOf,
   contextWindowOf,
+  controlError,
   type Evt,
   fallbackWindow,
   isAgentTool,
   isHandshakeAck,
   isInterruptAck,
+  isModelAck,
+  MODEL_PREFIX,
+  MODELS,
   permissionOf,
   toolDetail,
   toolTitle,
   usageOf,
 } from "../lib/stream.ts";
 import { oneLine } from "../lib/format.ts";
-import { activeProject, activeSettings, workspace } from "./workspace.ts";
+import {
+  assistant,
+  blank,
+  cancelPending,
+  cap,
+  clearPermissionFlag,
+  closeOpenWork,
+  controlRequest,
+  EMPTY_META,
+  EMPTY_USAGE,
+  failPermission,
+  MAX_MESSAGES,
+  note,
+  type ProjectSession,
+  rateLimit,
+  reset,
+  result,
+  str,
+  system,
+  userEvent,
+} from "./session-reduce.ts";
 
-/** Ring-buffer caps. A control surface shows the recent past; unbounded growth
- *  would turn every broadcast into a full-state resend. */
-const MAX_MESSAGES = 400;
-const MAX_TOOLS = 300;
-const MAX_ACTIVITY = 400;
-const MAX_OUTPUT = 4_000;
-const MAX_PERMISSIONS = 60;
+import { activeProject, activeSettings, workspace } from "./workspace.ts";
 
 /** How often a running session's working directory is re-checked. Long enough
  *  to be free, short enough that a deleted folder is noticed while the user is
  *  still wondering why nothing works. */
 const FOLDER_WATCH_MS = 20_000;
-
-const EMPTY_META: SessionMeta = {
-  version: null,
-  permissionMode: null,
-  outputStyle: null,
-  tools: [],
-  agents: [],
-  skills: [],
-  commands: [],
-  mcp: [],
-  plugins: [],
-  memoryPaths: [],
-};
-
-const EMPTY_USAGE: Usage = {
-  input: 0,
-  output: 0,
-  cacheRead: 0,
-  cacheCreate: 0,
-  contextWindow: 200_000,
-};
-
-/**
- * Everything the app knows about ONE project's conversation.
- *
- * The field list is the single source of truth for what gets swapped when the
- * user changes project: {@link blank} builds it, and the swap derives its keys
- * from that, so a field added here is carried automatically rather than being
- * silently left behind on the project you switched away from.
- */
-type ProjectSession = {
-  status: Status;
-  sessionId: string | null;
-  resumeId: string | null;
-  cwd: string | null;
-  model: string | null;
-  pid: number | null;
-  startedAt: number | null;
-  messages: Message[];
-  streaming: { kind: "text" | "thinking"; text: string } | null;
-  tools: ToolRun[];
-  tasks: BackgroundTask[];
-  /** Approval prompts, newest last — pending ones block the CLI. */
-  permissions: PermissionRequest[];
-  activity: ActivityItem[];
-  usage: Usage;
-  cost: number;
-  turns: number;
-  turnStartedAt: number | null;
-  lastTurnMs: number;
-  /** An interrupt was asked for and the CLI has not reported the turn yet. */
-  interrupting: boolean;
-  /** How the last turn ended, straight from the result event. */
-  turnEnd: TurnEnd | null;
-  /** What became of the sub-agents the last turn asked for. */
-  agentStats: AgentStats | null;
-  /** Turns the CLI is holding behind the one in flight, as it reports them.
-   *  The composer promises a turn sent now will be queued; this is the count
-   *  that promise was hiding. */
-  queuedTurns: number;
-  /** The CLI's running estimate of tokens spent thinking in the current turn.
-   *  It is the only figure that moves *during* a long think — every other
-   *  number on screen waits for the turn to finish. */
-  thinkingTokens: number;
-  /** Incremented on every start. Callbacks carry the token they were created
-   *  with, so a superseded process cannot write over its replacement. */
-  startToken: number;
-  meta: SessionMeta;
-  rateLimit: RateLimit | null;
-  error: string | null;
-};
 
 type SessionState = ProjectSession & {
   /** The project whose session is the one at the top level. */
@@ -141,37 +88,6 @@ type SessionState = ProjectSession & {
   /** Every *other* project's session, by project id. */
   parked: Record<string, ProjectSession>;
 };
-
-/** A conversation that has not started. */
-const blank = (): ProjectSession => ({
-  status: "offline",
-  sessionId: null,
-  resumeId: null,
-  cwd: null,
-  model: null,
-  pid: null,
-  startedAt: null,
-  messages: [],
-  streaming: null,
-  tools: [],
-  tasks: [],
-  permissions: [],
-  activity: [],
-  usage: { ...EMPTY_USAGE },
-  cost: 0,
-  turns: 0,
-  turnStartedAt: null,
-  lastTurnMs: 0,
-  interrupting: false,
-  turnEnd: null,
-  agentStats: null,
-  queuedTurns: 0,
-  thinkingTokens: 0,
-  startToken: 0,
-  meta: { ...EMPTY_META },
-  rateLimit: null,
-  error: null,
-});
 
 /** The fields one conversation owns — derived from {@link blank}, so the swap
  *  can never fall behind the shape it is swapping. */
@@ -295,7 +211,9 @@ export const session = cell("session", {
   onInit() {
     // The runtime is not up during `onInit`, so the watchdog arms itself on the
     // next macrotask — the same constraint every other cell here works around.
-    setTimeout(() => void session.watchFolders(), 0); // aiol-ok
+    // Arming is all boot does: the first folder check then lands one poll
+    // interval later, which is the check's own resolution anyway.
+    setTimeout(() => void session.armFolderWatch(), 0); // aiol-ok
   },
 
   onDestroy() {
@@ -490,6 +408,28 @@ export const session = cell("session", {
     },
 
     /**
+     * A project is no longer in the list: end its session and let go of it.
+     *
+     * Removing a project used to leave its `claude` running with nothing left
+     * that could reach it — the exact failure the folder watchdog exists to
+     * prevent, arrived at through the remove button instead of through a
+     * deleted directory. A process this app started is this app's to end.
+     *
+     * The parked transcript goes too. It is in-memory only, it belongs to a
+     * project the user has just said they do not want listed, and an undo that
+     * brings the row back does not owe them the conversation.
+     */
+    async release(s: SessionState, keys: string[]) {
+      // Nothing to release is not an error — and a control-plane call with the
+      // argument left off must not reject on a `for…of undefined`.
+      if (!Array.isArray(keys)) return;
+      for (const key of keys) {
+        await endSession(s, key, "the project was removed", "");
+        delete s.parked[key];
+      }
+    },
+
+    /**
      * Close any session whose project folder has gone.
      *
      * Polled, because a deleted directory produces no event — nothing tells a
@@ -501,15 +441,21 @@ export const session = cell("session", {
      * Only sessions with a live process are checked: a `stat` per running
      * session is nothing, and a project nobody has started has nothing to close.
      */
-    async watchFolders(s: SessionState & Partial<MethodDraftMeta>) {
+    /** Start the folder watch, once. Kept out of {@link watchFolders}
+     *  deliberately — re-arming `every` from inside its own tick replaces the
+     *  timer on every pass, which aio rightly warns about ("set dynamically
+     *  twice") and which drifts the deadline by however long a tick took.
+     *  Same split as `jobs.arm`/`loops.arm`. */
+    armFolderWatch(s: SessionState & Partial<MethodDraftMeta>) {
       s.$do?.(schedule.every(
         "session-folders",
         FOLDER_WATCH_MS,
-        session
-          .watchFolders.action(),
+        session.watchFolders.action(),
         { skipIfRunning: true },
       ));
+    },
 
+    async watchFolders(s: SessionState) {
       // Read before the first await, so the list is one consistent view of what
       // was running when the tick began rather than a mix of before and after.
       const live: { key: string; cwd: string }[] = [];
@@ -572,6 +518,53 @@ export const session = cell("session", {
       p.error = detail || `Claude Code exited with code ${code}.`;
       log.error("session", "Claude Code exited", { code, detail, key });
       note(p, "error", `Exited (code ${code})`, oneLine(p.error, 160));
+    },
+
+    /* ── what the session runs on ──────────────────────────────────────── */
+
+    /**
+     * Switch model — on the session that is *running*, not only the next one.
+     *
+     * The picker used to write a preference and nothing else, so a live session
+     * kept answering out of the model it was spawned with. That is invisible
+     * right up to the moment it matters most: a session whose model has hit its
+     * usage limit answers every further turn with the same limit notice, and
+     * changing the model — the one thing the notice itself tells you to do —
+     * appeared to do nothing at all.
+     *
+     * The CLI's `set_model` control request applies from the next turn on and
+     * keeps the conversation, its context and its tool state, so this is a
+     * switch rather than a restart. Both halves are done here, in one place, so
+     * the preference the next session starts with and the model this one is on
+     * cannot drift apart.
+     */
+    async useModel(s: SessionState, model: string) {
+      // Closed over the picker's own list, like `workspace.setModel` — a model
+      // id from anywhere else is not a model this app offers.
+      if (!MODELS.some((m) => m.id === model)) return;
+      // Read before either await: whether there is a process to tell is a
+      // question about now, not about after the preference has committed.
+      const live = s.pid !== null;
+      // Optimistic, and corrected by the CLI either way: the next assistant
+      // message names the model it actually answered from, and a refusal is
+      // reduced in `control_response` below.
+      if (live) {
+        s.model = model;
+        note(s, "session", "Model switched", model);
+      }
+      // The preference is what the *next* session is spawned with, and it has
+      // to hold whether or not there was a process to tell.
+      await workspace.setModel(model);
+      if (!live) return;
+
+      const io = await import("./claude.server.ts");
+      try {
+        await io.setModel(currentKey(s), model); // aiol-ok: the key is not state
+      } catch (e) {
+        s.error = e instanceof Error ? e.message : String(e);
+        log.error("session", "model switch failed", { model, error: s.error }); // aiol-ok
+        note(s, "error", "Model switch failed", s.error); // aiol-ok: just written
+      }
     },
 
     /* ── turns ─────────────────────────────────────────────────────────── */
@@ -733,6 +726,22 @@ export const session = cell("session", {
             cur.interrupting = true;
             note(cur, "session", "Interrupt acknowledged", "");
           }
+          if (isModelAck(evt)) {
+            note(cur, "session", "Model switch accepted", cur.model ?? "");
+          }
+          // A refused switch has to be visible, or the strip would go on
+          // naming a model the session is not on — the same silent lie the
+          // switch was added to end.
+          {
+            const failed = controlError(evt);
+            if (failed?.id.startsWith(MODEL_PREFIX)) {
+              cur.error = `The model switch was refused: ${failed.error}`;
+              log.error("session", "model switch refused", {
+                error: failed.error,
+              });
+              note(cur, "error", "Model switch refused", failed.error);
+            }
+          }
           return;
       }
     },
@@ -811,7 +820,6 @@ export const session = cell("session", {
 // surface, while these read the cell's reactive getters and so auto-track in
 // the UI as well. One definition, both sides of the bridge.
 
-/** Every sub-agent this session has spawned, newest last. */
 /**
  * The conversation on screen.
  *
@@ -902,703 +910,3 @@ export const contextUsed = (): number => contextUsedOf(view().usage);
 
 export const contextWindow = (): number =>
   view().usage.contextWindow || 200_000;
-
-/* ── event handlers ───────────────────────────────────────────────────────── */
-
-/** A control request from the CLI. Today that is only `can_use_tool`, and the
- *  CLI is *blocked* until the user answers it. */
-function controlRequest(s: ProjectSession, evt: Evt) {
-  const req = permissionOf(evt);
-  if (!req) return;
-  if (s.permissions.some((p) => p.id === req.id)) return; // re-sent, not new
-
-  // The tool call is already in the transcript — mark it so the chip says
-  // "waiting for you" instead of counting seconds as if it were working.
-  const run = req.toolUseId === null
-    ? undefined
-    : s.tools.find((t) => t.id === req.toolUseId);
-  if (run) {
-    run.permissionId = req.id;
-    req.parentToolUseId ??= run.parentToolUseId;
-  }
-
-  s.permissions.push(req);
-  cap(s.permissions, MAX_PERMISSIONS);
-  note(
-    s,
-    "permission",
-    `Approval needed · ${req.tool}`,
-    req.reason || req.description,
-  );
-  log.info("session", "permission requested", {
-    tool: req.tool,
-    reason: req.reasonType,
-  });
-}
-
-/** Drop the "waiting" flag from whatever call this prompt was holding. */
-function clearPermissionFlag(s: ProjectSession, id: string) {
-  const run = s.tools.find((t) => t.permissionId === id);
-  if (run) run.permissionId = null;
-}
-
-/** The answer could not be delivered — the process died mid-prompt. Say so:
- *  a prompt that silently stays pending is the hang this app exists to end. */
-function failPermission(s: ProjectSession, id: string, e: unknown) {
-  const req = s.permissions.find((p) => p.id === id);
-  if (req) {
-    req.status = "cancelled";
-    req.decidedAt = Date.now();
-  }
-  const detail = e instanceof Error ? e.message : String(e);
-  s.error = `Could not send the permission decision: ${detail}`;
-  log.error("session", "permission response failed", { error: detail });
-  note(s, "error", "Permission decision lost", detail);
-}
-
-function system(s: ProjectSession, evt: Evt) {
-  switch (evt.subtype) {
-    case "init": {
-      s.sessionId = str(evt.session_id);
-      s.resumeId = str(evt.session_id) ?? s.resumeId;
-      s.cwd = str(evt.cwd) ?? s.cwd;
-      s.model = str(evt.model) ?? s.model;
-      s.meta = {
-        version: str(evt.claude_code_version),
-        permissionMode: str(evt.permissionMode),
-        outputStyle: str(evt.output_style),
-        tools: strings(evt.tools),
-        agents: strings(evt.agents),
-        skills: strings(evt.skills),
-        commands: strings(evt.slash_commands),
-        mcp: arr(evt.mcp_servers).map((m) => ({
-          name: str(obj(m).name) ?? "server",
-          status: str(obj(m).status) ?? "unknown",
-        })),
-        plugins: arr(evt.plugins).map((x) => ({
-          name: str(obj(x).name) ?? "plugin",
-          version: str(obj(x).version) ?? "",
-        })),
-        memoryPaths: Object.values(obj(evt.memory_paths))
-          .filter((v): v is string => typeof v === "string"),
-      };
-      // The CLI re-emits `init` after every result inside one user turn (an
-      // async sub-agent finishing wakes the model again). Overwriting the
-      // window each time threw away the real figure the last result reported —
-      // a 1M-context session kept snapping back to the 200k default. Only fill
-      // it in while it is still the untouched default.
-      if (s.turns === 0) s.usage.contextWindow = fallbackWindow(s.model);
-      if (s.status === "starting") {
-        s.status = "ready";
-        note(
-          s,
-          "session",
-          "Session ready",
-          `${s.meta.tools.length} tools · ${s.model ?? "?"}`,
-        );
-      }
-      return;
-    }
-    case "thinking_tokens": {
-      // Emitted continuously while the model reasons. Everything else on screen
-      // is frozen until the turn lands, so without this a five-minute think
-      // looked identical to a hang.
-      s.thinkingTokens = num(evt.estimated_tokens);
-      return;
-    }
-    case "status": {
-      if (str(evt.status) === "requesting" && s.status !== "working") {
-        s.status = "working";
-        if (s.turnStartedAt === null) s.turnStartedAt = Date.now();
-      }
-      return;
-    }
-    case "task_started": {
-      const id = str(evt.task_id);
-      if (!id) return;
-      const toolUseId = str(evt.tool_use_id);
-      upsertTask(s, {
-        id,
-        type: str(evt.task_type) ?? "task",
-        description: str(evt.description) ?? "Background task",
-        status: "running",
-        toolUseId,
-        startedAt: Date.now(),
-        endedAt: null,
-        outputFile: null,
-      });
-      // Join the task to the call that launched it. If the launch ack already
-      // "finished" that call, reopen it — the work is only just beginning.
-      const run = s.tools.find((t) => t.id === toolUseId);
-      if (run) {
-        run.taskId = id;
-        run.endedAt = null;
-        run.ok = null;
-        // `task_started` is the only place the CLI states the sub-agent's type
-        // and its full prompt for *every* agent shape, background or not.
-        if (run.agent) {
-          run.agent.type = str(evt.subagent_type) ?? run.agent.type;
-          run.agent.prompt = str(evt.prompt) ?? run.agent.prompt;
-        }
-      }
-      note(s, "task", "Task started", str(evt.description) ?? id);
-      return;
-    }
-    case "permission_denied": {
-      // The CLI refused a call on its own (a mode that never asks, or an answer
-      // that arrived too late). Invisible otherwise: the model quietly retries
-      // or gives up, and the user is left watching nothing happen.
-      const toolUseId = str(evt.tool_use_id);
-      const run = toolUseId === null
-        ? undefined
-        : s.tools.find((t) => t.id === toolUseId);
-      if (run) run.permissionId = null;
-      const tool = str(evt.tool_name) ?? "tool";
-      const why = str(evt.message) ?? "";
-      note(s, "permission", `Blocked · ${tool}`, oneLine(why, 200));
-      log.warn("session", "tool blocked by permissions", { tool, reason: why });
-      return;
-    }
-    case "task_updated": {
-      const id = str(evt.task_id);
-      const patch = obj(evt.patch);
-      const task = s.tasks.find((t) => t.id === id);
-      if (!task) return;
-      const status = str(patch.status);
-      if (status) task.status = status as BackgroundTask["status"];
-      const end = num(patch.end_time);
-      if (end > 0) task.endedAt = end;
-      else if (task.status !== "running" && task.endedAt === null) {
-        task.endedAt = Date.now();
-      }
-      if (task.status !== "running") closeRunFor(s, task);
-      return;
-    }
-    case "task_notification": {
-      const task = s.tasks.find((t) => t.id === str(evt.task_id));
-      if (!task) return;
-      task.outputFile = str(evt.output_file);
-      const status = str(evt.status);
-      const summary = str(evt.summary);
-
-      // This is where a *background* sub-agent's answer arrives. Its tool result
-      // was only a launch receipt, so without this the sub-agent page showed
-      // internal metadata where the result belongs.
-      const run = s.tools.find((t) => t.taskId === task.id);
-      if (run) {
-        if (summary && !run.output) run.output = summary.slice(0, MAX_OUTPUT);
-        const usage = obj(evt.usage);
-        if (run.agent) {
-          run.agent.tokens = num(usage.total_tokens) || run.agent.tokens;
-          run.agent.toolUses = numOrNull(usage.tool_uses) ?? run.agent.toolUses;
-          run.agent.durationMs = num(usage.duration_ms) || run.agent.durationMs;
-        }
-      }
-
-      if (status && status !== "running") {
-        task.status = status as BackgroundTask["status"];
-        task.endedAt ??= Date.now();
-        closeRunFor(s, task);
-      }
-      note(
-        s,
-        "task",
-        `Task ${status ?? "updated"}`,
-        summary ?? task.description,
-      );
-      return;
-    }
-    case "background_tasks_changed": {
-      // Authoritative running set: anything no longer listed has finished, even
-      // if we never saw its `task_updated`.
-      const running = new Set(
-        arr(evt.tasks).map((t) => str(obj(t).task_id)).filter(Boolean),
-      );
-      for (const t of s.tasks) {
-        if (t.status === "running" && !running.has(t.id)) {
-          t.status = "completed";
-          t.endedAt ??= Date.now();
-          closeRunFor(s, t);
-        }
-      }
-      return;
-    }
-  }
-}
-
-function assistant(s: ProjectSession, evt: Evt) {
-  const message = obj(evt.message);
-  const id = str(message.id) ?? str(evt.uuid) ?? crypto.randomUUID();
-  const parent = str(evt.parent_tool_use_id);
-  const blocks = blocksOf(message);
-  if (blocks.length === 0) return;
-
-  // Only the main thread's stream is "the" stream: a sub-agent's text arrives
-  // on the same channel but belongs under its agent, not in the live bubble.
-  if (parent === null) s.streaming = null;
-
-  // A sub-agent runs its own context, and its `usage` is *its* window, not the
-  // session's. Taking it made the context meter jump to a 16k sub-agent and
-  // back on every delegation. Main-thread messages only.
-  if (parent === null) {
-    s.model = str(message.model) ?? s.model;
-    const usage = obj(message.usage);
-    if (Object.keys(usage).length > 0) {
-      s.usage = usageOf(usage, s.usage.contextWindow);
-    }
-  }
-
-  // The CLI splits one message across several events and re-uses its id, and
-  // with sub-agents interleaving, the twin is rarely the last row. Matching on
-  // the id alone kept the transcript's ids unique — two rows sharing a key made
-  // the renderer drop one, which is a message that never appeared.
-  const twin = findById(s.messages, id);
-  if (twin && twin.role === "assistant") {
-    twin.blocks.push(...blocks);
-  } else {
-    s.messages.push({
-      id,
-      role: "assistant",
-      blocks,
-      at: Date.now(),
-      parentToolUseId: parent,
-    });
-    cap(s.messages, MAX_MESSAGES);
-  }
-
-  for (const b of blocks) {
-    if (b.kind !== "tool") continue;
-    openTool(s, b, parent);
-  }
-}
-
-function openTool(
-  s: ProjectSession,
-  b: Block & { kind: "tool" },
-  parent: string | null,
-) {
-  // One tool_use id is one run, the same rule the transcript keeps for message
-  // ids. Every later lookup — its result, the task it launched, the approval it
-  // is held on — matches by id and finds the first, so a twin would sit in the
-  // list for the rest of the session, running and empty, under a duplicate key.
-  if (b.id && s.tools.some((t) => t.id === b.id)) return;
-
-  const kind = isAgentTool(b.name) ? "agent" : "tool";
-  const run: ToolRun = {
-    id: b.id,
-    name: b.name,
-    kind,
-    title: toolTitle(b.name, b.input),
-    detail: toolDetail(b.name, b.input),
-    input: b.input,
-    startedAt: Date.now(),
-    endedAt: null,
-    ok: null,
-    output: null,
-    parentToolUseId: parent,
-    taskId: null,
-    agent: kind === "agent"
-      ? {
-        type: str(b.input.subagent_type) ?? str(b.input.agentType),
-        prompt: str(b.input.prompt),
-        tokens: null,
-        toolUses: null,
-        durationMs: null,
-      }
-      : null,
-    permissionId: null,
-  };
-  s.tools.push(run);
-  cap(s.tools, MAX_TOOLS);
-  note(
-    s,
-    kind,
-    kind === "agent" ? "Sub-agent started" : `${b.name} started`,
-    run.title,
-  );
-}
-
-/** The CLI's own explanation for a denial, taken from the failed tool result
- *  it belongs to. `null` when we never saw one. */
-function denialReason(s: ProjectSession, denials: unknown[]): string | null {
-  for (const d of denials) {
-    const id = str(obj(d).tool_use_id);
-    const run = id === null ? undefined : s.tools.find((t) => t.id === id);
-    const text = run?.output ?? "";
-    if (text.includes("allowed working directories")) return oneLine(text, 220);
-  }
-  return null;
-}
-
-/**
- * A background task ended — so did the call that launched it.
- *
- * Called again whenever the task's status changes, and the later word wins:
- * `background_tasks_changed` only knows a task is *gone* and infers "completed",
- * while the real outcome follows a beat later in `task_updated` (measured
- * against 2.1.232, which sends the empty list first). Closing once left a failed
- * task's call sitting in the list as a green "done", contradicting the task row
- * right above it. The timeline still gets one line, from the first close.
- */
-function closeRunFor(s: ProjectSession, task: BackgroundTask) {
-  const run = s.tools.find((t) => t.taskId === task.id);
-  if (!run) return;
-  const first = run.endedAt === null;
-  run.endedAt = task.endedAt ?? run.endedAt ?? Date.now();
-  run.ok = task.status === "completed";
-  if (!first) return;
-  note(
-    s,
-    run.kind,
-    `${run.kind === "agent" ? "Sub-agent" : run.name} ${task.status}`,
-    run.title,
-  );
-}
-
-/**
- * The process is gone, so nothing still open can ever finish.
- *
- * `ok` is left `null` — a call killed in flight neither succeeded nor failed,
- * and the UI reads that third state as "cut off". Leaving the work open instead
- * kept every stopwatch ticking, the rail badges lit and the agent count above
- * zero on a session that had ended: the lying spinner this app exists to end.
- */
-function closeOpenWork(s: ProjectSession, why: string) {
-  const at = Date.now();
-  let cut = 0;
-  for (const run of s.tools) {
-    if (run.endedAt !== null) continue;
-    run.endedAt = at;
-    run.permissionId = null;
-    cut++;
-  }
-  for (const task of s.tasks) {
-    if (task.status !== "running") continue;
-    // "stopped", not "completed": the CLI never reported an outcome for it.
-    task.status = "stopped";
-    task.endedAt ??= at;
-  }
-  if (cut > 0) {
-    note(s, "session", `${cut} call${cut > 1 ? "s" : ""} cut off`, why);
-  }
-}
-
-function userEvent(s: ProjectSession, evt: Evt) {
-  // `user` events on the wire are tool results echoed back. They belong to the
-  // tool run that produced them, not to the transcript as a user turn.
-  for (const b of blocksOf(obj(evt.message))) {
-    if (b.kind !== "result") continue;
-    const run = s.tools.find((t) => t.id === b.id);
-    if (!run) continue;
-
-    // A sub-agent's result carries the CLI's own bookkeeping — an agent id, an
-    // output path, a usage block, and a paragraph telling the model never to
-    // quote any of it. The answer is what the user came to read; the numbers
-    // belong on the agent, not in the middle of its prose.
-    if (run.kind === "agent") {
-      const parsed = agentResultOf(b.text);
-      run.output = parsed.launchReceipt
-        ? run.output
-        : parsed.text.slice(0, MAX_OUTPUT);
-      if (run.agent) {
-        run.agent.tokens = parsed.tokens ?? run.agent.tokens;
-        run.agent.toolUses = parsed.toolUses ?? run.agent.toolUses;
-        run.agent.durationMs = parsed.durationMs ?? run.agent.durationMs;
-      }
-    } else {
-      run.output = b.text.slice(0, MAX_OUTPUT);
-    }
-
-    // An async launch ("agent launched successfully") is a receipt, not a
-    // result: the run is joined to a background task that is still going, and
-    // closing it here would report a 20-minute agent as having taken 12ms.
-    const task = run.taskId === null
-      ? undefined
-      : s.tasks.find((t) => t.id === run.taskId);
-    if (task && task.status === "running") continue;
-    // Its task already closed it — keep the richer output, skip a second
-    // "finished" line on the timeline.
-    if (run.endedAt !== null) continue;
-
-    run.endedAt = Date.now();
-    run.ok = b.ok;
-    run.permissionId = null;
-    note(
-      s,
-      run.kind,
-      `${run.kind === "agent" ? "Sub-agent" : run.name} ${
-        b.ok ? "finished" : "failed"
-      }`,
-      oneLine(run.output || b.text || run.title, 160),
-    );
-  }
-}
-
-function result(s: ProjectSession, evt: Evt) {
-  s.status = "ready";
-  s.turns += 1;
-  s.turnStartedAt = null;
-  s.streaming = null;
-  s.lastTurnMs = num(evt.duration_ms);
-  // `total_cost_usd` is the session total to date, not this result's slice —
-  // and one user turn produces several results (each sub-agent finishing wakes
-  // the model again). Summing them reported a $0.06 session as $0.79. Take the
-  // highest figure the CLI has reported: monotonic, and never behind.
-  s.cost = Math.max(s.cost, num(evt.total_cost_usd));
-  s.sessionId = str(evt.session_id) ?? s.sessionId;
-  s.resumeId = s.sessionId;
-  // The CLI queues a turn sent while one is running and says how many it holds.
-  // The composer already promised the queueing; this is what makes the promise
-  // checkable instead of a claim the user has to trust.
-  s.queuedTurns = num(evt.queued_turn_count);
-  // The estimate belongs to the turn that just ended.
-  s.thinkingTokens = 0;
-  s.turnEnd = {
-    reason: str(evt.terminal_reason) ?? "",
-    stopReason: str(evt.stop_reason) ?? "",
-    ttftMs: num(evt.ttft_ms),
-  };
-  recordAgentStats(s, evt);
-
-  const window = contextWindowOf(evt, fallbackWindow(s.model), s.model);
-  // An aborted turn reports no usage at all. Reading that as a measurement of
-  // zero emptied the context meter the moment Stop was pressed — the tokens are
-  // still resident in the window; the CLI simply had nothing to say about them.
-  // Keep the last real figure, and take the window it now reports either way.
-  const measured = usageOf(evt.usage, window);
-  s.usage = contextUsedOf(measured) > 0
-    ? measured
-    : { ...s.usage, contextWindow: window };
-
-  // A turn can fail without the session being broken — the process is still
-  // there with its context intact. Only a dead process is `status: "error"`, so
-  // the next message continues the conversation instead of silently restarting
-  // it. An interrupt the user asked for is not a failure at all.
-  if (evt.is_error === true) {
-    if (s.interrupting) {
-      s.interrupting = false;
-      note(s, "session", "Turn interrupted", "the session is still running");
-      return;
-    }
-    s.error = str(evt.result) ?? str(evt.api_error_status) ??
-      "The turn failed.";
-    log.error("session", "turn failed", { reason: s.error });
-    note(s, "error", "Turn failed", oneLine(s.error, 160));
-    return;
-  }
-  s.interrupting = false;
-
-  // Permission denials are reported on the result and are otherwise invisible:
-  // the CLI refuses the tool and carries on, so without this the user watches
-  // Claude quietly fail to do things and is told nothing.
-  const denials = arr(evt.permission_denials);
-  if (denials.length > 0) {
-    const names = [
-      ...new Set(denials.map((d) => str(obj(d).tool_name) ?? "tool")),
-    ];
-    for (const d of denials) {
-      const o = obj(d);
-      note(
-        s,
-        "error",
-        `Permission denied · ${str(o.tool_name) ?? "tool"}`,
-        oneLine(JSON.stringify(o.tool_input ?? {}), 160),
-      );
-    }
-    // The denial payload says *what* was refused but never *why*. The failed
-    // tool result does ("may only write to files in the allowed working
-    // directories for this session: '…'") and we already captured it — so
-    // quote the CLI instead of guessing, and name the remedy that matches.
-    const reason = denialReason(s, denials);
-    const n = denials.length;
-    const what = `${n} action${n > 1 ? "s" : ""} (${names.join(", ")}) ${
-      n > 1 ? "were" : "was"
-    } blocked.`;
-    const fix =
-      "Add the folder under Settings → Allowed directories, or switch on Allow all.";
-    s.error = reason ? `${what} ${reason} ${fix}` : `${what} ${fix}`;
-    log.warn("session", "permission denied", {
-      count: n,
-      tools: names,
-      reason,
-    });
-    return;
-  }
-
-  note(
-    s,
-    "model",
-    "Turn complete",
-    `${(s.lastTurnMs / 1000).toFixed(1)}s · ${num(evt.num_turns)} steps`,
-  );
-}
-
-/**
- * What the turn's sub-agents actually did — and, above all, what it was refused.
- *
- * A delegation turned down for a depth, concurrency or budget limit produces no
- * agent, no error and no row on any page: the model simply carries on without
- * the help it asked for, and the user watches it work around a gap nobody
- * mentioned. The CLI does say so, once, in this block. So does a sub-agent that
- * failed or was killed.
- */
-function recordAgentStats(s: ProjectSession, evt: Evt) {
-  const raw = obj(evt.subagent_stats);
-  if (Object.keys(raw).length === 0) return;
-  const refusedBy = Object.entries(obj(raw.refused))
-    .map(([reason, n]) => ({ reason, count: num(n) }))
-    .filter((r) => r.count > 0);
-  const killed = Object.values(obj(raw.killed)).reduce<number>(
-    (t, n) => t + num(n),
-    0,
-  );
-  const stats: AgentStats = {
-    spawned: num(raw.spawned),
-    completed: num(raw.completed),
-    failed: num(raw.failed),
-    refused: refusedBy.reduce((t, r) => t + r.count, 0),
-    killed,
-    refusedBy,
-  };
-  s.agentStats = stats;
-
-  if (stats.refused > 0) {
-    const why = stats.refusedBy
-      .map((r) => `${r.count} on the ${r.reason.replace(/_/g, " ")}`)
-      .join(", ");
-    const message =
-      `${stats.refused} sub-agent request${stats.refused > 1 ? "s" : ""} ` +
-      `${
-        stats.refused > 1 ? "were" : "was"
-      } refused (${why}). Claude carried ` +
-      `on without them.`;
-    s.error = message;
-    log.warn("session", "sub-agent requests refused", {
-      refused: stats.refused,
-      by: stats.refusedBy,
-    });
-    note(s, "error", "Sub-agents refused", message);
-  }
-  if (stats.failed > 0 || stats.killed > 0) {
-    note(
-      s,
-      "agent",
-      "Sub-agents did not finish",
-      `${stats.failed} failed · ${stats.killed} killed`,
-    );
-  }
-}
-
-function rateLimit(s: ProjectSession, evt: Evt) {
-  const info = obj(evt.rate_limit_info);
-  // `unifiedWindows` carries every window at once. The headline `rateLimitType`
-  // names only the one the CLI chose to lead with, and a session that is fine
-  // on the five-hour window can be at 99% of the seven-day one — the figure
-  // that actually decides whether the next turn runs.
-  const windows = Object.entries(obj(info.unifiedWindows))
-    .map(([name, raw]) => ({
-      name,
-      utilization: num(obj(raw).utilization),
-      resetsAt: num(obj(raw).resetsAt) * 1000,
-    }))
-    .sort((a, b) => b.utilization - a.utilization);
-  s.rateLimit = {
-    status: str(info.status) ?? "unknown",
-    type: str(info.rateLimitType) ?? "",
-    utilization: num(info.utilization),
-    resetsAt: num(info.resetsAt) * 1000,
-    overage: info.isUsingOverage === true,
-    windows,
-  };
-}
-
-/* ── helpers ──────────────────────────────────────────────────────────────── */
-
-function reset(s: ProjectSession) {
-  s.messages = [];
-  s.tools = [];
-  s.tasks = [];
-  s.permissions = [];
-  s.activity = [];
-  s.streaming = null;
-  s.usage = { ...EMPTY_USAGE };
-  s.meta = { ...EMPTY_META };
-  s.cost = 0;
-  s.turns = 0;
-  s.lastTurnMs = 0;
-  s.turnStartedAt = null;
-  s.interrupting = false;
-  s.turnEnd = null;
-  s.agentStats = null;
-  s.queuedTurns = 0;
-  s.thinkingTokens = 0;
-  // startToken is deliberately NOT reset — it is the identity of the current
-  // start, and resetting it would let a superseded callback match again.
-  s.rateLimit = null;
-  s.sessionId = null;
-  s.pid = null;
-  s.error = null;
-}
-
-function upsertTask(s: ProjectSession, task: BackgroundTask) {
-  const existing = s.tasks.find((t) => t.id === task.id);
-  if (existing) Object.assign(existing, task);
-  else s.tasks.push(task);
-  cap(s.tasks, MAX_TOOLS);
-}
-
-function note(
-  s: ProjectSession,
-  channel: ActivityItem["channel"],
-  label: string,
-  detail: string,
-) {
-  s.activity.push({
-    id: crypto.randomUUID(),
-    at: Date.now(),
-    channel,
-    label,
-    detail,
-  });
-  cap(s.activity, MAX_ACTIVITY);
-}
-
-/** Keep the newest `max` entries, in place. */
-function cap<T>(list: T[], max: number) {
-  if (list.length > max) list.splice(0, list.length - max);
-}
-
-/** The transcript row with this id, searching from the end — the twin of a
- *  split message is always recent, and the list can be 400 long. */
-function findById(messages: Message[], id: string): Message | undefined {
-  for (let i = messages.length - 1; i >= 0; i--) {
-    if (messages[i].id === id) return messages[i];
-  }
-  return undefined;
-}
-
-/** Nothing can answer a prompt once the process is gone — say so rather than
- *  leaving buttons that write to a closed pipe. */
-function cancelPending(s: ProjectSession, why: string) {
-  for (const p of s.permissions) {
-    if (p.status !== "pending") continue;
-    p.status = "cancelled";
-    p.decidedAt = Date.now();
-    clearPermissionFlag(s, p.id);
-    note(s, "permission", `Approval cancelled · ${p.tool}`, why);
-  }
-}
-
-const str = (v: unknown): string | null =>
-  typeof v === "string" && v.length > 0 ? v : null;
-const num = (v: unknown): number => (typeof v === "number" ? v : 0);
-/** `0` is a real answer for a count, so absence has to stay distinguishable. */
-const numOrNull = (v: unknown): number | null =>
-  typeof v === "number" ? v : null;
-const obj = (v: unknown): Record<string, unknown> =>
-  v && typeof v === "object" && !Array.isArray(v)
-    ? v as Record<string, unknown>
-    : {};
-const arr = (v: unknown): unknown[] => (Array.isArray(v) ? v : []);
-const strings = (v: unknown): string[] =>
-  arr(v).filter((x): x is string => typeof x === "string");

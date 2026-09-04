@@ -7,7 +7,14 @@
  */
 import { useLocal, useRef, type VNode } from "aio/air";
 import { session, view } from "../cell/session.ts";
-import { activeProject, activeSettings, workspace } from "../cell/workspace.ts";
+import { activeIsLocal, strayConfigs } from "../cell/local.ts";
+import { EnginePanel } from "./LocalChatPage.tsx";
+import {
+  activeProject,
+  activeSettings,
+  pruneUnknown,
+  workspace,
+} from "../cell/workspace.ts";
 import { EFFORTS, MODELS, PERMISSION_MODES } from "../lib/stream.ts";
 import {
   ago,
@@ -22,14 +29,17 @@ import {
   Banner,
   Choice,
   Empty,
+  matchesAll,
+  Menu,
   Meter,
   Panel,
   Pill,
+  Search,
   Segmented,
   Tags,
   useNow,
 } from "./parts.tsx";
-import { PageHead, ScopeTag } from "./RunViews.tsx";
+import { PageHead, type PageScope, ScopeTag } from "./RunViews.tsx";
 import {
   IconAlert,
   IconCheck,
@@ -38,8 +48,92 @@ import {
   IconPlus,
   IconPower,
   IconRefresh,
+  IconSearch,
   IconTrash,
 } from "./icons.tsx";
+
+/**
+ * What each panel is *about*, in the words a person would type looking for it.
+ *
+ * One table rather than a `keys` prop per panel, for one reason: the page has
+ * to know whether the filter matched **anything** in order to say so, and it
+ * cannot ask fourteen components that each decided for themselves. Titles are
+ * the keys, so a panel and its search terms cannot drift apart.
+ */
+const SECTION_KEYS: Record<string, string> = {
+  "Engine":
+    "local llm lm studio ollama llama.cpp model server provider context window offline detect scan",
+  "Projects":
+    "folder directory add remove gone missing branch dirty switch repository tab forget undo restore",
+  "Model": "opus sonnet haiku fable claude reasoning switch",
+  "Effort": "thinking reasoning budget low medium high xhigh max --effort",
+  "Permissions":
+    "approval prompt ask accept edits plan bypass dontask safety guardrails mode",
+  "Allowed directories":
+    "add-dir folder path outside project sandbox scope write tmp",
+  "Allow all permissions":
+    "dangerously skip permissions bypass unrestricted danger",
+  "Appearance": "theme dark light system colour color window",
+  "Session":
+    "status pid process cwd cost turns usage limit rate tools skills commands mcp plugins version",
+  "Transcript": "clear history conversation wipe view",
+};
+
+/** Panels that only exist while the project runs on the Claude Code CLI. */
+const CLAUDE_ONLY = new Set([
+  "Model",
+  "Effort",
+  "Permissions",
+  "Allowed directories",
+  "Allow all permissions",
+  "Session",
+  "Transcript",
+]);
+
+/** How many panels a query would leave on screen. Zero is the only number the
+ *  page needs to treat specially, and the only one it cannot see otherwise. */
+function sectionHits(query: string, isLocal: boolean): number {
+  return Object.entries(SECTION_KEYS).filter(([title, keys]) =>
+    (!isLocal || !CLAUDE_ONLY.has(title)) && matchesAll(query, title, keys)
+  ).length;
+}
+
+/**
+ * One settings panel, shown only while it matches the filter.
+ *
+ * The filter is not decoration. This page carries fourteen panels across three
+ * different scopes, and the thing a person arrives looking for — "where do I
+ * turn the prompts off", "what is this session costing" — is a word, not a
+ * position on a scroll bar. So every panel declares the words somebody would
+ * actually type at it (`keys`), not just its title: nobody searches for
+ * "Permissions" when what they want is "bypass".
+ */
+function Section(
+  props: {
+    query: string;
+    title: string;
+    scope?: PageScope;
+    actions?: unknown;
+    children?: unknown;
+  },
+): VNode | null {
+  if (!matchesAll(props.query, props.title, SECTION_KEYS[props.title])) {
+    return null;
+  }
+  return (
+    <Panel
+      title={props.title}
+      actions={
+        <>
+          {props.actions}
+          {props.scope && <ScopeTag scope={props.scope} />}
+        </>
+      }
+    >
+      {props.children}
+    </Panel>
+  );
+}
 
 export function SettingsPage(): VNode {
   // One resolution per render: `view()` resolves by key, and repeating
@@ -49,6 +143,12 @@ export function SettingsPage(): VNode {
   // an idle session left the page with nothing else to re-render it.
   const now = useNow(true, 10_000);
   const live = sess.status !== "offline" && sess.status !== "error";
+  // On a local engine, the panels that configure the Claude Code CLI vanish —
+  // they set flags on a process this project does not run. Projects,
+  // Appearance and the engine switch itself stay: those belong to the app.
+  const isLocal = activeIsLocal();
+  const [query, setQuery] = useLocal("");
+  const q = query.trim();
 
   return (
     <div class="page">
@@ -56,7 +156,13 @@ export function SettingsPage(): VNode {
         title="Settings"
         sub="Some of this belongs to the project, some to the machine"
         actions={
-          <div style={{ display: "flex", gap: "8px" }}>
+          <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
+            <Search
+              value={query}
+              onChange={setQuery}
+              label="Filter settings"
+              placeholder="Filter settings…"
+            />
             {live
               ? (
                 <>
@@ -70,7 +176,8 @@ export function SettingsPage(): VNode {
                   <button
                     type="button"
                     class="btn btn--sm btn--danger"
-                    onClick={() => session.stop()}
+                    onClick={() =>
+                      session.stop()}
                   >
                     {IconPower({ size: 13 })} Stop
                   </button>
@@ -114,6 +221,13 @@ export function SettingsPage(): VNode {
           </Banner>
         )}
 
+        {q !== "" && sectionHits(q, isLocal) === 0 && (
+          <NoSettingsMatch
+            query={q}
+            onClear={() => setQuery("")}
+          />
+        )}
+
         {
           /* Said once, above the panels that mean it: these are settings for
             ONE codebase. Every project keeps its own, seeded from what the CLI
@@ -123,87 +237,116 @@ export function SettingsPage(): VNode {
         }
         <ProjectScope />
 
+        <Section
+          query={q}
+          title="Engine"
+          scope="project"
+        >
+          <EnginePanel />
+        </Section>
+
         <div class="grid grid--2">
-          <Projects />
+          <Projects query={q} />
 
-          <Panel title="Model" actions={<Pill>{activeSettings().model}</Pill>}>
-            <div class="choices">
-              {MODELS.map((m) => (
-                <Choice
-                  key={m.id}
-                  label={m.label}
-                  name={m.label}
-                  hint={m.hint}
-                  selected={activeSettings().model === m.id}
-                  onSelect={() => workspace.setModel(m.id)}
-                />
-              ))}
-            </div>
-          </Panel>
+          {!isLocal && (
+            <>
+              <Section
+                query={q}
+                title="Model"
+                scope="project"
+                actions={<Pill>{activeSettings().model}</Pill>}
+              >
+                <div class="choices">
+                  {MODELS.map((m) => (
+                    <Choice
+                      key={m.id}
+                      label={m.label}
+                      name={m.label}
+                      hint={m.hint}
+                      selected={activeSettings().model === m.id}
+                      // Switches the running session too, not just the next
+                      // one — see `session.useModel`.
+                      onSelect={() => void session.useModel(m.id)}
+                    />
+                  ))}
+                </div>
+              </Section>
 
-          <Panel
-            title="Effort"
-            actions={<Pill>{activeSettings().effort || "default"}</Pill>}
+              <Section
+                query={q}
+                title="Effort"
+                scope="project"
+                actions={<Pill>{activeSettings().effort || "default"}</Pill>}
+              >
+                <div class="choices">
+                  {EFFORTS.map((e) => (
+                    <Choice
+                      key={e.id || "default"}
+                      label={e.label}
+                      name={e.label}
+                      hint={e.hint}
+                      selected={activeSettings().effort === e.id}
+                      onSelect={() => workspace.setEffort(e.id)}
+                    />
+                  ))}
+                </div>
+                <div class="field__hint" style={{ marginTop: "10px" }}>
+                  How hard the model works before it answers (<code>
+                    --effort
+                  </code>). <b>Default</b>{" "}
+                  passes no flag at all, so whatever you have configured for the
+                  CLI itself still applies.
+                </div>
+              </Section>
+
+              <Section
+                query={q}
+                title="Permissions"
+                scope="project"
+                actions={<Pill>{activeSettings().permissionMode}</Pill>}
+              >
+                <div class="choices">
+                  {PERMISSION_MODES.map((m) => (
+                    <Choice
+                      key={m.id}
+                      label={m.label}
+                      name={m.label}
+                      hint={m.hint}
+                      selected={activeSettings().permissionMode === m.id}
+                      onSelect={() => workspace.setPermissionMode(m.id)}
+                    />
+                  ))}
+                </div>
+                <div class="field__hint" style={{ marginTop: "10px" }}>
+                  Prompts come to you: whatever the CLI cannot decide on its own
+                  appears above the composer, and it waits for your answer.{" "}
+                  <b>Accept edits</b>{" "}
+                  is the working default — file edits go through, anything
+                  reaching further asks. <b>Ask always</b>{" "}
+                  holds the edits too, which is the mode to pick when you want
+                  to see each change before it lands; the CLI still clears
+                  trivia like an <code>echo</code>{" "}
+                  on its own. Anything the CLI blocks by itself is still
+                  reported on the Activity timeline, never swallowed.
+                </div>
+              </Section>
+
+              <Section
+                query={q}
+                title="Allowed directories"
+                scope="project"
+                actions={<Pill>{activeSettings().allowedDirs.length}</Pill>}
+              >
+                <AllowedDirs />
+              </Section>
+            </>
+          )}
+
+          <Section
+            query={q}
+            title="Appearance"
+            scope="machine"
           >
-            <div class="choices">
-              {EFFORTS.map((e) => (
-                <Choice
-                  key={e.id || "default"}
-                  label={e.label}
-                  name={e.label}
-                  hint={e.hint}
-                  selected={activeSettings().effort === e.id}
-                  onSelect={() => workspace.setEffort(e.id)}
-                />
-              ))}
-            </div>
-            <div class="field__hint" style={{ marginTop: "10px" }}>
-              How hard the model works before it answers (<code>
-                --effort
-              </code>). <b>Default</b>{" "}
-              passes no flag at all, so whatever you have configured for the CLI
-              itself still applies.
-            </div>
-          </Panel>
-
-          <Panel
-            title="Permissions"
-            actions={<Pill>{activeSettings().permissionMode}</Pill>}
-          >
-            <div class="choices">
-              {PERMISSION_MODES.map((m) => (
-                <Choice
-                  key={m.id}
-                  label={m.label}
-                  name={m.label}
-                  hint={m.hint}
-                  selected={activeSettings().permissionMode === m.id}
-                  onSelect={() => workspace.setPermissionMode(m.id)}
-                />
-              ))}
-            </div>
-            <div class="field__hint" style={{ marginTop: "10px" }}>
-              Prompts come to you: whatever the CLI cannot decide on its own
-              appears above the composer, and it waits for your answer.{" "}
-              <b>Accept edits</b>{" "}
-              is the working default — file edits go through, anything reaching
-              further asks. <b>Ask always</b>{" "}
-              holds the edits too, which is the mode to pick when you want to
-              see each change before it lands; the CLI still clears trivia like
-              an <code>echo</code>{" "}
-              on its own. Anything the CLI blocks by itself is still reported on
-              the Activity timeline, never swallowed.
-            </div>
-          </Panel>
-
-          <Panel
-            title="Allowed directories"
-            actions={<Pill>{activeSettings().allowedDirs.length}</Pill>}
-          >
-            <AllowedDirs />
-          </Panel>
-
-          <Panel title="Appearance" actions={<ScopeTag scope="machine" />}>
             <div class="field">
               <span class="field__label">Theme</span>
               <Segmented
@@ -219,201 +362,242 @@ export function SettingsPage(): VNode {
                 System follows your OS setting and switches with it.
               </span>
             </div>
-          </Panel>
+          </Section>
         </div>
 
-        <AllowAll />
+        {!isLocal &&
+          matchesAll(
+            q,
+            "Allow all permissions",
+            SECTION_KEYS["Allow all permissions"],
+          ) && <AllowAll />}
 
-        <Panel title="Session" actions={<ScopeTag scope="session" />}>
-          <div class="kv">
-            <span class="kv__k">Status</span>
-            <span class="kv__v">{sess.status}</span>
-            <span class="kv__k">Working directory</span>
-            <span class="kv__v mono">
-              {sess.cwd ? tildePath(sess.cwd, workspace.home) : "—"}
-            </span>
-            <span class="kv__k">CLI session id</span>
-            <span class="kv__v mono">{sess.sessionId ?? "—"}</span>
-            <span class="kv__k">Process</span>
-            <span class="kv__v mono">{sess.pid ?? "—"}</span>
-            <span class="kv__k">Claude Code</span>
-            <span class="kv__v mono">
-              {sess.meta.version || workspace.cliVersion || "not found"}
-            </span>
-            <span class="kv__k">Started</span>
-            <span class="kv__v">
-              {sess.startedAt
-                ? `${clock(sess.startedAt)} · ${ago(sess.startedAt, now)}`
-                : "—"}
-            </span>
-            {sess.turnEnd && (
-              <>
-                <span class="kv__k">Last turn ended</span>
-                <span class="kv__v">
-                  {
-                    /* "completed" and "ran out of output tokens" look identical
+        {!isLocal && (
+          <Section
+            query={q}
+            title="Session"
+            scope="session"
+          >
+            <div class="kv">
+              <span class="kv__k">Status</span>
+              <span class="kv__v">{sess.status}</span>
+              <span class="kv__k">Working directory</span>
+              <span class="kv__v mono">
+                {sess.cwd ? tildePath(sess.cwd, workspace.home) : "—"}
+              </span>
+              <span class="kv__k">CLI session id</span>
+              <span class="kv__v mono">{sess.sessionId ?? "—"}</span>
+              <span class="kv__k">Process</span>
+              <span class="kv__v mono">{sess.pid ?? "—"}</span>
+              <span class="kv__k">Claude Code</span>
+              <span class="kv__v mono">
+                {sess.meta.version || workspace.cliVersion || "not found"}
+              </span>
+              <span class="kv__k">Started</span>
+              <span class="kv__v">
+                {sess.startedAt
+                  ? `${clock(sess.startedAt)} · ${ago(sess.startedAt, now)}`
+                  : "—"}
+              </span>
+              {sess.turnEnd && (
+                <>
+                  <span class="kv__k">Last turn ended</span>
+                  <span class="kv__v">
+                    {
+                      /* "completed" and "ran out of output tokens" look identical
                       on screen and mean very different things about whether the
                       answer you are reading is finished. */
-                  }
-                  {sess.turnEnd.reason || sess.turnEnd.stopReason || "—"}
-                  {sess.turnEnd.stopReason &&
-                      sess.turnEnd.stopReason !== sess.turnEnd.reason
-                    ? ` · ${sess.turnEnd.stopReason}`
-                    : ""}
-                  {sess.turnEnd.ttftMs > 0
-                    ? ` · first token in ${duration(sess.turnEnd.ttftMs)}`
-                    : ""}
-                </span>
-              </>
-            )}
-            {sess.agentStats && sess.agentStats.spawned > 0 && (
-              <>
-                <span class="kv__k">Sub-agents last turn</span>
-                <span class="kv__v">
-                  {sess.agentStats.spawned} spawned ·{" "}
-                  {sess.agentStats.completed} completed
-                  {sess.agentStats.failed > 0
-                    ? ` · ${sess.agentStats.failed} failed`
-                    : ""}
-                  {sess.agentStats.killed > 0
-                    ? ` · ${sess.agentStats.killed} killed`
-                    : ""}
-                  {sess.agentStats.refused > 0
-                    ? ` · ${sess.agentStats.refused} refused`
-                    : ""}
-                </span>
-              </>
-            )}
-            <span class="kv__k">Turns · cost</span>
-            <span class="kv__v">
-              {sess.turns} · {usd(sess.cost)}
-              {sess.queuedTurns > 0 ? ` · ${sess.queuedTurns} queued` : ""}
-            </span>
-            {sess.meta.outputStyle && (
-              <>
-                <span class="kv__k">Output style</span>
-                <span class="kv__v">{sess.meta.outputStyle}</span>
-              </>
-            )}
-            {
-              /* Every window, with the time it resets. One headline percentage
+                    }
+                    {sess.turnEnd.reason || sess.turnEnd.stopReason || "—"}
+                    {sess.turnEnd.stopReason &&
+                        sess.turnEnd.stopReason !== sess.turnEnd.reason
+                      ? ` · ${sess.turnEnd.stopReason}`
+                      : ""}
+                    {sess.turnEnd.ttftMs > 0
+                      ? ` · first token in ${duration(sess.turnEnd.ttftMs)}`
+                      : ""}
+                  </span>
+                </>
+              )}
+              {sess.agentStats && sess.agentStats.spawned > 0 && (
+                <>
+                  <span class="kv__k">Sub-agents last turn</span>
+                  <span class="kv__v">
+                    {sess.agentStats.spawned} spawned ·{" "}
+                    {sess.agentStats.completed} completed
+                    {sess.agentStats.failed > 0
+                      ? ` · ${sess.agentStats.failed} failed`
+                      : ""}
+                    {sess.agentStats.killed > 0
+                      ? ` · ${sess.agentStats.killed} killed`
+                      : ""}
+                    {sess.agentStats.refused > 0
+                      ? ` · ${sess.agentStats.refused} refused`
+                      : ""}
+                  </span>
+                </>
+              )}
+              <span class="kv__k">Turns · cost</span>
+              <span class="kv__v">
+                {sess.turns} · {usd(sess.cost)}
+                {sess.queuedTurns > 0 ? ` · ${sess.queuedTurns} queued` : ""}
+              </span>
+              {sess.meta.outputStyle && (
+                <>
+                  <span class="kv__k">Output style</span>
+                  <span class="kv__v">{sess.meta.outputStyle}</span>
+                </>
+              )}
+              {
+                /* Every window, with the time it resets. One headline percentage
                 and no reset time left the two questions that matter — which
                 limit, and how long until it lifts — both unanswered. */
-            }
-            {sess.rateLimit && (
-              <>
-                <span class="kv__k">Usage limits</span>
-                <span class="kv__v">
-                  <div style={{ display: "grid", gap: "4px" }}>
-                    {(sess.rateLimit.windows.length > 0
-                      ? sess.rateLimit.windows
-                      : [{
-                        name: sess.rateLimit.type || "window",
-                        utilization: sess.rateLimit.utilization,
-                        resetsAt: sess.rateLimit.resetsAt,
-                      }]).map((w) => (
-                        <div
-                          key={w.name}
-                          style={{
-                            display: "flex",
-                            gap: "8px",
-                            alignItems: "center",
-                          }}
-                        >
-                          <span style={{ minWidth: "72px" }}>
-                            {w.name.replace("_", "-")}
-                          </span>
-                          <span
+              }
+              {sess.rateLimit && (
+                <>
+                  <span class="kv__k">Usage limits</span>
+                  <span class="kv__v">
+                    <div style={{ display: "grid", gap: "4px" }}>
+                      {(sess.rateLimit.windows.length > 0
+                        ? sess.rateLimit.windows
+                        : [{
+                          name: sess.rateLimit.type || "window",
+                          utilization: sess.rateLimit.utilization,
+                          resetsAt: sess.rateLimit.resetsAt,
+                        }]).map((w) => (
+                          <div
+                            key={w.name}
                             style={{
-                              minWidth: "132px",
-                              maxWidth: "180px",
-                              flex: 1,
+                              display: "flex",
+                              gap: "8px",
+                              alignItems: "center",
                             }}
                           >
-                            <Meter value={w.utilization * 100} max={100} />
+                            <span style={{ minWidth: "72px" }}>
+                              {w.name.replace("_", "-")}
+                            </span>
+                            <span
+                              style={{
+                                minWidth: "132px",
+                                maxWidth: "180px",
+                                flex: 1,
+                              }}
+                            >
+                              <Meter value={w.utilization * 100} max={100} />
+                            </span>
+                            <span class="mono" style={{ minWidth: "38px" }}>
+                              {Math.round(w.utilization * 100)}%
+                            </span>
+                            <span style={{ color: "var(--ink-dim)" }}>
+                              {w.resetsAt > 0
+                                ? `resets ${until(w.resetsAt, now)}`
+                                : ""}
+                            </span>
+                          </div>
+                        ))}
+                      <span style={{ color: "var(--ink-dim)" }}>
+                        {sess.rateLimit.status}
+                        {sess.rateLimit.overage ? " · billed as overage" : ""}
+                      </span>
+                    </div>
+                  </span>
+                </>
+              )}
+            </div>
+
+            {sess.meta.tools.length > 0 && (
+              <>
+                <div class="divider" />
+                <div class="grid" style={{ gap: "10px" }}>
+                  <Capability label="Tools" items={sess.meta.tools} />
+                  <Capability label="Agents" items={sess.meta.agents} />
+                  <Capability label="Skills" items={sess.meta.skills} />
+                  <Capability
+                    label="Slash commands"
+                    items={sess.meta.commands}
+                    max={18}
+                  />
+                  {sess.meta.plugins.length > 0 && (
+                    <div class="field">
+                      <span class="field__label">
+                        Plugins · {sess.meta.plugins.length}
+                      </span>
+                      <div class="tags">
+                        {sess.meta.plugins.map((x) => (
+                          <span key={x.name} class="tag">
+                            {x.name}
+                            {x.version ? ` · ${x.version}` : ""}
                           </span>
-                          <span class="mono" style={{ minWidth: "38px" }}>
-                            {Math.round(w.utilization * 100)}%
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  {sess.meta.mcp.length > 0 && (
+                    <div class="field">
+                      <span class="field__label">MCP servers</span>
+                      <div class="tags">
+                        {sess.meta.mcp.map((m) => (
+                          <span key={m.name} class="tag">
+                            {m.name} · {m.status}
                           </span>
-                          <span style={{ color: "var(--ink-dim)" }}>
-                            {w.resetsAt > 0
-                              ? `resets ${until(w.resetsAt, now)}`
-                              : ""}
-                          </span>
-                        </div>
-                      ))}
-                    <span style={{ color: "var(--ink-dim)" }}>
-                      {sess.rateLimit.status}
-                      {sess.rateLimit.overage ? " · billed as overage" : ""}
-                    </span>
-                  </div>
-                </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
               </>
             )}
-          </div>
+          </Section>
+        )}
 
-          {sess.meta.tools.length > 0 && (
-            <>
-              <div class="divider" />
-              <div class="grid" style={{ gap: "10px" }}>
-                <Capability label="Tools" items={sess.meta.tools} />
-                <Capability label="Agents" items={sess.meta.agents} />
-                <Capability label="Skills" items={sess.meta.skills} />
-                <Capability
-                  label="Slash commands"
-                  items={sess.meta.commands}
-                  max={18}
-                />
-                {sess.meta.plugins.length > 0 && (
-                  <div class="field">
-                    <span class="field__label">
-                      Plugins · {sess.meta.plugins.length}
-                    </span>
-                    <div class="tags">
-                      {sess.meta.plugins.map((x) => (
-                        <span key={x.name} class="tag">
-                          {x.name}
-                          {x.version ? ` · ${x.version}` : ""}
-                        </span>
-                      ))}
-                    </div>
-                  </div>
-                )}
-                {sess.meta.mcp.length > 0 && (
-                  <div class="field">
-                    <span class="field__label">MCP servers</span>
-                    <div class="tags">
-                      {sess.meta.mcp.map((m) => (
-                        <span key={m.name} class="tag">
-                          {m.name} · {m.status}
-                        </span>
-                      ))}
-                    </div>
-                  </div>
-                )}
-              </div>
-            </>
-          )}
-        </Panel>
-
-        <Panel title="Transcript" actions={<ScopeTag scope="session" />}>
-          <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
-            <button
-              type="button"
-              class="btn btn--sm"
-              onClick={() =>
-                session.clearTranscript()}
-            >
-              {IconTrash({ size: 13 })} Clear the view
-            </button>
-            <span class="field__hint">
-              Clears what this app displays. The model keeps its own context —
-              use Restart for a genuinely fresh session.
-            </span>
-          </div>
-        </Panel>
+        {!isLocal && (
+          <Section
+            query={q}
+            title="Transcript"
+            scope="session"
+          >
+            <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
+              <button
+                type="button"
+                class="btn btn--sm"
+                onClick={() => session.clearTranscript()}
+              >
+                {IconTrash({ size: 13 })} Clear the view
+              </button>
+              <span class="field__hint">
+                Clears what this app displays. The model keeps its own context —
+                use Restart for a genuinely fresh session.
+              </span>
+            </div>
+          </Section>
+        )}
       </div>
     </div>
+  );
+}
+
+/**
+ * Shown when a filter hides everything.
+ *
+ * The count comes from the same table the panels filter themselves against,
+ * so "nothing matched" and "nothing rendered" cannot disagree — which is the
+ * one thing a filter must never get wrong: an empty page with no explanation.
+ */
+function NoSettingsMatch(
+  props: { query: string; onClear: () => void },
+): VNode {
+  return (
+    <Panel>
+      <Empty
+        icon={IconSearch({ size: 20 })}
+        title={`Nothing matches "${props.query}"`}
+        hint="Try a single word — model, effort, permissions, folder, theme, engine."
+      >
+        <button type="button" class="btn btn--sm" onClick={props.onClear}>
+          Clear the filter
+        </button>
+      </Empty>
+    </Panel>
   );
 }
 
@@ -606,10 +790,13 @@ function AllowedDirs(): VNode {
 
 /* ── projects ─────────────────────────────────────────────────────────────── */
 
-function Projects(): VNode {
+function Projects(props: { query: string }): VNode | null {
   const ref = useRef<HTMLInputElement>(null!);
   const [adding, setAdding] = useLocal(false);
   const active = activeProject();
+  if (!matchesAll(props.query, "Projects", SECTION_KEYS["Projects"])) {
+    return null;
+  }
 
   const add = () => {
     const el = ref.current;
@@ -770,6 +957,65 @@ function Projects(): VNode {
           different project, or remove the row.
         </div>
       )}
+
+      {
+        /* The sweep, and the switch for it. On by default, and stated plainly
+          rather than left as behaviour people have to infer from tabs
+          disappearing: the exact test it applies is the difference between a
+          tidy list and a lost project. */
+      }
+      {
+        /* Leftovers from before removals released their own state, or from a
+          crash. A button, not a timer: the sweep compares stored ids against
+          the project list, and the only time that list is unambiguous is when
+          somebody is looking at it. */
+      }
+      {strayConfigs().length > 0 && (
+        <>
+          <div class="divider" />
+          <div class="field">
+            <span class="field__label">Leftover settings</span>
+            <div
+              style={{ display: "flex", gap: "8px", alignItems: "center" }}
+            >
+              <button
+                type="button"
+                class="btn btn--sm"
+                onClick={() => pruneUnknown()}
+              >
+                {IconTrash({ size: 13 })} Forget {strayConfigs().length} stray
+                {strayConfigs().length === 1 ? " entry" : " entries"}
+              </button>
+              <span class="field__hint" style={{ flex: 1 }}>
+                Engine settings and loops still stored for projects that are no
+                longer in this list. Nothing on disk is touched.
+              </span>
+            </div>
+          </div>
+        </>
+      )}
+
+      <div class="divider" />
+      <div class="field">
+        <span class="field__label">When a project folder is gone</span>
+        <Segmented
+          value={workspace.autoForget ? "forget" : "keep"}
+          options={[
+            { id: "forget", label: "Forget the project" },
+            { id: "keep", label: "Keep it, marked gone" },
+          ]}
+          onChange={(v) => workspace.setAutoForget(v === "forget")}
+        />
+        <span class="field__hint">
+          Checked every 20 seconds and on every start. A project is only
+          forgotten when the folder <i>above</i>{" "}
+          it is still there — so a deleted directory drops out, while an
+          unmounted drive or a locked home keeps every project on it. Removing a
+          project never touches the folder or Claude Code&rsquo;s history for
+          it, and the dock offers an <b>Undo</b> until you dismiss it.
+        </span>
+      </div>
+
       <div class="field__hint" style={{ marginTop: "10px" }}>
         Switching projects takes effect on the next session start.
       </div>

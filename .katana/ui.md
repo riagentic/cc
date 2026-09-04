@@ -1,6 +1,8 @@
 ## Ui details
 
-## Main vertical tab
+## Panels
 
-- app has left panel of card that has all is starting point to open all specific
-  detail pages
+- app has a right-side section rail of cards that is the starting point to open
+  all specific detail pages, and a left-side dock of project tabs for switching
+  projects (the shell's three-column split: projects left, page middle,
+  sections right)

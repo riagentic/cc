@@ -119,6 +119,18 @@ export function RunList(
     onSelect: (id: string) => void;
   },
 ): VNode {
+  // One unconditional read of the session cell, and it is load-bearing.
+  //
+  // The only signal this component reads otherwise is inside `subtitle`, which
+  // reads `agentSteps` for a sub-agent row and returns early for every other
+  // kind. So on the Tasks page — plain tool calls, no agents — the whole list
+  // rendered having subscribed to nothing, and never re-rendered again: rows
+  // froze at whatever they said when the page opened. AIR reports it
+  // ("<RunList> rendered reading NO signals, while another instance read 2"),
+  // which is how it was found; the rule behind it is in
+  // dep/aio/docs/ui/reactivity-tracking.md — a read is tracked only while the
+  // body runs, so a branch not taken subscribes to nothing.
+  void view().turns;
   return (
     <div class="rowlist">
       {props.runs.map((r) => (

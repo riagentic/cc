@@ -123,11 +123,11 @@ export const jobs = cell("jobs", {
     async act(s: JobsState, id: string, action: JobAction) {
       s.busyId = id;
       s.error = null;
+      let failed: string | null = null;
       try {
         const io = await import("./catalog.server.ts");
-        const failed = await io.jobAction(id, action);
+        failed = await io.jobAction(id, action);
         if (failed) {
-          s.error = failed;
           log.warn("jobs", "action failed", { id, action, error: failed });
         } else {
           log.info("jobs", "action sent", { id, action });
@@ -136,7 +136,7 @@ export const jobs = cell("jobs", {
           if (action === "remove") s.selectedId = "";
         }
       } catch (e) {
-        s.error = e instanceof Error ? e.message : String(e);
+        failed = e instanceof Error ? e.message : String(e);
       } finally {
         s.busyId = "";
       }
@@ -144,6 +144,10 @@ export const jobs = cell("jobs", {
       // again: a nested call would run against committed state and could land
       // its result either side of the writes above.
       await scan(s);
+      // Written after the rescan, which clears the error field on a clean
+      // listing — an action's failure must outlive the refresh it triggers,
+      // or the page shows nothing where a refusal belongs.
+      if (failed) s.error = failed;
     },
   },
 });

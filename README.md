@@ -43,6 +43,44 @@ production.
 
 Theme stays global: it is a fact about the window, not about a codebase.
 
+## Local engines
+
+A project can run on **LM Studio, Ollama, or llama.cpp server** instead of the
+Claude Code CLI — picked per project in Settings, or from the Engine menu on the
+status strip. All three are spoken to through their OpenAI-compatible local
+servers.
+
+**Nothing here is configured by hand.** Opening the engine switch asks all three
+default ports at once and says which answered and what each is serving; picking
+one fills in its address and its models. The context window is read out of the
+server too — llama.cpp's `/props`, Ollama's `/api/show`, LM Studio's
+`/api/v0/models`, none of which is in the OpenAI surface — so the number the
+packer budgets against is the one the model is actually loaded at, not a guess
+you had to look up. Type a window of your own and detection stops overwriting
+it; **Detect** hands the field back.
+
+Three modes: **Chat** (no tools), **Read-only agent** (list, read, search) and
+**Agent** (plus writing files and running commands).
+
+`ls`, `read`, `grep` and `write` resolve every path inside the project
+directory, symlinks included. `sh` cannot be bounded that way without claiming a
+sandbox this app does not have — so it is bounded by you instead: **the exact
+command is shown before it runs, and the turn blocks on the answer.** Three
+answers — run it, run it and stop asking (per project, undone from the strip or
+Settings), or refuse, which goes back to the model as something it can act on.
+Stop counts as a refusal. The agent loop is built for small windows — a
+~150-token system prompt, five terse tools, tool output clipped at the source,
+old tool results shrunk to stubs, and, when the window still overflows, the
+oldest turns folded into a rolling summary the model maintains itself. Set the
+context window in Settings to what the server actually runs (64k works; so does
+1M) and packing budgets against it, with a live meter on the page.
+
+The integration is deliberately walled off: its own cell, server module, page
+and types, keyed by project. On a local engine the Claude-only surfaces —
+sub-agents, tasks, jobs, permissions, CLI storage — disappear rather than lie;
+every filesystem tool is confined to the project directory; and switching back
+to Claude Code finds that session exactly as it was.
+
 ## What it shows
 
 **Session**
@@ -80,10 +118,16 @@ Theme stays global: it is a fact about the window, not about a codebase.
 | **Settings** | Project, model, effort, permission mode, theme, and what the session reports      |
 
 The status strip above every page carries the live figures: project, git branch,
-model, **context used against the real window**, running sub-agents, running
-tasks, the current turn's elapsed time, session cost, queued turns, the live
-thinking-token estimate while a turn is in flight, and — once a usage window
-gets tight — how full it is.
+model, effort, permission mode, engine, **context used against the real
+window**, running sub-agents, running tasks, the current turn's elapsed time,
+session cost, queued turns, the live thinking-token estimate while a turn is in
+flight, and — once a usage window gets tight — how full it is.
+
+**Everything the strip names, the strip switches.** Project, model, effort,
+permission mode and engine are each a menu, carrying the same options and the
+same explanations the Settings panel does. A control surface that reports which
+model is running and sends you somewhere else to change it costs a click and
+pays none back.
 
 Assistant prose renders as Markdown, including **tables**, with syntax-highlit
 code blocks you can copy in one click. The composer takes <kbd>↑</kbd> to recall
@@ -91,11 +135,24 @@ a previous turn.
 
 ## Running it
 
+Two keystrokes, and only two — a shortcut nobody remembers is a key taken away
+from the page:
+
+| Key                                                    | What it does                                 |
+| ------------------------------------------------------ | -------------------------------------------- |
+| <kbd>Ctrl</kbd>/<kbd>⌘</kbd>+<kbd>1</kbd>…<kbd>9</kbd> | Switch to that project                       |
+| <kbd>/</kbd>                                           | Focus the filter on the page in front of you |
+
+Every row that names a file — a skill, a command, an MCP server, a hook, a
+`CLAUDE.md` — opens it with the desktop's own file association, or copies its
+path.
+
 `cc` is a desktop app: Electron is the default client and the default build
 target.
 
 ```sh
 deno task dev                       # the Electron window
+deno task dev ~/code/myproject      # …opened on that project folder
 deno task dev --client=browser      # same app in a browser tab
 deno task dev --client=server-only  # headless — drive it with `deno task am`
 
@@ -103,6 +160,10 @@ deno task compile                   # → dist/claude-control-x86_64.AppImage
 deno task build                     # every target in deno.json build.targets
 deno task install:electron          # only if the binary is missing
 ```
+
+The first positional argument is a project folder: it is added to the project
+list (if new) and selected, so `cc ~/code/myproject` opens ready to work there.
+Relative paths and `~` both resolve.
 
 `cc` shells out to the `claude` binary, so it needs a real process host — the
 browser and Electron clients both talk to the local aio server that owns the
@@ -175,8 +236,18 @@ being gone.
 
 So every running session's working directory is re-checked on a timer. One that
 has vanished has its session closed — process ended, reason stated — and its
-project is marked **gone** in the dock and the Projects list, which is where the
-remedy is.
+project **drops out of the dock by itself**.
+
+What makes that safe is the test, not the timer: a project is forgotten only
+when the folder _above_ it is still there. A deleted directory goes; an
+unmounted drive, a stopped container or a home that has not been unlocked keeps
+every project on it, marked **gone**. It is undoable — the dock offers **Undo**
+until you dismiss it — and it is a switch in Settings if you would rather keep
+the row.
+
+Removing a project releases everything keyed by it: its `claude` process, its
+local-engine settings, its loops. A tab can be closed with one click precisely
+because that click is reversible.
 
 ## Background sessions, and loops
 
@@ -203,6 +274,11 @@ A file browser is the least interesting panel this app could have. What earns it
 a tab is the overlay: every file the running session has **read** or **written**
 is marked, live, from the tool calls it actually made. Only expanded directories
 are walked, so the panel costs what you opened.
+
+Which is why there is a **Touched** view beside the tree: the same set, flat, in
+one click, needing no walk at all because the paths come from the tool calls
+themselves. Without it the overlay was only visible on folders you had already
+guessed to expand.
 
 ## What is measured, and what is not
 

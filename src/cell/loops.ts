@@ -68,6 +68,43 @@ export const loops = cell("loops", {
 
   methods: {
     /**
+     * Drop every loop belonging to a project that is no longer in the list.
+     *
+     * A loop names the project it fires into and never fires anywhere else, so
+     * one whose project is gone is a row that can never run again — and,
+     * because the page only ever shows the *active* project's loops, one
+     * nobody can see in order to delete it. It is persisted, so it would
+     * outlive the app as well.
+     */
+    forgetProjects(s: LoopsState, ids: string[]) {
+      const before = s.loops.length;
+      s.loops = s.loops.filter((l) => !ids.includes(l.projectId));
+      if (s.loops.length !== before) {
+        log.info("loops", "dropped loops for removed projects", {
+          count: before - s.loops.length,
+        });
+      }
+    },
+
+    /** The same collection, run against the whole project list — for rows
+     *  written before `forgetProjects` existed, or orphaned by a crash. The
+     *  list is read here rather than passed in, for the reason spelled out on
+     *  `local.pruneUnknown`: a snapshot taken by the caller is already stale. */
+    pruneUnknown(s: LoopsState) {
+      // Same guard as `local.pruneUnknown`: an empty list is "not settled
+      // yet", and sweeping against it would delete every loop on the machine.
+      if (workspace.projects.length === 0) return;
+      const known = new Set(workspace.projects.map((p) => p.id));
+      const before = s.loops.length;
+      s.loops = s.loops.filter((l) => known.has(l.projectId));
+      if (s.loops.length !== before) {
+        log.info("loops", "dropped loops for unknown projects", {
+          count: before - s.loops.length,
+        });
+      }
+    },
+
+    /**
      * One pass: settle whatever finished, then fire whatever is due.
      *
      * Both halves are here rather than in an event handler because a loop's run

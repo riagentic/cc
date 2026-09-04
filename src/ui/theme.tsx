@@ -230,26 +230,46 @@ body {
   animation: pulse 1.8s var(--ease) infinite;
 }
 
-/* End this project's session without leaving the page you are on. Revealed on
-   hover and on keyboard focus — always reachable, never sitting there inviting
-   a mis-click on a session that is working. It takes the state dot's place, so
-   the row does not reflow when it appears. */
-.ptab__close {
-  position: absolute; right: 6px; top: 50%; transform: translateY(-50%);
+/* End this project's session, and remove the project — revealed together on
+   hover and on keyboard focus. Always reachable, never sitting there inviting a
+   mis-click on a session that is working. They take the state dot's place, so
+   the row does not reflow when they appear. */
+.ptab__acts {
+  position: absolute; right: 5px; top: 50%; transform: translateY(-50%);
+  display: flex; gap: 2px;
+  /* Hidden means UNCLICKABLE. opacity 0 alone still hit-tests, so the tab
+     carried invisible buttons that ate clicks aimed at the project. */
+  opacity: 0; pointer-events: none;
+  transition: opacity .14s var(--ease);
+}
+.ptab__act {
   display: grid; place-items: center; width: 20px; height: 20px;
   border: 0; border-radius: 6px; padding: 0;
   background: var(--raise); color: var(--ink-dim);
   cursor: pointer;
-  /* Hidden means UNCLICKABLE. opacity 0 alone still hit-tests, so the tab
-     carried an invisible 20x20 button that ate clicks aimed at the project. */
-  opacity: 0; pointer-events: none;
-  transition: opacity .14s var(--ease), color .14s var(--ease), background .14s var(--ease);
+  transition: color .14s var(--ease), background .14s var(--ease);
 }
-.ptab:hover .ptab__close, .ptab:focus-within .ptab__close {
+.ptab:hover .ptab__acts, .ptab:focus-within .ptab__acts {
   opacity: 1; pointer-events: auto;
 }
 .ptab:hover .ptab__state { opacity: 0; }
-.ptab__close:hover { background: color-mix(in srgb, var(--danger) 18%, transparent); color: var(--danger); }
+.ptab__act:hover { background: color-mix(in srgb, var(--ink) 12%, transparent); color: var(--ink); }
+.ptab__act--danger:hover { background: color-mix(in srgb, var(--danger) 18%, transparent); color: var(--danger); }
+
+/* The undo offer under the list. It is what lets removal be one click: a row
+   that vanished — because you clicked, or because its folder did — is one
+   button away from being back. */
+/* The dock's own filter fills its column — the shared max-width is meant for a
+   page header, where a search box sits beside a title. */
+.dock__filter { padding: 0 8px 6px; }
+.dock__filter .search, .dock__filter .input--search { width: 100%; max-width: none; min-width: 0; }
+
+.dock__undo {
+  display: flex; align-items: center; gap: 4px; min-width: 0;
+  padding: 5px 6px; border-radius: var(--radius-sm);
+  background: var(--panel-2); border: 1px solid var(--line);
+  font-size: 11.5px; color: var(--ink-soft);
+}
 
 /* A project whose directory is gone is still listed — it is the row you go to
    in order to remove it — but it must not look startable. */
@@ -333,17 +353,42 @@ body {
   background: color-mix(in srgb, var(--panel) 62%, transparent);
   backdrop-filter: blur(12px); position: sticky; top: 0; z-index: 5;
 }
-.stat { display: grid; gap: 1px; padding: 4px 12px; min-width: 0; border-radius: var(--radius-sm); }
+/* flex: none, not the default 1 1 auto: the strip WRAPS, so an item that does
+   not fit belongs on the next line — shrinking it instead is how a row of
+   readable values became "MODEL h… EFFORT Def… PERMISSIONS By…", which is a
+   status strip that has stopped reporting status. Only the context meter grows,
+   and only the project path clamps (it has its own ellipsis, and a path is read
+   from its tail anyway). */
+.stat { display: grid; gap: 1px; padding: 3px 11px; min-width: 0; flex: none; border-radius: var(--radius-sm); }
 .stat + .stat { border-left: 1px solid var(--line-soft); }
 .stat__k { font-size: 10px; text-transform: uppercase; letter-spacing: .08em; color: var(--ink-dim); font-weight: 600; }
 .stat__v { font-size: 13px; font-weight: 560; display: flex; align-items: center; gap: 6px; min-width: 0; }
 .stat__v code, .mono { font-family: var(--mono); font-size: 12px; }
-.stat--grow { flex: 1; min-width: 190px; }
+.stat--grow { flex: 1 1 190px; min-width: 190px; }
 /* One very long value (a deep project path) must not push the whole strip onto
    a second row — clamp it and let the title attribute carry the full text. */
-.stat--clamp { max-width: 300px; }
+/* The project path is the one value that SHOULD ellipse — it can be any length
+   — but it still needs room to be worth reading. Without a floor its grid track
+   collapsed to the width of the word "PROJECT" above it. */
+.stat--clamp { min-width: 190px; max-width: 300px; flex: 0 1 auto; }
+/* …and the floor has to be on the VALUE, not only on the stat: the value is a
+   grid item whose track is sized from its own min-content, and an
+   ellipsis-nowrap span's min-content is nothing. Without this the project path
+   ellipsed at a dozen characters inside a box with room for twice that. */
+.stat--clamp .stat__v { min-width: 172px; }
+/* …and the switcher inside it takes the room. A flex item does not grow unless
+   told to, so the trigger sat at its own content width and ellipsed inside a
+   box with twice the space. */
+.stat--clamp .menu, .stat--clamp .menu__btn { flex: 1 1 auto; min-width: 0; }
 .stat--num .stat__v { font-variant-numeric: tabular-nums; }
 .truncate { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+
+/* A model name is read, not glanced at. The generic .menu__btn cap is a
+   percentage, and a percentage inside a max-content flex item resolves
+   against the room left in the row rather than against the text - so the name
+   was cut short with empty space beside it. The wrapper carries the cap
+   instead, in a font-relative unit. */
+.modelmenu .menu__btn { max-width: none; }
 
 /* ── meter ──────────────────────────────────────────────────────────────── */
 
@@ -593,6 +638,20 @@ button.rowitem:hover { background: var(--panel-2); }
 .perm__actions { display: flex; align-items: center; gap: 8px; }
 .perm__deny { display: grid; gap: 8px; }
 .perm__hint { font-size: 11.5px; color: var(--ink-dim); }
+/* The "/" marker inside a filter box. Right-aligned, and a label rather than a
+   target — clicking it should reach the input underneath. */
+.search__key {
+  position: absolute; right: 7px; top: 50%; transform: translateY(-50%);
+  pointer-events: none; opacity: .6;
+}
+/* The command, exactly as it would run. Wrapped rather than scrolled: a
+   decision about a command you can only see half of is not a decision. */
+.perm__cmd {
+  margin: 0; padding: 9px 11px; border-radius: var(--radius-sm);
+  background: var(--panel-2); border: 1px solid var(--line);
+  font-family: var(--mono); font-size: 12px; line-height: 1.55;
+  white-space: pre-wrap; word-break: break-word; max-height: 34vh; overflow-y: auto;
+}
 
 /* ── composer ───────────────────────────────────────────────────────────── */
 
@@ -656,7 +715,7 @@ button.rowitem:hover { background: var(--panel-2); }
   color: var(--ink-dim);
 }
 .input--search {
-  padding-left: 27px; min-width: 150px; max-width: 240px;
+  padding-left: 27px; padding-right: 24px; min-width: 150px; max-width: 240px;
   height: 28px; font-size: 12px;
 }
 .input--search::-webkit-search-cancel-button { filter: invert(.5); }
@@ -688,6 +747,60 @@ button.rowitem:hover { background: var(--panel-2); }
 .seg__btn:hover { color: var(--ink); }
 .seg__btn.selected { background: var(--raise); color: var(--ink); }
 
+/* Menu — the switcher behind every value the status strip names. The popover
+   is positioned, not portalled: it hangs off its own trigger, so it follows a
+   strip that reflows instead of pointing at where the button used to be. */
+.menu { position: relative; display: inline-flex; min-width: 0; }
+.menu__btn {
+  display: inline-flex; align-items: center; gap: 5px; min-width: 0; max-width: 100%;
+  border: 1px solid transparent; background: none; color: inherit; font: inherit;
+  white-space: nowrap;
+  padding: 2px 6px; margin: -2px -6px; border-radius: var(--radius-sm); cursor: pointer;
+  transition: background .13s var(--ease), border-color .13s var(--ease);
+}
+.menu__btn:hover:not(:disabled) { background: var(--panel-2); border-color: var(--line); }
+.menu__btn.open { background: var(--panel-2); border-color: var(--line); }
+.menu__btn:disabled { cursor: default; opacity: .55; }
+.menu__btn svg { flex: none; color: var(--ink-dim); transform: rotate(90deg); }
+/* A trigger only ellipses when its own content asks to. Left to the generic
+   truncate rule, the grid track a .stat gives its value collapses to the
+   min-content of a nowrap-ellipsis span — which is nothing — and every value in
+   the strip rendered as one letter and a dot. */
+/* The value row is never narrower than the value. A .stat is a grid, and its
+   auto track was resolving against the LABEL — so "Bypass" rendered as "By…"
+   under a full-width "PERMISSIONS". Only the two stats that are meant to be
+   elastic are exempt: the project path (which clamps and ellipses on purpose)
+   and the context meter (which grows). */
+.stat:not(.stat--clamp):not(.stat--grow) .stat__v { min-width: max-content; }
+.menu__pop {
+  position: absolute; top: calc(100% + 6px); left: 0; z-index: 40;
+  min-width: 232px; max-width: 340px; max-height: 62vh; overflow-y: auto;
+  padding: 5px; display: flex; flex-direction: column; gap: 1px;
+  background: var(--panel); border: 1px solid var(--line);
+  border-radius: var(--radius); box-shadow: var(--shadow);
+}
+.menu__pop--right { left: auto; right: 0; }
+.menu__item {
+  display: flex; align-items: flex-start; gap: 7px; width: 100%; min-width: 0;
+  padding: 6px 8px; border: 0; border-radius: var(--radius-sm);
+  background: none; color: var(--ink-soft); font: inherit; font-size: 12.5px;
+  line-height: 1.45; text-align: left; cursor: pointer;
+}
+.menu__item:hover { background: var(--panel-2); color: var(--ink); }
+.menu__item.selected { color: var(--ink); }
+.menu__item--danger { color: var(--danger); }
+.menu__item--warn { color: var(--warn); }
+.menu__tick { flex: none; width: 13px; color: var(--accent); padding-top: 1px; }
+/* Inline, like every other label in this app that is followed by a <br>. As a
+   block it produced its own line break AND kept the <br>, so every option in
+   an open menu was double-spaced and a six-option list filled half the window. */
+.menu__label { font-weight: 560; }
+.menu__hint { font-size: 11.5px; color: var(--ink-dim); font-weight: 500; }
+.menu__foot {
+  margin-top: 3px; padding: 7px 8px 3px; border-top: 1px solid var(--line-soft);
+  font-size: 11.5px; color: var(--ink-dim);
+}
+
 /* ── misc ───────────────────────────────────────────────────────────────── */
 
 .empty { display: grid; place-items: center; gap: 10px; padding: 46px 20px; text-align: center; color: var(--ink-dim); }
@@ -717,6 +830,12 @@ button.rowitem:hover { background: var(--panel-2); }
 .kv__v { overflow-wrap: anywhere; }
 .divider { height: 1px; background: var(--line-soft); margin: 14px 0; }
 
+/* Open-the-file and copy-the-path, on any row that names one. Quiet until the
+   row is hovered or something in it has focus: the actions are the answer to a
+   question you only ask after reading the row. */
+.pathacts { display: inline-flex; gap: 2px; opacity: .28; transition: opacity .14s var(--ease); }
+.rowitem:hover .pathacts, .pathacts:hover, .pathacts:focus-within { opacity: 1; }
+
 @media (prefers-reduced-motion: reduce) {
   * { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; scroll-behavior: auto !important; }
 }
@@ -733,6 +852,10 @@ button.rowitem:hover { background: var(--panel-2); }
      blocked. It overlaps the initials rather than taking a column of its own. */
   .ptab__main { grid-template-columns: 26px; justify-content: center; padding-right: 9px; }
   .ptab__state { top: 6px; right: 6px; transform: none; }
+  /* No room for two 20px buttons beside a 26px badge — the collapsed dock is a
+     switcher, and removal lives in Settings at this width. */
+  .ptab__acts { display: none; }
+  .dock__undo span:first-child { display: none; }
 }
 
 @media (max-width: 900px) {

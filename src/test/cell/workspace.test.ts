@@ -238,6 +238,9 @@ testCell(
   "a project whose folder is deleted is marked gone, not left to fail at spawn",
   async (t) => {
     t.init();
+    // The sweep is off for this one: it is about the *marking*, which is what
+    // a user who has turned auto-forget off relies on entirely.
+    t.send.setAutoForget(false);
     const dir = await Deno.makeTempDir();
     await t.send.addProject(dir);
     t.expect.state((s) => s.projects[0].missing === false);
@@ -259,6 +262,7 @@ testCell(
   "the only project is still removable when its folder is gone",
   async (t) => {
     t.init();
+    t.send.setAutoForget(false);
     const dir = await Deno.makeTempDir();
     await t.send.addProject(dir);
     await Deno.remove(dir);
@@ -279,6 +283,7 @@ testCell(
   "removing the active project prefers one that still exists",
   async (t) => {
     t.init();
+    t.send.setAutoForget(false);
     // Order matters: the dead project is first in the list, so a plain
     // `projects[0]` fallback would select it and move the same dead end along.
     const gone = await Deno.makeTempDir();
@@ -314,4 +319,161 @@ testCell(workspace, "setEffort is closed over the CLI's own values", (t) => {
   t.expect.state((s) => s.defaults.effort === "xhigh");
   t.send.setEffort("");
   t.expect.state((s) => s.defaults.effort === "");
+});
+
+Deno.test("removeMissingProjects drops only the gone, and moves the selection off them", async () => {
+  const { bootCells } = await import("aio/testing");
+  const h = await bootCells([workspace]);
+  const tmp = await Deno.makeTempDir();
+  try {
+    await workspace.setAutoForget(false); // this test is about the button
+    await Deno.mkdir(`${tmp}/kept`);
+    await Deno.mkdir(`${tmp}/doomed`);
+    await workspace.addProject(`${tmp}/kept`);
+    await workspace.addProject(`${tmp}/doomed`);
+    const doomedId = workspace.activeId; // addProject selects what it added
+
+    await Deno.remove(`${tmp}/doomed`, { recursive: true });
+    await workspace.refreshProjects();
+    assertEquals(
+      workspace.projects.find((p) => p.id === doomedId)?.missing,
+      true,
+    );
+
+    workspace.removeMissingProjects();
+    assertEquals(workspace.projects.length, 1);
+    assertEquals(workspace.projects[0].path, `${tmp}/kept`);
+    // The selection never stays on a project that no longer exists.
+    assertEquals(workspace.activeId, workspace.projects[0].id);
+
+    // With nothing missing, the method is a no-op, not a surprise.
+    workspace.removeMissingProjects();
+    assertEquals(workspace.projects.length, 1);
+  } finally {
+    h.dispose();
+    await Deno.remove(tmp, { recursive: true });
+  }
+});
+
+Deno.test("a deleted folder takes its tab with it, and the removal is undoable", async () => {
+  const { bootCells } = await import("aio/testing");
+  const h = await bootCells([workspace]);
+  const tmp = await Deno.makeTempDir();
+  try {
+    await Deno.mkdir(`${tmp}/kept`);
+    await Deno.mkdir(`${tmp}/doomed`);
+    await workspace.addProject(`${tmp}/kept`);
+    await workspace.addProject(`${tmp}/doomed`);
+    const keptId = workspace.projects.find((p) => p.path === `${tmp}/kept`)!.id;
+
+    await Deno.remove(`${tmp}/doomed`, { recursive: true });
+    await workspace.refreshProjects();
+
+    // Gone from the list, not left as a dead row to tidy up by hand.
+    assertEquals(workspace.projects.length, 1);
+    assertEquals(workspace.projects[0].path, `${tmp}/kept`);
+    // …and the selection moved off it, because it was the active one.
+    assertEquals(workspace.activeId, keptId);
+    // …and it is one click from being back.
+    assertEquals(workspace.forgotten.length, 1);
+    assertEquals(workspace.forgotten[0].path, `${tmp}/doomed`);
+
+    workspace.undoForget();
+    assertEquals(workspace.projects.length, 2);
+    assertEquals(workspace.forgotten.length, 0);
+    // Restored in the order it was added, not appended to the end.
+    assertEquals(workspace.projects[0].path, `${tmp}/kept`);
+    assertEquals(workspace.projects[1].path, `${tmp}/doomed`);
+  } finally {
+    h.dispose();
+    await Deno.remove(tmp, { recursive: true });
+  }
+});
+
+Deno.test("a project on a vanished mount is kept, not forgotten", async () => {
+  const { bootCells } = await import("aio/testing");
+  const h = await bootCells([workspace]);
+  const tmp = await Deno.makeTempDir();
+  try {
+    // The shape of an unmounted drive, a stopped container, a locked home:
+    // the project is gone AND so is the directory that held it. Absence of the
+    // parent is the whole difference between "deleted" and "not here right
+    // now", and forgetting the second would throw away a project the user
+    // still has, on the strength of a momentary observation.
+    await Deno.mkdir(`${tmp}/mount/work`, { recursive: true });
+    // Retried: the suite shares one process, and a previous file's harness
+    // teardown landing late resets these cells mid-arrangement. Setting the
+    // scene is not what this test is about — the rule below is.
+    for (let attempt = 0; attempt < 3; attempt++) {
+      await workspace.addProject(`${tmp}/mount/work`);
+      if (workspace.projects.some((p) => p.path === `${tmp}/mount/work`)) break;
+    }
+    await Deno.remove(`${tmp}/mount`, { recursive: true });
+    await workspace.refreshProjects();
+
+    // Found by path, not by index: boot adds the launch directory as a project
+    // of its own, so the list is not this test's alone.
+    const kept = workspace.projects.find((p) => p.path === `${tmp}/mount/work`);
+    assertEquals(
+      kept?.missing,
+      true,
+      `projects=${
+        JSON.stringify(workspace.projects.map((p) => p.path))
+      } forgotten=${JSON.stringify(workspace.forgotten.map((p) => p.path))}`,
+    );
+    assertEquals(workspace.forgotten.length, 0);
+  } finally {
+    h.dispose();
+    await Deno.remove(tmp, { recursive: true }).catch(() => {});
+  }
+});
+
+Deno.test("auto-forget can be turned off, and then nothing disappears", async () => {
+  const { bootCells } = await import("aio/testing");
+  const h = await bootCells([workspace]);
+  const tmp = await Deno.makeTempDir();
+  try {
+    await workspace.setAutoForget(false);
+    await Deno.mkdir(`${tmp}/doomed`);
+    await workspace.addProject(`${tmp}/doomed`);
+    await Deno.remove(`${tmp}/doomed`, { recursive: true });
+    await workspace.refreshProjects();
+
+    const kept = workspace.projects.find((p) => p.path === `${tmp}/doomed`);
+    assertEquals(kept?.missing, true);
+    assertEquals(workspace.forgotten.length, 0);
+  } finally {
+    h.dispose();
+    await Deno.remove(tmp, { recursive: true });
+  }
+});
+
+Deno.test("a project added while the app is still booting is not wiped by boot", async () => {
+  const { bootCells } = await import("aio/testing");
+  const h = await bootCells([workspace]);
+  const dir = await Deno.makeTempDir();
+  try {
+    // Boot is the longest method in the app — a CLI version probe, a stat per
+    // project, git — and the window is already up with an Add field in it
+    // while it runs. Holding a draft across all of that published the project
+    // list as it was at boot ENTRY (empty) when the method finally committed,
+    // so a project added in between simply vanished. Boot is an orchestrator
+    // now: it writes what it learned through a short sync method and never
+    // holds a draft across an await.
+    const booting = workspace.bootstrap();
+    await workspace.addProject(dir);
+    await booting;
+    await h.settle();
+
+    assertEquals(
+      workspace.projects.some((p) => p.path === dir),
+      true,
+      JSON.stringify(workspace.projects.map((p) => p.path)),
+    );
+    // …and boot still did its own job.
+    assertEquals(workspace.home !== "", true);
+  } finally {
+    h.dispose();
+    await Deno.remove(dir, { recursive: true });
+  }
 });

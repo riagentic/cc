@@ -1,5 +1,5 @@
 {
-  "aioVersion": "v1.0.0-alpha73",
+  "aioVersion": "v1.0.0-alpha74",
   "title": "Claude Control",
   "version": "0.1",
   "client": "electron",
@@ -11,6 +11,11 @@
       "host"
     ],
     "out": "dist"
+  },
+  "compile": {
+    "include": [
+      "src/cell/grep-worker.ts"
+    ]
   },
   "nodeModulesDir": "auto",
   "compilerOptions": {

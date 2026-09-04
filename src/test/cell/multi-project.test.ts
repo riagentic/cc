@@ -426,3 +426,81 @@ Deno.test("a switch survives the project list changing under it", async () => {
     await t.done();
   }
 });
+
+Deno.test("removing a project takes its process, its engine config and its loops with it", async () => {
+  const { bootCells } = await import("aio/testing");
+  const { local, localConfig } = await import("../../cell/local.ts");
+  const { loops } = await import("../../cell/loops.ts");
+  const h = await bootCells([workspace, session, local, loops]);
+  const dir = await Deno.makeTempDir();
+  const keep = await Deno.makeTempDir();
+  try {
+    await workspace.addProject(keep);
+    const keepId = workspace.activeId;
+    await workspace.addProject(dir);
+    const id = workspace.activeId;
+
+    // Give the doomed project all three kinds of per-project state.
+    await local.setEngine(id, "ollama");
+    await loops.add("check the build", 60);
+    const mine = loops.loops.filter((l) => l.projectId === id).length;
+    assertEquals(mine, 1);
+    assertEquals(localConfig(id).engine, "ollama");
+
+    workspace.removeProject(id);
+    // The three cells are told asynchronously, on purpose — a slow teardown
+    // must not hold up the click — so settle before reading them.
+    await h.settle();
+
+    assertEquals(workspace.projects.length, 1);
+    assertEquals(workspace.activeId, keepId);
+    // Engine configuration is PERSISTED, so leaving it behind meant every
+    // project ever removed stayed in the stored state forever.
+    assertEquals(local.configs[id], undefined);
+    // A loop names the project it fires into. One whose project is gone can
+    // never run and is on no page, because the loops page lists the active
+    // project's loops only.
+    assertEquals(loops.loops.some((l) => l.projectId === id), false);
+    // …and nothing of the removed project's conversation is parked.
+    assertEquals(session.parked[id], undefined);
+  } finally {
+    h.dispose();
+    await Deno.remove(dir, { recursive: true });
+    await Deno.remove(keep, { recursive: true });
+  }
+});
+
+Deno.test("the leftover sweep drops state keyed by a project that is not there", async () => {
+  const { bootCells } = await import("aio/testing");
+  const { local, strayConfigs } = await import("../../cell/local.ts");
+  const { pruneUnknown } = await import("../../cell/workspace.ts");
+  const { loops } = await import("../../cell/loops.ts");
+  const h = await bootCells([workspace, session, local, loops]);
+  const dir = await Deno.makeTempDir();
+  try {
+    await workspace.addProject(dir);
+    const real = workspace.activeId;
+    // State under an id no project has — written by an older build, orphaned
+    // by a crash, or typed at the control plane. It is only findable by
+    // comparing the two lists, which is what the sweep does.
+    await local.setEngine("ghost-project", "ollama");
+    await local.setEngine(real, "lmstudio");
+    assertEquals(local.configs["ghost-project"] !== undefined, true);
+    assertEquals(strayConfigs(), ["ghost-project"]);
+
+    // Deliberately NOT run at boot: at boot the project list is a moving
+    // target — loaded, then the launch directory added, then whatever the user
+    // types into a window that is already up — and every automatic placement
+    // of this sweep deleted the settings of a project that had just been made.
+    pruneUnknown();
+    await h.settle();
+
+    assertEquals(local.configs["ghost-project"], undefined);
+    // …and a project that is really there keeps its configuration.
+    assertEquals(local.configs[real]?.engine, "lmstudio");
+    assertEquals(strayConfigs(), []);
+  } finally {
+    h.dispose();
+    await Deno.remove(dir, { recursive: true });
+  }
+});

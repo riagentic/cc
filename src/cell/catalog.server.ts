@@ -342,17 +342,35 @@ export async function readFilePreview(
   const stat = await Deno.stat(path).catch(() => null);
   if (!stat?.isFile) return { ...empty, error: "Not a file." };
   try {
-    const raw = await Deno.readFile(path);
-    const slice = raw.slice(0, MAX_PREVIEW);
+    // Read only the preview window, never the whole file — the size is known
+    // from the stat, so a multi-GB log costs MAX_PREVIEW bytes, not its length.
+    const file = await Deno.open(path, { read: true });
+    let slice: Uint8Array;
+    try {
+      const buf = new Uint8Array(Math.min(stat.size, MAX_PREVIEW));
+      let n = 0;
+      while (n < buf.length) {
+        const read = await file.read(buf.subarray(n));
+        if (read === null) break;
+        n += read;
+      }
+      slice = buf.subarray(0, n);
+    } finally {
+      file.close();
+    }
+    const truncated = stat.size > slice.length;
+    // A cut multi-byte character at the window edge is truncation, not binary:
+    // drop the partial sequence so `fatal` below judges only whole characters.
+    if (truncated) {
+      let end = slice.length;
+      while (end > 0 && (slice[end - 1] & 0b1100_0000) === 0b1000_0000) end--;
+      if (end > 0 && (slice[end - 1] & 0b1100_0000) === 0b1100_0000) end--;
+      slice = slice.subarray(0, end);
+    }
     // `fatal` so binary is *reported* as binary rather than rendered as a page
     // of replacement glyphs that looks like a decoding bug in this app.
     const text = new TextDecoder("utf-8", { fatal: true }).decode(slice);
-    return {
-      text,
-      bytes: stat.size,
-      truncated: raw.length > MAX_PREVIEW,
-      error: "",
-    };
+    return { text, bytes: stat.size, truncated, error: "" };
   } catch (e) {
     if (e instanceof TypeError) {
       return { ...empty, bytes: stat.size, error: "Binary file." };

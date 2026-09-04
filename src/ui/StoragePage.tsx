@@ -11,12 +11,21 @@
  * recent work, and the useful thing to show about it is simply which projects
  * it belongs to.
  */
-import { type VNode } from "aio/air";
+import { useLocal, type VNode } from "aio/air";
 import { stale, staleBytes, storage } from "../cell/storage.ts";
 import { workspace } from "../cell/workspace.ts";
 import type { StoredProject } from "../cell/storage.server.ts";
-import { ago, bytes, pct, tildePath } from "../lib/format.ts";
-import { Banner, Empty, Meter, Panel, Pill, useNow } from "./parts.tsx";
+import { ago, bytes, listKey, pct, tildePath } from "../lib/format.ts";
+import {
+  Banner,
+  Empty,
+  matches,
+  Meter,
+  Panel,
+  Pill,
+  Search,
+  useNow,
+} from "./parts.tsx";
 import { PageHead } from "./RunViews.tsx";
 import { IconFolder, IconRefresh, IconTrash } from "./icons.tsx";
 
@@ -52,6 +61,9 @@ function ProjectRow(props: { p: StoredProject; now: number }): VNode {
                 title={`Delete this history — ${
                   bytes(p.bytes)
                 }. The folder it belonged to no longer exists.`}
+                // Stable handle: the aria-label carries the path, which a test
+                // cannot know ahead of time.
+                data-testid="DeleteHistory"
                 aria-label={`Delete history for ${p.path}`}
                 onClick={() => storage.remove(p.dir, p.path)}
               >
@@ -72,9 +84,19 @@ function ProjectRow(props: { p: StoredProject; now: number }): VNode {
 
 export function StoragePage(): VNode {
   const now = useNow(true, 30_000);
+  const [query, setQuery] = useLocal("");
+  const [all, setAll] = useLocal(false);
   const scanned = storage.scannedAt > 0;
   const gone = stale();
   const reclaim = staleBytes();
+  // Filtered first, capped second — a cap applied before the filter would hide
+  // the very row somebody typed a path to find.
+  const matching = storage.projects.filter((p) =>
+    matches(query, p.path, p.dir)
+  );
+  const CAP = 20;
+  const shown = all || query.trim() !== "" ? matching : matching.slice(0, CAP);
+  const hidden = matching.length - shown.length;
 
   return (
     <div class="page">
@@ -89,15 +111,25 @@ export function StoragePage(): VNode {
           }`
           : "Not scanned yet"}
         actions={
-          <button
-            type="button"
-            class="btn btn--sm"
-            disabled={storage.loading}
-            onClick={() => storage.refresh()}
-          >
-            {IconRefresh({ size: 13 })}
-            {storage.loading ? "Scanning…" : scanned ? "Rescan" : "Scan"}
-          </button>
+          <>
+            {scanned && (
+              <Search
+                value={query}
+                onChange={setQuery}
+                label="Filter stored projects"
+                placeholder="Filter by path…"
+              />
+            )}
+            <button
+              type="button"
+              class="btn btn--sm"
+              disabled={storage.loading}
+              onClick={() => storage.refresh()}
+            >
+              {IconRefresh({ size: 13 })}
+              {storage.loading ? "Scanning…" : scanned ? "Rescan" : "Scan"}
+            </button>
+          </>
         }
       />
       <div class="page__body grid">
@@ -141,7 +173,7 @@ export function StoragePage(): VNode {
                     </div>
                     <div class="rowlist">
                       {gone.map((p) => (
-                        <ProjectRow key={p.dir} p={p} now={now} />
+                        <ProjectRow key={listKey(p.dir)} p={p} now={now} />
                       ))}
                     </div>
                   </Panel>
@@ -153,7 +185,11 @@ export function StoragePage(): VNode {
                   </Banner>
                 )}
 
-              <Panel title="Where it went">
+              <Panel
+                title={query.trim()
+                  ? `Where it went · ${matching.length} of ${storage.projects.length}`
+                  : "Where it went"}
+              >
                 <Meter
                   value={storage.projects[0]?.bytes ?? 0}
                   max={storage.totalBytes || 1}
@@ -164,10 +200,30 @@ export function StoragePage(): VNode {
                   it, not to sweep it.
                 </div>
                 <div class="rowlist">
-                  {storage.projects.slice(0, 20).map((p) => (
-                    <ProjectRow key={p.dir} p={p} now={now} />
+                  {shown.map((p) => (
+                    <ProjectRow key={listKey(p.dir)} p={p} now={now} />
                   ))}
                 </div>
+                {
+                  /* The cap used to be silent. On a machine with forty
+                    projects that meant twenty of them — and any stale history
+                    among them — simply did not exist on this page. */
+                }
+                {hidden > 0 && (
+                  <button
+                    type="button"
+                    class="btn btn--ghost btn--sm"
+                    style={{ marginTop: "10px" }}
+                    onClick={() => setAll(true)}
+                  >
+                    Show {hidden} more
+                  </button>
+                )}
+                {shown.length === 0 && (
+                  <div class="field__hint">
+                    No stored project matches that filter.
+                  </div>
+                )}
               </Panel>
 
               {storage.extras.length > 0 && (

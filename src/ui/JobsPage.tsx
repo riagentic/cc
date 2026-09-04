@@ -101,6 +101,12 @@ function JobDetail(props: { job: Job; now: number }): VNode {
   const j = props.job;
   const busy = jobs.busyId === j.id;
   const shortCwd = tildePath(j.cwd, workspace.home);
+  // Removing a job deletes a whole background conversation through the CLI's
+  // own subcommand, and there is no undo for it. Every other one-click
+  // destructive action in this app is reversible — a removed project comes
+  // back from the dock — so this one arms instead. Two clicks, and the second
+  // says what it does rather than asking "are you sure?".
+  const [armed, setArmed] = useLocal(false);
 
   return (
     <div class="grid">
@@ -131,15 +137,41 @@ function JobDetail(props: { job: Job; now: number }): VNode {
                 {IconRefresh({ size: 14 })} Respawn
               </button>
             )}
-            <button
-              type="button"
-              class="btn btn--ghost btn--sm"
-              disabled={busy}
-              title="Delete this background session for good"
-              onClick={() => jobs.act(j.id, "remove")}
-            >
-              {IconTrash({ size: 14 })}
-            </button>
+            {armed
+              ? (
+                <>
+                  <button
+                    type="button"
+                    class="btn btn--sm btn--danger"
+                    disabled={busy}
+                    onClick={() => {
+                      setArmed(false);
+                      jobs.act(j.id, "remove");
+                    }}
+                  >
+                    {IconTrash({ size: 14 })} Delete this conversation
+                  </button>
+                  <button
+                    type="button"
+                    class="btn btn--ghost btn--sm"
+                    onClick={() => setArmed(false)}
+                  >
+                    Cancel
+                  </button>
+                </>
+              )
+              : (
+                <button
+                  type="button"
+                  class="btn btn--ghost btn--sm btn--icon"
+                  disabled={busy}
+                  title="Delete this background session for good — there is no undo"
+                  aria-label={`Remove ${j.name}`}
+                  onClick={() => setArmed(true)}
+                >
+                  {IconTrash({ size: 14 })}
+                </button>
+              )}
           </>
         }
       >

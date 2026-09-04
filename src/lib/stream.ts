@@ -211,9 +211,31 @@ export function contextWindowOf(
 /** Fallback window for a model id, used until the CLI reports the real one. */
 export function fallbackWindow(model: string | null): number {
   if (model && LONG_CONTEXT.test(model)) return 1_000_000;
-  const hit = MODELS.find((m) => model?.includes(m.id));
-  return hit ? hit.contextWindow : 200_000;
+  return modelOf(model)?.contextWindow ?? 200_000;
 }
+
+/** The picker entry a reported model id belongs to: the CLI names the model in
+ *  full (`claude-sonnet-4-5-20250929`), the picker names the family. */
+export function modelOf(model: string | null): ModelOption | null {
+  if (!model) return null;
+  return MODELS.find((m) => model === m.id || model.includes(m.id)) ?? null;
+}
+
+/**
+ * The model id the CLI stamps on a message it wrote *itself* rather than one a
+ * model answered — an interrupt notice, "No response requested", a usage-limit
+ * message (a single interned constant in 2.1.259).
+ *
+ * It names no model and its `usage` counts no tokens, so taking either is a
+ * measurement of nothing: it reported `<synthetic>` as the session's model —
+ * a label no model change could budge — and zeroed a mid-session context
+ * meter the moment a limit message arrived.
+ */
+export const SYNTHETIC_MODEL = "<synthetic>";
+
+/** True for such a message. */
+export const isSynthetic = (message: unknown): boolean =>
+  str(obj(message).model) === SYNTHETIC_MODEL;
 
 /** Turn one `assistant`/`user` message payload into renderable blocks. */
 export function blocksOf(message: unknown): Block[] {
@@ -272,6 +294,7 @@ export function resultText(content: unknown): string {
  */
 export const HANDSHAKE_PREFIX = "cc-init-";
 export const INTERRUPT_PREFIX = "cc-interrupt-";
+export const MODEL_PREFIX = "cc-model-";
 
 /** The request id the CLI echoed on a successful `control_response`. */
 function ackId(evt: Evt): string | null {
@@ -294,6 +317,30 @@ export const isHandshakeAck = (evt: Evt): boolean =>
 /** True only for the CLI's acknowledgement of an interrupt *we* requested. */
 export const isInterruptAck = (evt: Evt): boolean =>
   ackId(evt)?.startsWith(INTERRUPT_PREFIX) === true;
+
+/** True for the CLI's acknowledgement of a model switch *we* requested. */
+export const isModelAck = (evt: Evt): boolean =>
+  ackId(evt)?.startsWith(MODEL_PREFIX) === true;
+
+/**
+ * The refusal a failed control response carries, or `null` if it did not fail.
+ *
+ * The success envelope is not the whole channel: a request the CLI rejects
+ * comes back as `{subtype:"error"}` with the same echoed id. Reading only
+ * successes is how a model switch that never happened would still have looked
+ * like one on screen.
+ */
+export function controlError(
+  evt: Evt,
+): { id: string; error: string } | null {
+  if (evt.type !== "control_response") return null;
+  const res = obj(evt.response);
+  if (str(res.subtype) !== "error") return null;
+  return {
+    id: str(res.request_id) ?? "",
+    error: str(res.error) ?? "the CLI refused the request",
+  };
+}
 
 /* ── permissions ──────────────────────────────────────────────────────────── */
 

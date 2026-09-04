@@ -24,6 +24,7 @@ import { log } from "aio";
 import {
   HANDSHAKE_PREFIX,
   INTERRUPT_PREFIX,
+  MODEL_PREFIX,
   parseLine,
 } from "../lib/stream.ts";
 
@@ -326,6 +327,26 @@ export async function interrupt(key: string): Promise<void> {
   });
 }
 
+let modelSwitches = 0;
+
+/**
+ * Point the *running* session at another model.
+ *
+ * The CLI takes this on the control channel and applies it from the next turn
+ * on, keeping the conversation, its context and its tool state (`set_model`,
+ * verified against 2.1.259). A restart would keep none of the three, which is
+ * why changing the model used to mean "changing what the next session will be"
+ * — and why a session that had exhausted one model's usage limit went on
+ * answering out of that same model.
+ */
+export async function setModel(key: string, model: string): Promise<void> {
+  await write(key, {
+    type: "control_request",
+    request_id: `${MODEL_PREFIX}${++modelSwitches}`,
+    request: { subtype: "set_model", model },
+  });
+}
+
 /** How long each stage of the teardown gets before the next one is tried. */
 const CLOSE_GRACE_MS = 1_500;
 const SIGNAL_GRACE_MS = 1_500;
@@ -477,6 +498,60 @@ const claudeBin = (): string => Deno.env.get("CLAUDE_BIN") ?? "claude";
 export async function version(): Promise<string | null> {
   const out = await run(claudeBin(), ["--version"], undefined, 5_000);
   return out?.trim().split(/\s+/)[0] ?? null;
+}
+
+/**
+ * Hand a file to whatever the desktop opens it with.
+ *
+ * The pages that list skills, commands, hooks, MCP servers and memory files all
+ * name the file behind each row, and naming it was as far as they went — the
+ * next thing anyone wants is to look at it, and the app knew the path and made
+ * you copy it out by eye. This is that step.
+ *
+ * What it will not do:
+ *  - run a shell. The opener and the path are separate argv entries, so a path
+ *    containing a quote, a space or a `;` is a path, never syntax;
+ *  - open something that is not there. A missing file is reported, not handed
+ *    to the desktop to fail at silently;
+ *  - decide what "open" means. That is the user's own file association, which
+ *    is the whole reason this is one line and not an editor integration.
+ */
+export async function openPath(path: unknown): Promise<string | null> {
+  // `unknown`, not `string`: this is reachable from the control plane, where a
+  // missing argument arrives as `undefined` and the parameter type is a promise
+  // nobody enforces. The answer is the sentence this function already returns
+  // for a bad path — a thrown TypeError would be the same refusal, reported as
+  // a crash.
+  if (typeof path !== "string" || !path.startsWith("/")) {
+    return "Not an absolute path.";
+  }
+  const stat = await Deno.stat(path).catch(() => null);
+  if (!stat) return `No longer on disk: ${path}`;
+  const opener = Deno.build.os === "darwin"
+    ? "open"
+    : Deno.build.os === "windows"
+    ? "explorer"
+    : "xdg-open";
+  try {
+    const child = new Deno.Command(opener, {
+      args: [path],
+      stdin: "null",
+      stdout: "null",
+      stderr: "piped",
+    }).spawn();
+    // Not awaited to completion: an opener that launches an editor stays alive
+    // for as long as the editor does, and the click must not. `unref` lets this
+    // process exit with a viewer still open.
+    child.stderr.cancel().catch(() => {});
+    child.unref();
+    log.info("workspace", "opened a file with the desktop opener", { opener });
+    return null;
+  } catch (e) {
+    // `explorer` exits non-zero on success, and a Linux box with no
+    // xdg-utils has no opener at all — both are worth saying out loud rather
+    // than leaving as a button that does nothing.
+    return `Could not open it: ${e instanceof Error ? e.message : String(e)}`;
+  }
 }
 
 export async function isDirectory(path: string): Promise<boolean> {
@@ -647,6 +722,10 @@ async function pump(
   stream: ReadableStream<Uint8Array>,
   onChunk: (text: string) => void,
 ): Promise<void> {
+  // A single frame with no newline is bounded only by what the CLI emits;
+  // this is the ceiling past which we stop believing it is a line at all, so
+  // a wedged or hostile producer cannot grow the buffer without limit.
+  const MAX_LINE = 16 * 1_048_576;
   const reader = stream.getReader();
   const decoder = new TextDecoder();
   let buf = "";
@@ -659,6 +738,11 @@ async function pump(
       if (cut >= 0) {
         onChunk(buf.slice(0, cut + 1));
         buf = buf.slice(cut + 1);
+      } else if (buf.length > MAX_LINE) {
+        // No newline in 16MB: flush what we have as a line and reset, rather
+        // than hold a growing buffer for a terminator that is not coming.
+        onChunk(buf + "\n");
+        buf = "";
       }
     }
   } catch (e) {

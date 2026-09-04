@@ -1,12 +1,16 @@
 import { assertEquals } from "@std/assert";
+import { REDACTED_ACTIONS } from "../../cell/redact.ts";
 import {
   ago,
   baseName,
   bytes,
   clock,
   duration,
+  listKey,
+  modelLabel,
   oneLine,
   pct,
+  stateShape,
   tailPath,
   tildePath,
   tokens,
@@ -183,4 +187,58 @@ Deno.test("until — a future moment, which `ago` cannot express", () => {
   assertEquals(until(now - 1, now), "now");
   assertEquals(until(0, now), "—");
   assertEquals(until(NaN, now), "—");
+});
+
+Deno.test("stateShape logs sizes, never content", () => {
+  const shape = stateShape({
+    messages: [{ text: "a private transcript line" }],
+    config: { a: 1, b: 2 },
+    count: 7,
+  });
+  assertEquals(shape, { messages: 1, config: 2, count: 1 });
+  assertEquals(JSON.stringify(shape).includes("private"), false);
+  assertEquals(stateShape(null), {});
+  assertEquals(stateShape("nope"), {});
+});
+
+Deno.test("the redaction list covers every content-bearing cell, by prefix", () => {
+  // session/local (transcripts), jobs (other sessions' prompts + output),
+  // tree (file preview contents) — everything that can hold user or model
+  // text. Metadata-only cells (catalog, storage, workspace) are deliberately
+  // absent. Prefix form so a new method cannot silently leak.
+  for (const cell of ["session", "local", "jobs", "tree"]) {
+    assertEquals(REDACTED_ACTIONS.includes(`${cell}:*`), true, cell);
+  }
+  assertEquals(REDACTED_ACTIONS.every((p) => p.endsWith(":*")), true);
+});
+
+Deno.test("listKey removes every character the semantic surface parses", () => {
+  // `Parent/Component[key]:Element` — so `/`, `[`, `]` and `:` all have to go,
+  // or the address cannot be parsed back to the row it names.
+  assertEquals(listKey("/home/dev/x"), "·home·dev·x");
+  assertEquals(listKey("db:main"), "db·main");
+  assertEquals(listKey("a[0]"), "a·0·");
+  assertEquals(listKey("plain-name"), "plain-name");
+  // Identity survives: two different rows stay two different keys.
+  assertEquals(listKey("/a/b") === listKey("/a/c"), false);
+});
+
+Deno.test("modelLabel — a GGUF path is a name, not eighty characters of directory", () => {
+  assertEquals(
+    modelLabel(
+      "/home/dev/.lmstudio/models/unsloth/Qwen3.8-Flash-Next-GGUF/Qwen3.8-Flash-Next-UD-Q4_K_XL-00001-of-00004.gguf",
+    ),
+    "Qwen3.8-Flash-Next-UD-Q4_K_XL",
+  );
+  assertEquals(modelLabel("/models/llama-3-8b.gguf"), "llama-3-8b");
+  // Ollama and LM Studio already answer with names — untouched, or the label
+  // would differ from every other place the model is written down.
+  assertEquals(modelLabel("qwen3:8b"), "qwen3:8b");
+  assertEquals(
+    modelLabel("unsloth/deepseek-v4-flash-0731"),
+    "unsloth/deepseek-v4-flash-0731",
+  );
+  assertEquals(modelLabel(""), "");
+  // Never shortens to nothing.
+  assertEquals(modelLabel("/a/.gguf"), "/a/.gguf");
 });

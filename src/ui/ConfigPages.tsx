@@ -29,12 +29,13 @@ import {
 import { view } from "../cell/session.ts";
 import { workspace } from "../cell/workspace.ts";
 import type { HookInfo, Scope } from "../type/claude.ts";
-import { ago, tildePath } from "../lib/format.ts";
+import { ago, listKey, tildePath } from "../lib/format.ts";
 import {
   Banner,
   Empty,
   matches,
   Panel,
+  PathActions,
   Pill,
   Search,
   useNow,
@@ -137,7 +138,7 @@ function DefinitionList(props: { entries: Entry[]; icon: VNode }): VNode {
     <Panel flush title={`${props.entries.length} shown`}>
       <div class="rowlist">
         {props.entries.map((e) => (
-          <div key={`${e.scope}:${e.name}`} class="rowitem">
+          <div key={listKey(`${e.scope}:${e.name}`)} class="rowitem">
             <span class="rowitem__icon">{props.icon}</span>
             <span class="truncate">
               <span class="rowitem__title">{e.name}</span>
@@ -166,6 +167,7 @@ function DefinitionList(props: { entries: Entry[]; icon: VNode }): VNode {
             >
               <ScopePill scope={e.scope} />
               <LivePill live={e.live} />
+              {e.path && <PathActions path={e.path} label={e.name} />}
             </span>
           </div>
         ))}
@@ -250,7 +252,7 @@ export function McpPage(): VNode {
       <Panel flush title={`${shown.length} shown`}>
         <div class="rowlist">
           {shown.map((m) => (
-            <div key={m.name} class="rowitem">
+            <div key={listKey(m.name)} class="rowitem">
               <span class="rowitem__icon">{IconPlug({ size: 15 })}</span>
               <span class="truncate">
                 <span class="rowitem__title">{m.name}</span>
@@ -287,6 +289,7 @@ export function McpPage(): VNode {
                   : m.status
                   ? <Pill tone="danger">{m.status}</Pill>
                   : <Pill tone="warn">not in session</Pill>}
+                {m.path && <PathActions path={m.path} label={m.name} />}
               </span>
             </div>
           ))}
@@ -319,7 +322,7 @@ export function PluginsPage(): VNode {
       <Panel flush title={`${shown.length} shown`}>
         <div class="rowlist">
           {shown.map((p) => (
-            <div key={`${p.name}@${p.marketplace}`} class="rowitem">
+            <div key={listKey(`${p.name}@${p.marketplace}`)} class="rowitem">
               <span class="rowitem__icon">{IconPlugin({ size: 15 })}</span>
               <span class="truncate">
                 <span class="rowitem__title">{p.name}</span>
@@ -395,7 +398,7 @@ export function HooksPage(): VNode {
         {view().meta.version ? `on CLI ${view().meta.version}` : "not running"}.
       </Banner>
       {[...byEvent.entries()].map(([event, hooks]) => (
-        <Panel key={event} flush title={`${event} · ${hooks.length}`}>
+        <Panel key={listKey(event)} flush title={`${event} · ${hooks.length}`}>
           <div class="rowlist">
             {hooks.map((h, i) => (
               <div key={`${event}-${i}`} class="rowitem">
@@ -414,6 +417,12 @@ export function HooksPage(): VNode {
                 >
                   <Pill>{h.type}</Pill>
                   <ScopePill scope={h.scope} />
+                  {
+                    /* The file that declares it — the only answer to "how do I
+                      stop this from running", which is the question a hook page
+                      exists to answer. */
+                  }
+                  <PathActions path={h.path} label={h.event} />
                 </span>
               </div>
             ))}

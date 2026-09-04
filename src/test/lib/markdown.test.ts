@@ -7,6 +7,7 @@
 import { assertEquals } from "@std/assert";
 import {
   type Block,
+  type Inline,
   parseInline,
   parseMarkdown,
   safeHref,
@@ -154,4 +155,66 @@ Deno.test("pipe tables — the shape an agent reaches for constantly", () => {
   );
   // A lone pipe in prose is still prose.
   assertEquals(parseMarkdown("a | b").map((b) => b.t), ["p"]);
+});
+
+Deno.test("a bare URL in prose becomes a link", () => {
+  // The complaint this answers: an agent prints an address and the one thing
+  // anyone wants to do with it — open it — needed a select-and-copy.
+  const [p] = parseMarkdown("see https://status.claude.com for updates");
+  assertEquals(p.t, "p");
+  const link = (p as { v: Inline[] }).v.find((n) => n.t === "link");
+  assertEquals(link?.t === "link" && link.href, "https://status.claude.com");
+
+  // Trailing punctuation is the sentence's, not the address's.
+  const [q] = parseMarkdown("docs at https://example.dev/a.");
+  const l2 = (q as { v: Inline[] }).v.find((n) => n.t === "link");
+  assertEquals(l2?.t === "link" && l2.href, "https://example.dev/a");
+
+  // …but a bracket the URL opened is part of it.
+  const [w] = parseMarkdown("https://en.wikipedia.org/wiki/Foo_(bar) is it");
+  const l3 = (w as { v: Inline[] }).v.find((n) => n.t === "link");
+  assertEquals(
+    l3?.t === "link" && l3.href,
+    "https://en.wikipedia.org/wiki/Foo_(bar)",
+  );
+
+  // Wrapped in prose parentheses, the closer is prose.
+  const [b] = parseMarkdown("(see https://example.dev/x) ok");
+  const l4 = (b as { v: Inline[] }).v.find((n) => n.t === "link");
+  assertEquals(l4?.t === "link" && l4.href, "https://example.dev/x");
+
+  // A scheme-less host still links, over https — never a silent downgrade.
+  const [c] = parseMarkdown("try www.example.dev now");
+  const l5 = (c as { v: Inline[] }).v.find((n) => n.t === "link");
+  assertEquals(l5?.t === "link" && l5.href, "https://www.example.dev");
+});
+
+Deno.test("autolinking never touches code, labels or half-addresses", () => {
+  // Code is code: a URL in a sample must stay quotable text.
+  const [p] = parseMarkdown("run `curl https://example.dev/x` first");
+  const inCode = (p as { v: Inline[] }).v.some((n) => n.t === "link");
+  assertEquals(inCode, false);
+
+  const [f] = parseMarkdown("```\nhttps://example.dev\n```");
+  assertEquals(f.t, "pre");
+
+  // A written link keeps exactly one <a>: an autolinked label would nest one
+  // anchor inside another, which no browser renders sanely.
+  const [m] = parseMarkdown("[https://example.dev](https://example.dev)");
+  const outer = (m as { v: Inline[] }).v[0];
+  assertEquals(outer.t, "link");
+  assertEquals(
+    outer.t === "link" && outer.v.every((n) => n.t === "text"),
+    true,
+  );
+
+  // Not an address, and not a typo turned into one.
+  for (const text of ["https:// nothing", "shttps://example.dev", "http://x"]) {
+    const [q] = parseMarkdown(text);
+    assertEquals(
+      (q as { v: Inline[] }).v.some((n) => n.t === "link"),
+      false,
+      text,
+    );
+  }
 });

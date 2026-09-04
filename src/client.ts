@@ -7,6 +7,7 @@
 // format, and the output lands in the app's log files like everything else
 // (dep/aio/docs/basics/api-reference.md#logging).
 import { log } from "aio";
+import { stateShape } from "./lib/format.ts";
 import { connectCli } from "aio/server";
 
 const url = Deno.args[0] || "ws://localhost:8000/ws";
@@ -14,5 +15,7 @@ log.info("client", "connecting", { url });
 
 const app = connectCli(url);
 await app.ready;
-log.info("client", "connected", { state: app.state });
-app.subscribe(() => log.info("client", "state changed", { state: app.state }));
+log.info("client", "connected", { shape: stateShape(app.state) });
+app.subscribe(() =>
+  log.info("client", "state changed", { shape: stateShape(app.state) })
+);

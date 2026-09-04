@@ -15,8 +15,9 @@ import type { VNode } from "aio/air";
 import { catalog, memoryBytes } from "../cell/catalog.ts";
 import { view } from "../cell/session.ts";
 import type { MemoryFile } from "../type/claude.ts";
-import { ago, bytes, pct, tokens } from "../lib/format.ts";
-import { Empty, Meter, Panel, Pill, useNow } from "./parts.tsx";
+import { ago, bytes, listKey, pct, tildePath, tokens } from "../lib/format.ts";
+import { workspace } from "../cell/workspace.ts";
+import { Empty, Meter, Panel, PathActions, Pill, useNow } from "./parts.tsx";
 import { PageHead } from "./RunViews.tsx";
 import { IconFile, IconMemory, IconRefresh } from "./icons.tsx";
 
@@ -144,13 +145,20 @@ export function MemoryPage(): VNode {
                   >
                     <div class="rowlist">
                       {rows.map((f) => (
-                        <div key={f.path} class="rowitem">
+                        <div key={listKey(f.path)} class="rowitem">
                           <span class="rowitem__icon">
                             {IconFile({ size: 14 })}
                           </span>
                           <span class="truncate">
                             <span class="rowitem__title truncate">
                               {f.label}
+                            </span>
+                            <br />
+                            <span
+                              class="rowitem__detail truncate"
+                              title={f.path}
+                            >
+                              {tildePath(f.path, workspace.home)}
                             </span>
                             <div
                               style={{ marginTop: "5px", maxWidth: "420px" }}
@@ -162,10 +170,25 @@ export function MemoryPage(): VNode {
                               />
                             </div>
                           </span>
-                          <span class="rowitem__meta">
-                            {bytes(f.bytes)}
-                            <br />
-                            {f.modifiedAt ? ago(f.modifiedAt, now) : ""}
+                          <span
+                            class="rowitem__meta"
+                            style={{
+                              display: "flex",
+                              gap: "6px",
+                              alignItems: "center",
+                            }}
+                          >
+                            <span>
+                              {bytes(f.bytes)}
+                              <br />
+                              {f.modifiedAt ? ago(f.modifiedAt, now) : ""}
+                            </span>
+                            {
+                              /* Memory is the one thing on this page you would
+                                actually change after reading it — a CLAUDE.md
+                                that is too big is fixed by editing it. */
+                            }
+                            <PathActions path={f.path} label={f.label} />
                           </span>
                         </div>
                       ))}

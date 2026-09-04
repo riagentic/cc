@@ -9,13 +9,22 @@
  * asks of an agent, and the only other way to answer it is to scroll the whole
  * transcript.
  */
-import { type VNode } from "aio/air";
+import { useLocal, type VNode } from "aio/air";
 import { touchedPaths, tree } from "../cell/tree.ts";
 import { activeProject, workspace } from "../cell/workspace.ts";
 import type { Touch, TreeNode } from "../type/claude.ts";
-import { bytes, tildePath } from "../lib/format.ts";
+import { bytes, listKey, tildePath } from "../lib/format.ts";
 import { highlight } from "../lib/highlight.ts";
-import { Banner, Empty, Panel, Pill } from "./parts.tsx";
+import {
+  Banner,
+  Empty,
+  matches,
+  Panel,
+  PathActions,
+  Pill,
+  Search,
+  Segmented,
+} from "./parts.tsx";
 import { PageHead } from "./RunViews.tsx";
 import {
   IconEye,
@@ -56,18 +65,9 @@ const langOf = (name: string): string => {
   return dot > 0 ? LANGS[name.slice(dot + 1).toLowerCase()] ?? "" : "";
 };
 
-/**
- * A list key for a node.
- *
- * The path itself would be the obvious key — it is already the identity — but
- * the semantic surface addresses a keyed row as `Component[key]` within a path
- * whose segments are joined by `/`, so a key that contains `/` produces an
- * address nothing can parse back: `TreeRow[/home/dev/x/src]:SrcButton` is
- * ambiguous by construction. That makes every row unaddressable from `am
- * trigger` and from a UI test. Separators out, identity intact — `\u00b7` cannot
- * appear in a POSIX path segment, so the key stays unique.
- */
-const rowKey = (path: string): string => path.replaceAll("/", "\u00b7");
+/** A list key for a node — see {@link listKey}: a `/` in a key makes the row
+ *  unaddressable from `am trigger` and from every UI test. */
+const rowKey = listKey;
 
 function TreeRow(
   props: { node: TreeNode; touch: Touch | undefined; selected: boolean },
@@ -168,6 +168,11 @@ function FilePane(): VNode {
         <span style={{ flex: 1 }} />
         <Pill>{bytes(p.bytes)}</Pill>
         {p.truncated && <Pill tone="warn">truncated</Pill>}
+        {
+          /* A preview is for reading; the next thing after reading a file is
+            opening it. The pane knew the path and made you retype it. */
+        }
+        <PathActions path={path} label={name} />
       </div>
       <pre class="codeview">
         <code>
@@ -182,9 +187,67 @@ function FilePane(): VNode {
   );
 }
 
+/**
+ * Every file the session read or wrote, flat, newest tool call first.
+ *
+ * Deliberately not a tree: these paths are known exactly, from the tool calls
+ * themselves, and arranging them into a hierarchy would mean walking
+ * directories to find parents that nobody asked to see.
+ */
+function TouchedList(
+  props: { touched: Map<string, Touch>; query: string },
+): VNode {
+  const rows = [...props.touched.entries()]
+    .filter(([path]) => matches(props.query, path))
+    .sort((a, b) => a[0].localeCompare(b[0]));
+
+  if (rows.length === 0) {
+    return (
+      <Empty
+        icon={IconTree({ size: 20 })}
+        title={props.touched.size === 0
+          ? "Nothing touched yet"
+          : "Nothing matches"}
+        hint={props.touched.size === 0
+          ? "Files this session reads or writes appear here as it works, whether or not their folder is open."
+          : "Clear the filter to see every file this session has touched."}
+      />
+    );
+  }
+
+  return (
+    <>
+      {rows.map(([path, touch]) => (
+        <button
+          key={rowKey(path)}
+          type="button"
+          class={`treerow treerow--${touch}${
+            tree.selected === path ? " selected" : ""
+          }`}
+          style={{ paddingLeft: "10px" }}
+          title={path}
+          aria-label={path.slice(path.lastIndexOf("/") + 1)}
+          onClick={() => tree.select(path)}
+        >
+          <span class="treerow__icon">
+            {touch === "written" ? IconPencil({ size: 13 }) : IconEye({
+              size: 13,
+            })}
+          </span>
+          <span class="treerow__name truncate" title={path}>
+            {tildePath(path, workspace.home)}
+          </span>
+        </button>
+      ))}
+    </>
+  );
+}
+
 export function TreePage(): VNode {
   const project = activeProject();
   const touched = touchedPaths();
+  const [query, setQuery] = useLocal("");
+  const [mode, setMode] = useLocal<"tree" | "touched">("tree");
   const nodes = tree.nodes;
 
   // Counted over the whole session, not over the rows on screen: a file the
@@ -210,6 +273,21 @@ export function TreePage(): VNode {
     );
   }
 
+  // Filtering the flat list, which is only ever the open folders. Said out
+  // loud in the empty state rather than pretended otherwise: walking the whole
+  // repository to answer a keystroke is the cost this panel exists to avoid.
+  // A directory is kept whenever it is on the way to a match, so a hit three
+  // levels down does not appear parentless.
+  const shown = query.trim() === ""
+    ? nodes
+    : nodes.filter((n) =>
+      matches(query, n.name) ||
+      (n.dir && nodes.some((m) =>
+        !m.dir && m.path.startsWith(n.path + "/") &&
+        matches(query, m.name)
+      ))
+    );
+
   return (
     <div class="page">
       <PageHead
@@ -221,15 +299,46 @@ export function TreePage(): VNode {
             : ""
         }`}
         actions={
-          <button
-            type="button"
-            class="btn btn--ghost btn--sm btn--icon"
-            title="Re-read the tree from disk"
-            aria-label="Refresh tree"
-            onClick={() => tree.refresh()}
-          >
-            {IconRefresh({ size: 15 })}
-          </button>
+          <>
+            {
+              /* The overlay is the reason this page exists, and until now you
+                could only see it by guessing which folders to expand — a file
+                the session wrote three directories down was marked, invisibly.
+                Touched is that same set, flat, in one click. It needs no walk:
+                the paths come from the tool calls themselves. */
+            }
+            <Segmented
+              value={mode}
+              options={[
+                { id: "tree", label: "Tree" },
+                {
+                  id: "touched",
+                  name: "Touched",
+                  label: touched.size > 0
+                    ? `Touched · ${touched.size}`
+                    : "Touched",
+                },
+              ]}
+              onChange={setMode}
+            />
+            <Search
+              value={query}
+              onChange={setQuery}
+              label="Filter files"
+              placeholder={mode === "touched"
+                ? "Filter touched files…"
+                : "Filter open folders…"}
+            />
+            <button
+              type="button"
+              class="btn btn--ghost btn--sm btn--icon"
+              title="Re-read the tree from disk"
+              aria-label="Refresh tree"
+              onClick={() => tree.refresh()}
+            >
+              {IconRefresh({ size: 15 })}
+            </button>
+          </>
         }
       />
       {tree.error && (
@@ -239,17 +348,25 @@ export function TreePage(): VNode {
       )}
       <div class="treesplit">
         <div class="treepane">
-          {nodes.length === 0
+          {mode === "touched"
+            ? <TouchedList touched={touched} query={query} />
+            : shown.length === 0
             ? (
               <Empty
                 icon={IconTree({ size: 20 })}
-                title={tree.loading ? "Reading…" : "Nothing to show"}
+                title={tree.loading
+                  ? "Reading…"
+                  : query.trim()
+                  ? "Nothing matches"
+                  : "Nothing to show"}
                 hint={tree.loading
                   ? undefined
+                  : query.trim()
+                  ? "The filter only sees folders that are open — expand one, or clear it."
                   : "This directory is empty, or everything in it is filtered out."}
               />
             )
-            : nodes.map((n) => (
+            : shown.map((n) => (
               <TreeRow
                 key={rowKey(n.path)}
                 node={n}

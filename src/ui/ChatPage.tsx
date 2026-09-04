@@ -13,7 +13,7 @@ import { session, view } from "../cell/session.ts";
 import { workspace } from "../cell/workspace.ts";
 import type { Block, Message } from "../type/claude.ts";
 import { clock, duration, oneLine } from "../lib/format.ts";
-import { Banner, Empty } from "./parts.tsx";
+import { Banner, Elapsed, Empty } from "./parts.tsx";
 import {
   IconChevron,
   IconLogo,
@@ -396,17 +396,42 @@ function Composer(): VNode {
           onKeyDown={onKeyDown}
         />
         <div class="composer__bar">
-          <span class="composer__hint">
-            <span class="kbd">Enter</span> to send ·{" "}
-            <span class="kbd">Shift</span>+<span class="kbd">Enter</span>{" "}
-            for a new line
-            {history.length > 0 && (
-              <>
-                {" · "}
-                <span class="kbd">↑</span> for the last turn
-              </>
+          {
+            /* A turn in flight gets the clock, not just the word "working".
+              The CLI goes silent while the API makes it retry — a 529 costs
+              minutes with nothing on the wire — and a static "Claude is
+              working" through three of those is indistinguishable from a dead
+              app. The strip has carried this figure all along; this is where
+              the eyes are while waiting. */
+          }
+          {working
+            ? (
+              <span
+                class="composer__hint"
+                title="Time since this turn was sent. The CLI says nothing while the API retries, so a long wait here is usually upstream, not a hang."
+              >
+                Working{" "}
+                <Elapsed startedAt={view().turnStartedAt} fallbackMs={0} />
+                {view().queuedTurns > 0 &&
+                  ` · ${view().queuedTurns} turn${
+                    view().queuedTurns === 1 ? "" : "s"
+                  } queued behind it`}
+              </span>
+            )
+            : (
+              <span class="composer__hint">
+                <span class="kbd">Enter</span> to send ·{" "}
+                <span class="kbd">Shift</span>+<span class="kbd">Enter</span>
+                {" "}
+                for a new line
+                {history.length > 0 && (
+                  <>
+                    {" · "}
+                    <span class="kbd">↑</span> for the last turn
+                  </>
+                )}
+              </span>
             )}
-          </span>
           {working && (
             <button
               type="button"

@@ -3,8 +3,9 @@
  * user drives it, with no DOM selectors (dep/aio/docs/testing/ui-testing.md).
  *
  * These run headless under happy-dom, so they never open a window and cannot
- * steal focus; the Xephyr rule for UI runs applies to the Electron app itself,
- * which is exercised separately.
+ * steal focus, which is what the katana Xephyr rule exists to guarantee. There
+ * is no separate windowed harness; launching the real Electron window is a
+ * manual `deno task dev` / `am` check, not part of this suite.
  *
  * No Claude Code process is spawned: the session cell is driven with the same
  * captured `stream-json` events the protocol tests use, so a full turn —
@@ -16,6 +17,7 @@ import App from "../../App.tsx";
 import { session, view } from "../../cell/session.ts";
 import type { ToolRun } from "../../type/claude.ts";
 import { workspace } from "../../cell/workspace.ts";
+import { listKey } from "../../lib/format.ts";
 import { loops } from "../../cell/loops.ts";
 import { tree } from "../../cell/tree.ts";
 import { catalog } from "../../cell/catalog.ts";
@@ -266,6 +268,23 @@ testUI(App, "code blocks in the chat are syntax coloured", async (ui) => {
   assertEquals(html.includes("greet"), true);
 });
 
+testUI(
+  App,
+  "a turn in flight shows a clock and the queue behind it",
+  async (ui) => {
+    await open(ui);
+    session.ingest(init);
+    await session.send("hi");
+    // "Claude is working" alone read the same at two seconds and at three
+    // minutes — and the API can hold a turn for minutes with nothing on the
+    // wire, which is exactly when a user decides the app is broken.
+    await ui.waitFor(() => ui.html().includes("Working"));
+
+    await session.send("and another");
+    await ui.waitFor(() => ui.html().includes("queued behind it"));
+  },
+);
+
 /* ── the status strip: the numbers the kata asks for ──────────────────────── */
 
 testUI(
@@ -274,7 +293,10 @@ testUI(
   async (ui) => {
     await open(ui);
     session.ingest(init);
-    await ui.waitFor(() => ui.html().includes("claude-sonnet-5"));
+    // The family, not the id the CLI reports: "claude-sonnet-5" is what the
+    // wire says, "Sonnet" is what the picker calls it and what the strip has
+    // to name if choosing from that picker is to change what is written here.
+    await ui.waitFor(() => ui.html().includes("Sonnet"));
     const html = () => ui.html();
 
     assertEquals(
@@ -950,3 +972,240 @@ testUI(App, "memory is measured without a session", async (ui) => {
     await Deno.remove(dir, { recursive: true });
   }
 });
+
+testUI(
+  App,
+  "deleting a gone project's history works from the page",
+  async (ui) => {
+    await open(ui);
+    const { storage } = await import("../../cell/storage.ts");
+    const home = await Deno.makeTempDir();
+    const before = Deno.env.get("HOME");
+    Deno.env.set("HOME", home);
+    try {
+      // One project whose folder is gone: its transcript names a cwd that does
+      // not exist, which is the only state the page offers deletion for.
+      const dir = `${home}/.claude/projects/-gone-project`;
+      await Deno.mkdir(dir, { recursive: true });
+      await Deno.writeTextFile(
+        `${dir}/aaaaaaaa-1111-2222-3333-444444444444.jsonl`,
+        JSON.stringify({ type: "user", cwd: `${home}/code/gone` }) + "\n",
+      );
+      await storage.refresh();
+
+      ui.StorageLink.click();
+      await ui.waitFor(() => ui.html().includes("folder gone"));
+
+      // Addressed by the sanitised key, not the raw path: a "/" in a keyed
+      // list key makes the row ambiguous in the semantic surface, whose own
+      // segments are joined by "/". `listKey` is the one place that decides.
+      ui.find("ProjectRow", listKey(dir)).DeleteHistory.click();
+      await ui.waitFor(() => !ui.html().includes("folder gone"));
+      // The deletion is real: the transcript directory is off the disk, not
+      // merely off the screen.
+      assertEquals(
+        await Deno.stat(dir).then(() => true).catch(() => false),
+        false,
+      );
+    } finally {
+      if (before === undefined) Deno.env.delete("HOME");
+      else Deno.env.set("HOME", before);
+      await Deno.remove(home, { recursive: true });
+    }
+  },
+);
+
+/* ── the strip switches what it reports ───────────────────────────────────── */
+
+testUI(
+  App,
+  "the model named on the strip is switched from the strip",
+  async (ui) => {
+    await open(ui);
+    session.ingest(init);
+    session.ingest({ type: "system", subtype: "status", status: "requesting" });
+    await ui.waitFor(() => ui.html().includes("Sonnet"));
+
+    // The complaint this answers: a control surface that shows which model is
+    // active and makes you walk to Settings to change it.
+    ui.ModelButton.click();
+    await ui.waitFor(() => ui.html().includes("Deepest reasoning"));
+    ui.OpusButton.click();
+    await ui.expectCell(workspace, (w) => active(w)?.model === "opus");
+
+    // …and the strip says so. Writing the *reported* model here meant the
+    // switch changed nothing a user could see — the one bug that makes a
+    // working control look broken.
+    await ui.waitFor(() => ui.html().includes("Opus"));
+
+    // The switch lands on the next turn, so while the session's last word was
+    // Sonnet the gap is marked rather than papered over — the strip names the
+    // choice and, next to it, what the process is still answering out of.
+    await ui.waitFor(() => ui.html().includes("on Sonnet"));
+
+    // …and the popover closes on the choice, rather than sitting over the page.
+    await ui.waitFor(() => !ui.html().includes("Deepest reasoning"));
+  },
+);
+
+testUI(
+  App,
+  "effort and permission mode switch from the strip too",
+  async (ui) => {
+    await open(ui);
+    session.ingest(init);
+    await ui.settle();
+
+    ui.EffortButton.click();
+    await ui.waitFor(() => ui.html().includes("Everything the model has"));
+    ui.MaxButton.click();
+    await ui.expectCell(workspace, (w) => active(w)?.effort === "max");
+
+    ui.PermissionModeButton.click();
+    await ui.waitFor(() => ui.html().includes("Research and plan"));
+    ui.PlanButton.click();
+    await ui.expectCell(workspace, (w) => active(w)?.permissionMode === "plan");
+  },
+);
+
+testUI(
+  App,
+  "a strip menu closes on Escape and on a click outside",
+  async (ui) => {
+    await open(ui);
+    ui.EffortButton.click();
+    await ui.waitFor(() => ui.html().includes("Fastest, cheapest answers"));
+    // Anywhere else on the page dismisses it — a popover that only closes on its
+    // own trigger is one that gets left open.
+    ui.window.document.dispatchEvent(
+      new ui.window.MouseEvent("pointerdown", { bubbles: true }),
+    );
+    await ui.waitFor(() => !ui.html().includes("Fastest, cheapest answers"));
+  },
+);
+
+/* ── settings are searchable ──────────────────────────────────────────────── */
+
+testUI(App, "Settings filters down to the panel you asked for", async (ui) => {
+  await open(ui);
+  ui.SettingsLink.click();
+  await ui.waitFor(() => ui.html().includes("Allowed directories"));
+  // Everything is there before anything is typed.
+  assertEquals(ui.html().includes("Appearance"), true);
+
+  ui.FilterSettingsInput.setValue("theme");
+  await ui.waitFor(() => !ui.html().includes("Allowed directories"));
+  assertEquals(ui.html().includes("Appearance"), true);
+
+  // A word that is not in any title still finds the panel it belongs to —
+  // nobody searches for "Permissions" when what they want is "bypass".
+  ui.FilterSettingsInput.setValue("bypass");
+  await ui.waitFor(() => ui.html().includes("Prompts come to you"));
+  assertEquals(ui.html().includes("Appearance"), false);
+
+  // And a filter is never a way to end up on a blank page with no explanation.
+  ui.FilterSettingsInput.setValue("zzzz");
+  await ui.waitFor(() => ui.html().includes("Nothing matches"));
+  ui.ClearTheFilterButton.click();
+  await ui.waitFor(() => ui.html().includes("Allowed directories"));
+});
+
+/* ── a row that names a file can act on it ────────────────────────────────── */
+
+testUI(
+  App,
+  "the Tree lists what the session touched, in one click",
+  async (ui) => {
+    await open(ui);
+    session.ingest(init);
+    // Two files, deep inside folders nobody has expanded — which is exactly the
+    // case the tree overlay could not answer before: the marks were there, on
+    // rows that were not.
+    session.ingest(
+      assistantTool("t1", "Read", { file_path: "/p/src/deep/a.ts" }),
+    );
+    session.ingest(
+      assistantTool("t2", "Write", { file_path: "/p/src/deep/b.ts" }),
+    );
+    await ui.settle();
+
+    ui.TreeLink.click();
+    await ui.waitFor(() => ui.html().includes("Touched"));
+    ui.TouchedButton.click();
+    await ui.waitFor(() => ui.html().includes("/p/src/deep/a.ts"));
+    assertEquals(ui.html().includes("/p/src/deep/b.ts"), true);
+
+    // …and the filter narrows that list without a directory walk.
+    ui.FilterFilesInput.setValue("b.ts");
+    await ui.waitFor(() => !ui.html().includes("/p/src/deep/a.ts"));
+    assertEquals(ui.html().includes("/p/src/deep/b.ts"), true);
+  },
+);
+
+/* ── keyboard ─────────────────────────────────────────────────────────────── */
+
+testUI(
+  App,
+  "Mod+1..9 switches project, and stops at the end of the list",
+  async (ui) => {
+    await open(ui);
+    const a = await Deno.makeTempDir();
+    const b = await Deno.makeTempDir();
+    try {
+      await workspace.addProject(a);
+      await workspace.addProject(b);
+      await ui.settle();
+      const first = workspace.projects[0].id;
+      const second = workspace.projects[1].id;
+
+      ui.window.document.dispatchEvent(
+        new ui.window.KeyboardEvent("keydown", {
+          key: "1",
+          ctrlKey: true,
+          bubbles: true,
+        }),
+      );
+      await ui.expectCell(workspace, (w) => w.activeId === first);
+
+      ui.window.document.dispatchEvent(
+        new ui.window.KeyboardEvent("keydown", {
+          key: "2",
+          ctrlKey: true,
+          bubbles: true,
+        }),
+      );
+      await ui.expectCell(workspace, (w) => w.activeId === second);
+
+      // Past the end of the list is a no-op, never a wrap-around: a shortcut
+      // that lands somewhere unexpected is worse than one that does nothing.
+      ui.window.document.dispatchEvent(
+        new ui.window.KeyboardEvent("keydown", {
+          key: "9",
+          ctrlKey: true,
+          bubbles: true,
+        }),
+      );
+      await ui.settle();
+      assertEquals(workspace.activeId, second);
+    } finally {
+      await Deno.remove(a, { recursive: true });
+      await Deno.remove(b, { recursive: true });
+    }
+  },
+);
+
+testUI(
+  App,
+  "Escape closes a strip menu from the trigger it was opened with",
+  async (ui) => {
+    await open(ui);
+    ui.EffortButton.click();
+    await ui.waitFor(() => ui.html().includes("Everything the model has"));
+    // Focus is still on the trigger right after a click, which is the one place
+    // a popover-scoped key handler could not see the key.
+    ui.window.document.dispatchEvent(
+      new ui.window.KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+    );
+    await ui.waitFor(() => !ui.html().includes("Everything the model has"));
+  },
+);

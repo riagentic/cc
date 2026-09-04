@@ -42,6 +42,11 @@ type WorkspaceState = {
   cliVersion: string;
   cliMissing: boolean;
   error: string | null;
+  /** Forget a project by itself once its folder is really gone. See the state
+   *  declaration on the cell for what "really" means here. */
+  autoForget: boolean;
+  /** This session's undo buffer for removed projects. */
+  forgotten: Project[];
 };
 
 /** What a project falls back to before anything has configured it. */
@@ -54,9 +59,18 @@ const FALLBACK: ProjectSettings = {
 };
 
 /** A path as typed: trimmed, and without the trailing separator that would make
- *  `/srv/app` and `/srv/app/` two different projects. `/` keeps its slash. */
-const tidy = (path: string): string =>
-  path.trim().replace(/[/\\]+$/, "") || path.trim();
+ *  `/srv/app` and `/srv/app/` two different projects. `/` keeps its slash.
+ *
+ *  `unknown`, not `string`: these paths arrive from the control plane, where the
+ *  type signature is a promise nobody enforces — `am dispatch workspace:addProject`
+ *  with no argument hands the method `undefined`, and a method that throws on
+ *  the way in leaves the caller with a stack trace instead of the sentence that
+ *  says what to type. Anything that is not a string is no path at all, and both
+ *  callers already answer the empty string with exactly that sentence. */
+const tidy = (path: unknown): string =>
+  typeof path === "string"
+    ? path.trim().replace(/[/\\]+$/, "") || path.trim()
+    : "";
 
 /* ── plain helpers ────────────────────────────────────────────────────────────
  *
@@ -67,9 +81,28 @@ const tidy = (path: string): string =>
  * before the add. Plain functions take the draft and see it as it is.
  */
 
+/**
+ * The state as it is NOW, for a cell whose reads are otherwise pinned at method
+ * entry.
+ *
+ * Every function below re-reads the disk and then compares what it found with
+ * what the list says. Two of those passes overlap by construction — boot runs
+ * one, the 20-second folder watch runs another, the Refresh button a third —
+ * and under snapshot isolation the second one to commit is REFUSED, with
+ * "`missing` was changed by another action while this method awaited". Which
+ * means the honesty check for every project fails because another honesty
+ * check just succeeded.
+ *
+ * `$live` is the sanctioned way out: reads through it are current by
+ * construction so they never count as stale, and writes still join the atomic
+ * commit (dep/aio/docs/state/transactional-methods.md §4).
+ */
+type Draft = WorkspaceState & Partial<MethodDraftMeta<WorkspaceState>>;
+const now = (s: Draft): WorkspaceState => s.$live ?? s;
+
 /** Re-read what the disk says about one project: does it still exist, and what
  *  branch is it on. Both are facts about *now*, not about when it was added. */
-async function probe(s: WorkspaceState, id: string): Promise<void> {
+async function probe(s: Draft, id: string): Promise<void> {
   const io = await import("./claude.server.ts");
   const found = s.projects.find((p) => p.id === id);
   if (!found) return;
@@ -78,17 +111,21 @@ async function probe(s: WorkspaceState, id: string): Promise<void> {
   const exists = await io.isDirectory(path);
   const git = exists ? await io.gitInfo(path) : { branch: null, dirty: false };
 
-  // Re-found after the awaits: the list can be edited while git runs.
-  const target = s.projects.find((p) => p.id === id);
+  // Re-found after the awaits, in CURRENT state: the list can be edited while
+  // git runs, and another probe may have written the same answer already.
+  const target = now(s).projects.find((p) => p.id === id);
   if (!target) return;
   // Same reason as in `probeAll`: an unchanged value written anyway is a write,
   // and these two passes overlap whenever a switch lands during boot.
-  if (target.missing !== !exists) target.missing = !exists;
+  if (target.missing !== !exists) {
+    target.missing = !exists;
+    // Warn on the *transition* to missing, not on every probe: a project the
+    // user was told is gone and chose to keep would otherwise log a warning
+    // every 20 seconds, forever.
+    if (!exists) log.warn("workspace", "project directory is gone", { path });
+  }
   if (target.branch !== git.branch) target.branch = git.branch;
   if (target.dirty !== git.dirty) target.dirty = git.dirty;
-  if (!exists) {
-    log.warn("workspace", "project directory is gone", { path });
-  }
 }
 
 /**
@@ -103,40 +140,109 @@ async function probe(s: WorkspaceState, id: string): Promise<void> {
  * concurrent add would abort — taking the honesty check for every *other*
  * project down with it.
  */
-async function probeAll(s: WorkspaceState): Promise<void> {
+async function probeAll(s: Draft): Promise<void> {
   const io = await import("./claude.server.ts");
   const targets = s.projects.map((p) => ({ id: p.id, path: p.path }));
   const activeId = s.activeId;
+
+  const autoForget = s.autoForget;
 
   // ── gather ──
   const checks = await Promise.all(
     targets.map(async (t) => [t.id, await io.isDirectory(t.path)] as const),
   );
   const gone = new Map(checks);
+  // For the ones that are not there, is their *parent* still there? That is
+  // the whole difference between "this folder was deleted" and "the disk it
+  // lived on is not mounted" — and it is the only question that makes
+  // forgetting a project safe to do without asking.
+  const parents = new Map(
+    await Promise.all(
+      targets
+        .filter((t) => gone.get(t.id) === false)
+        .map(async (t) =>
+          [t.id, await io.isDirectory(parentOf(t.path))] as const
+        ),
+    ),
+  );
   const active = targets.find((t) => t.id === activeId);
   const git = active && gone.get(activeId)
     ? await io.gitInfo(active.path)
     : null;
 
   // ── write ──
-  for (const p of s.projects) {
+  const live = now(s);
+  for (const p of live.projects) {
     const exists = gone.get(p.id);
     if (exists === undefined) continue; // added while we were gathering
     // Written only when it actually changes. Every path that re-checks the disk
     // computes the same answer, so an unconditional assignment is a *write* of
     // an unchanged value — which is still a write, and still collides with the
     // other pass that just made it. Almost every probe finds nothing new.
-    if (p.missing !== !exists) p.missing = !exists;
-    if (!exists) {
-      log.warn("workspace", "project directory is gone", { path: p.path });
+    // Warn on the transition to missing only — an already-missing project the
+    // user kept must not re-warn on every probe (see `probeOne`).
+    if (p.missing !== !exists) {
+      p.missing = !exists;
+      if (!exists) {
+        log.warn("workspace", "project directory is gone", { path: p.path });
+      }
     }
   }
+  if (autoForget) {
+    const doomed = live.projects.filter((p) =>
+      gone.get(p.id) === false && parents.get(p.id) === true
+    );
+    if (doomed.length > 0) forget(live, doomed.map((p) => p.id));
+  }
   if (git && activeId) {
-    const target = s.projects.find((p) => p.id === activeId);
+    const target = live.projects.find((p) => p.id === activeId);
     if (target) {
       if (target.branch !== git.branch) target.branch = git.branch;
       if (target.dirty !== git.dirty) target.dirty = git.dirty;
     }
+  }
+}
+
+/** The directory one level up. Lexical on purpose: it is asked about a path
+ *  that no longer exists, so there is nothing to resolve. */
+function parentOf(path: string): string {
+  const cut = path.replace(/[/\\]+$/, "").lastIndexOf("/");
+  return cut > 0 ? path.slice(0, cut) : "/";
+}
+
+/**
+ * Remove projects, keeping them where the user can get them back.
+ *
+ * Every removal in this cell goes through here — the sweep, the button on a
+ * tab, "Remove gone" — so there is exactly one place that decides what happens
+ * to the selection afterwards, and exactly one undo buffer. Removing a project
+ * never touches the folder or Claude Code's transcripts for it; it forgets a
+ * row, which is why one click is enough and a confirmation would be theatre.
+ */
+function forget(s: WorkspaceState, ids: string[]): void {
+  // Snapshotted, not referenced. `s.projects` is overwritten two lines down,
+  // and a live draft reference taken before that silently resolves to the NEW
+  // array — which the runtime refuses outright rather than let it read as a
+  // project that is still there (cell-impl.ts `throwStaleCapture`).
+  const doomed = s.projects.filter((p) => ids.includes(p.id)).map((p) => ({
+    ...p,
+    allowedDirs: [...p.allowedDirs],
+  }));
+  if (doomed.length === 0) return;
+  // Newest first, and capped: this is an undo, not a history.
+  s.forgotten = [...doomed, ...s.forgotten].slice(0, 20);
+  s.projects = s.projects.filter((p) => !ids.includes(p.id));
+  log.info("workspace", "projects forgotten", {
+    count: doomed.length,
+    paths: doomed.map((p) => p.path),
+  });
+  released(doomed.map((p) => p.id));
+  if (ids.includes(s.activeId)) {
+    // Prefer a project that is actually there — moving to another dead one
+    // would just carry the dead end along the list.
+    s.activeId = (s.projects.find((p) => !p.missing) ?? s.projects[0])?.id ??
+      "";
+    reprojected(s.activeId);
   }
 }
 
@@ -154,7 +260,7 @@ async function probeAll(s: WorkspaceState): Promise<void> {
  * a race this app creates itself.
  */
 async function applyAddProject(
-  s: WorkspaceState,
+  s: Draft,
   path: string,
 ): Promise<boolean> {
   const io = await import("./claude.server.ts");
@@ -186,16 +292,26 @@ async function applyAddProject(
   // The list is read *here*, after the awaits, not before them: whichever add
   // committed while this one was gathering is part of the answer to "is this
   // project already known".
-  const existing = s.projects.find((p) => p.path === clean);
+  //
+  // …and through `$live`, for the same reason `probe` does. Reading the pinned
+  // draft after an await is what the transaction guard refuses at commit time
+  // — "s.projects was changed by another action while this method awaited" —
+  // and these adds race by construction: boot adds the launch directory on a
+  // macrotask, with an Add field already on screen. Gather-then-write kept the
+  // *awaits* out of the write phase; it did not make the read current, so the
+  // second of two concurrent adds was still refused. `$live` reads are current
+  // by construction and its writes still join the atomic commit.
+  const live = now(s);
+  const existing = live.projects.find((p) => p.path === clean);
   if (existing) {
     if (existing.branch !== git.branch) existing.branch = git.branch;
     if (existing.dirty !== git.dirty) existing.dirty = git.dirty;
     if (existing.missing) existing.missing = false;
-    s.activeId = existing.id;
+    live.activeId = existing.id;
     return true;
   }
   const id = crypto.randomUUID();
-  s.projects.push({
+  live.projects.push({
     id,
     path: clean,
     name: baseName(clean),
@@ -207,9 +323,9 @@ async function applyAddProject(
     // this directory. Only values the settings files actually name win, so a
     // project with no configuration of its own inherits the seed rather than
     // an empty string that would reach the argv as `--model ""`.
-    ...settingsFor(s.defaults, cli),
+    ...settingsFor(live.defaults, cli),
   });
-  s.activeId = id;
+  live.activeId = id;
   return true;
 }
 
@@ -251,6 +367,55 @@ const activeDraft = (s: WorkspaceState): Project | null =>
  * than three walks of all of them. The session swap is not debounced — it is a
  * pure move between two slots, and the transcript must land immediately.
  */
+/**
+ * A project has left the list — tell every cell that keeps state keyed by it.
+ *
+ * Three separate leaks, all of them found by looking at a running app's state
+ * rather than at the code: a removed project's `claude` kept running with
+ * nothing left that could reach it; its local-engine configuration stayed in
+ * persisted state forever; and its loops became rows that could never fire and
+ * were not shown on any page, because the loops page only lists the *active*
+ * project's.
+ *
+ * Fire-and-forget, and dynamic, for the same reason as {@link reprojected}: the
+ * dependency runs one way statically, and a slow teardown must not hold up the
+ * click.
+ */
+function released(ids: string[]): void {
+  if (ids.length === 0) return;
+  void import("./session.ts").then((m) => m.session.release(ids)).catch((e) => {
+    log.warn("workspace", "could not end a removed project's session", {
+      error: e instanceof Error ? e.message : String(e),
+    });
+  });
+  void import("./local.ts").then((m) => m.local.forgetProjects(ids)).catch(
+    () => {},
+  );
+  void import("./loops.ts").then((m) => m.loops.forgetProjects(ids)).catch(
+    () => {},
+  );
+}
+
+/**
+ * The same sweep, over the whole list — for state written before
+ * {@link released} existed, and anything a crash orphaned.
+ *
+ * **Not run at boot, and that is the point.** The sweep asks "is this id still
+ * a project", and at boot the answer is a moving target: the list is loaded,
+ * then the launch directory is added, then a user who is already looking at
+ * the window adds one of their own. Every placement of an automatic sweep in
+ * that sequence deleted the configuration of a project that had just been
+ * created — measured, repeatedly, as a test that failed one run in five.
+ *
+ * So it is a button instead. Removals going forward are exact ({@link
+ * released}); this is for the leftovers, run by somebody who can see the list
+ * it is being compared against.
+ */
+export function pruneUnknown(): void {
+  void import("./local.ts").then((m) => m.local.pruneUnknown()).catch(() => {});
+  void import("./loops.ts").then((m) => m.loops.pruneUnknown()).catch(() => {});
+}
+
 function reprojected(id: string): void {
   // The conversation first: it is the thing on screen. `view()` resolves by key
   // so nothing renders the wrong transcript while this is in flight, but the
@@ -276,11 +441,32 @@ export const workspace = cell("workspace", {
     cliVersion: "",
     cliMissing: false,
     error: null as string | null,
+    /**
+     * Drop a project's tab by itself once its folder is really gone.
+     *
+     * On by default, because a tab for a directory that no longer exists is a
+     * dead row you cannot click and have to tidy up by hand — and the app
+     * already knows. What makes it safe is the *test*, not the timer: a
+     * project is forgotten only when its parent directory is still there
+     * (see `vanished`), so an unmounted drive or a locked home keeps every
+     * project it holds. And it is undoable — see `forgotten`.
+     */
+    autoForget: true,
+    /**
+     * Projects removed since the app started — by the sweep above, or by the
+     * user clicking remove. The undo buffer, so removing a tab is a decision
+     * you can take back rather than one you have to retype a path to reverse.
+     *
+     * Not persisted: an undo offer that survives a restart is an offer nobody
+     * asked for about a decision they made last week.
+     */
+    forgotten: [] as Project[],
   },
 
   // Everything here is a user choice worth surviving a restart. `error` is not:
-  // a stale error banner on boot is a lie about the current state.
-  persist: { exclude: ["error"] },
+  // a stale error banner on boot is a lie about the current state. Neither is
+  // `forgotten`: it is this session's undo buffer.
+  persist: { exclude: ["error", "forgotten"] },
 
   /**
    * v1 kept `model`, `permissionMode`, `effort`, `allowedDirs` and
@@ -293,9 +479,18 @@ export const workspace = cell("workspace", {
    * project that has none of its own, so an upgrade lands on exactly the
    * configuration the user last chose, now attached to each of their codebases.
    */
-  version: 2,
+  version: 3,
   onMigrate(state, from) {
-    if (from >= 2) return state;
+    // v3 added `autoForget` (and the unpersisted `forgotten`). Stored state
+    // from v2 simply has no such key, and aio refuses to boot on a shape it
+    // does not recognise — so it is filled in here rather than left to the
+    // first write to discover.
+    if (from >= 2) {
+      return {
+        autoForget: true,
+        ...(state as unknown as Record<string, unknown>),
+      } as typeof state;
+    }
     const old = state as unknown as Record<string, unknown>;
     const seed: ProjectSettings = {
       model: typeof old.model === "string" && old.model
@@ -328,6 +523,7 @@ export const workspace = cell("workspace", {
     } = old;
     return {
       ...(rest as unknown as typeof state),
+      autoForget: true,
       defaults: seed,
       projects: (state.projects ?? []).map((p) => ({ ...seed, ...p })),
     };
@@ -354,21 +550,17 @@ export const workspace = cell("workspace", {
     /** Discover the environment once at boot: home, CLI version, whether every
      *  remembered project still exists, and — on a first run — the directory the
      *  app was launched from as project #1. */
-    async bootstrap(s: WorkspaceState) {
+    async bootstrap(_s: WorkspaceState) {
       const io = await import("./claude.server.ts");
-      s.home = io.homeDir();
       const version = await io.version();
-      s.cliVersion = version ?? "";
-      s.cliMissing = version === null;
-      if (version === null) {
-        log.error(
-          "workspace",
-          "Claude Code CLI not found — set CLAUDE_BIN or install it",
-          {},
-        );
-      } else {
-        log.info("workspace", "Claude Code CLI found", { version });
-      }
+      // Written through a SYNC method, not through this method's own draft.
+      // Boot is the longest-running method in the app — a CLI version probe, a
+      // stat per project, git — and a draft held across all of that publishes
+      // the state boot ENTERED with when it finally commits, which is an empty
+      // project list. A project the user adds while the window is already up
+      // and booting simply disappeared. (The same shape as `local.detect`; see
+      // its note.)
+      await workspace.setEnvironment(io.homeDir(), version); // aiol-ok
 
       // The three steps below are *dispatched*, not inlined, and that is the
       // whole point: each stats the disk and shells out to git, and one
@@ -394,6 +586,23 @@ export const workspace = cell("workspace", {
       }
 
       await workspace.selectUsable(); // aiol-ok: orchestration
+    },
+
+    /** What boot learned about the machine. Sync, so it commits on its own
+     *  rather than riding on the end of the longest method in the app. */
+    setEnvironment(s: WorkspaceState, home: string, version: string | null) {
+      s.home = home;
+      s.cliVersion = version ?? "";
+      s.cliMissing = version === null;
+      if (version === null) {
+        log.error(
+          "workspace",
+          "Claude Code CLI not found — set CLAUDE_BIN or install it",
+          {},
+        );
+      } else {
+        log.info("workspace", "Claude Code CLI found", { version });
+      }
     },
 
     /** Point the app at a project that is actually there.
@@ -434,29 +643,65 @@ export const workspace = cell("workspace", {
      * size in front of you.
      */
     removeMissingProjects(s: WorkspaceState) {
-      const doomed = s.projects.filter((p) => p.missing).map((p) => p.id);
-      if (doomed.length === 0) return;
-      s.projects = s.projects.filter((p) => !p.missing);
-      log.info("workspace", "removed projects whose folder is gone", {
-        count: doomed.length,
-      });
-      if (doomed.includes(s.activeId)) {
-        s.activeId = s.projects[0]?.id ?? "";
-        reprojected(s.activeId); // aiol-ok: read of the line above, by design
-      }
+      forget(s, s.projects.filter((p) => p.missing).map((p) => p.id)); // aiol-ok
     },
 
     removeProject(s: WorkspaceState, id: string) {
-      s.projects = s.projects.filter((p) => p.id !== id);
-      if (s.activeId === id) {
-        // Prefer a project that is actually there — selecting another dead one
-        // would just move the same dead end along the list.
+      forget(s, [id]); // aiol-ok: `forget` owns the re-selection, by design
+    },
+
+    /**
+     * Put back everything removed since the app started.
+     *
+     * The reason a tab can be closed with one click. Order is restored too —
+     * a project goes back where it was, not onto the end — because the dock is
+     * a list people navigate by position.
+     */
+    undoForget(s: WorkspaceState) {
+      if (s.forgotten.length === 0) return;
+      const back = [...s.forgotten].reverse();
+      s.forgotten = [];
+      const known = new Set(s.projects.map((p) => p.path));
+      for (const p of back) {
+        if (known.has(p.path)) continue;
+        known.add(p.path);
+        s.projects.push(p);
+      }
+      s.projects.sort((a, b) => a.addedAt - b.addedAt);
+      if (!s.projects.some((p) => p.id === s.activeId)) {
         s.activeId = (s.projects.find((p) =>
           !p.missing
         ) ?? s.projects[0])?.id ??
           "";
         reprojected(s.activeId); // aiol-ok: read of the line above, by design
       }
+      log.info("workspace", "forgotten projects restored", {
+        count: back.length,
+      });
+    },
+
+    /** Stop offering the undo — the removals are accepted. */
+    clearForgotten(s: WorkspaceState) {
+      s.forgotten = [];
+    },
+
+    /**
+     * Open a file with the desktop's own opener.
+     *
+     * On `workspace` because it is the cell that already owns the process side
+     * of the app, and because every page that needs it — Skills, Commands,
+     * Hooks, MCP, Memory, Tree — reads a different cell. A failure lands in the
+     * same error banner as everything else here rather than in a console.
+     */
+    async openPath(s: WorkspaceState, path: string) {
+      const io = await import("./claude.server.ts");
+      const why = await io.openPath(path);
+      s.error = why;
+    },
+
+    /** Whether a project whose folder is really gone drops out by itself. */
+    setAutoForget(s: WorkspaceState, on: boolean) {
+      s.autoForget = on === true;
     },
 
     /**
@@ -487,7 +732,7 @@ export const workspace = cell("workspace", {
     },
 
     /** Re-read git and existence for the active project. */
-    async refreshGit(s: WorkspaceState) {
+    async refreshGit(s: Draft) {
       await probe(s, s.activeId);
     },
 
@@ -495,7 +740,7 @@ export const workspace = cell("workspace", {
      *  Settings page, and whenever a spawn fails on a missing directory — the
      *  list is where the remedy is, so it must be honest by the time you get
      *  there. */
-    async refreshProjects(s: WorkspaceState) {
+    async refreshProjects(s: Draft) {
       await probeAll(s);
     },
 
@@ -592,6 +837,9 @@ export const workspace = cell("workspace", {
  *  A plain accessor rather than a `selectors:` entry on purpose: bound
  *  selectors are a server-side surface, while this reads the cell's reactive
  *  getters and so auto-tracks in the UI too. One definition, both sides. */
+/** Projects removed since the app started, newest first — the undo offer. */
+export const forgottenProjects = (): Project[] => workspace.forgotten;
+
 export const activeProject = (): Project | null =>
   workspace.projects.find((p) => p.id === workspace.activeId) ?? null;
 

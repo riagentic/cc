@@ -152,6 +152,24 @@ export function tailPath(path: string, max = 90): string {
   return `…${tail.slice(from).join("")}`;
 }
 
+/**
+ * A value made safe to use as a keyed-list `key`.
+ *
+ * The semantic surface addresses a row as `Parent/Component[key]:Element`, so
+ * every character in that grammar has to go: `/` separates path segments, `[`
+ * and `]` delimit the key, and `:` introduces the element. A key carrying any
+ * of them produces an address nothing can parse back —
+ * `MemoryRow[/home/dev/x/CLAUDE.md]` is ambiguous by construction, and an MCP
+ * server called `db:main` would be too.
+ *
+ * It does not fail loudly: the page renders, and the rows are simply
+ * unreachable from `am trigger`, `am surface --component` and every UI test.
+ * `\u00b7` appears in none of those places, so identity survives — two keys
+ * that differ only in which separator they used were already the same row.
+ */
+export const listKey = (value: string): string =>
+  value.replace(/[/[\]:]/g, "\u00b7");
+
 /** Last path segment — the name we show for a project directory. */
 export function baseName(path: string): string {
   const raw = String(path ?? "");
@@ -182,3 +200,44 @@ export function tildePath(path: string, home: string | null): string {
 }
 
 const pad = (n: number): string => String(n).padStart(2, "0");
+
+/**
+ * The loggable shape of a state object: per top-level key, a size — array
+ * length, object key count, or 1. This is what may be logged about synced
+ * state; the values themselves carry whole transcripts and tool output, and
+ * logging them verbatim would copy private conversations into the log files.
+ */
+export function stateShape(state: unknown): Record<string, number> {
+  const out: Record<string, number> = {};
+  if (state && typeof state === "object") {
+    for (const [k, v] of Object.entries(state)) {
+      out[k] = Array.isArray(v)
+        ? v.length
+        : v && typeof v === "object"
+        ? Object.keys(v).length
+        : 1;
+    }
+  }
+  return out;
+}
+
+/**
+ * A model id a human can read.
+ *
+ * llama.cpp answers `/v1/models` with the GGUF's absolute path, so the id is
+ * eighty characters of directory before the two words that identify the
+ * model — unreadable in a menu, and identical to its neighbours for the first
+ * sixty of them. Ollama (`qwen3:8b`) and LM Studio (`unsloth/model-name`)
+ * already answer with names and are left exactly as they are.
+ *
+ * The full id is never lost: every place this is shown keeps it as the title
+ * or the hint, and it is the id that is sent on the wire.
+ */
+export function modelLabel(id: string): string {
+  if (!id || !(/\.gguf$/i.test(id) || id.startsWith("/"))) return id;
+  const base = (id.split(/[/\\]/).pop() ?? id)
+    .replace(/\.gguf$/i, "")
+    // "-00001-of-00004" names one file of a split model, not the model.
+    .replace(/-\d{4,5}-of-\d{4,5}$/, "");
+  return base || id;
+}

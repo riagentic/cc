@@ -128,14 +128,14 @@ export function parseMarkdown(src: string): Block[] {
     // branch and rendered as a wall of pipes.
     if (ROW.test(line) && i + 1 < lines.length && RULE.test(lines[i + 1])) {
       const align = cells(lines[i + 1]).map(alignOf);
-      const head = cells(line).map(parseInline);
+      const head = cells(line).map((c) => parseInline(c));
       i += 2;
       const rows: Inline[][][] = [];
       while (
         i < lines.length && lines[i].trim() !== "" && ROW.test(lines[i]) &&
         !RULE.test(lines[i])
       ) {
-        rows.push(cells(lines[i++]).map(parseInline));
+        rows.push(cells(lines[i++]).map((c) => parseInline(c)));
       }
       out.push({ t: "table", head, rows, align });
       continue;
@@ -185,8 +185,13 @@ const alignOf = (spec: string): Align => {
   return "left";
 };
 
-/** Inline spans. Code wins over emphasis, so `` `a * b` `` stays literal. */
-export function parseInline(src: string): Inline[] {
+/**
+ * Inline spans. Code wins over emphasis, so `` `a * b` `` stays literal.
+ *
+ * `linkify` turns a bare URL in prose into a link. It is off inside a link's
+ * own label, where a second link would nest one `<a>` inside another.
+ */
+export function parseInline(src: string, linkify = true): Inline[] {
   const out: Inline[] = [];
   let buf = "";
   let i = 0;
@@ -227,7 +232,10 @@ export function parseInline(src: string): Inline[] {
       const end = src.indexOf("**", i + 2);
       if (end > i + 2) {
         flush();
-        out.push({ t: "strong", v: parseInline(src.slice(i + 2, end)) });
+        out.push({
+          t: "strong",
+          v: parseInline(src.slice(i + 2, end), linkify),
+        });
         i = end + 2;
         continue;
       }
@@ -243,7 +251,7 @@ export function parseInline(src: string): Inline[] {
         (isWordChar(src[i - 1]) || isWordChar(src[end + 1]));
       if (end > i + 1 && src[i + 1] !== c && !intraWord) {
         flush();
-        out.push({ t: "em", v: parseInline(src.slice(i + 1, end)) });
+        out.push({ t: "em", v: parseInline(src.slice(i + 1, end), linkify) });
         i = end + 1;
         continue;
       }
@@ -258,13 +266,33 @@ export function parseInline(src: string): Inline[] {
         const paren = closingParen(src, close + 2);
         if (paren > close) {
           const href = safeHref(src.slice(close + 2, paren).trim());
-          const label = parseInline(src.slice(i + 1, close));
+          const label = parseInline(src.slice(i + 1, close), false);
           flush();
           if (href) out.push({ t: "link", href, v: label });
           else out.push(...label); // unsafe scheme: keep the words, drop the link
           i = paren + 1;
           continue;
         }
+      }
+    }
+
+    // A bare URL, last: every markup form above starts with a character a URL
+    // cannot, so this only ever sees prose. Not after a word character —
+    // `shttps://x` is a typo, not an address.
+    if (
+      linkify && (c === "h" || c === "H" || c === "w" || c === "W") &&
+      !isWordChar(src[i - 1])
+    ) {
+      const hit = autolinkAt(src, i);
+      if (hit) {
+        flush();
+        out.push({
+          t: "link",
+          href: hit.href,
+          v: [{ t: "text", v: hit.text }],
+        });
+        i = hit.end;
+        continue;
       }
     }
 
@@ -275,6 +303,70 @@ export function parseInline(src: string): Inline[] {
   flush();
   return out;
 }
+
+/** Where a bare URL stops. Whitespace, and the characters that wrap one in
+ *  prose or markup rather than belong to it. */
+const URL_STOP = /[\s<>`"'\u00a0]/;
+
+/**
+ * A bare URL in running text, if one starts at `i`.
+ *
+ * Agents print addresses constantly — a docs page, a status page, a PR — and
+ * Markdown links only what someone wrapped in `[…](…)`. Everything else
+ * rendered as dead text, so the one thing anyone wants to do with a URL
+ * (open it) meant selecting and copying it by hand.
+ *
+ * Code spans and fenced code never reach here: they are taken by the parser
+ * before this runs, so a URL inside a code sample stays a code sample.
+ */
+function autolinkAt(
+  src: string,
+  i: number,
+): { href: string; text: string; end: number } | null {
+  const head = src.slice(i, i + 8).toLowerCase();
+  if (
+    !head.startsWith("http://") && !head.startsWith("https://") &&
+    !head.startsWith("www.")
+  ) return null;
+
+  let end = i;
+  while (end < src.length && !URL_STOP.test(src[end])) end++;
+  let text = src.slice(i, end);
+
+  // Trailing punctuation belongs to the sentence, not to the address:
+  // "see https://x.dev." is a URL and a full stop. A closing bracket is kept
+  // only when the URL opened one — `…/Foo_(bar)` is a real Wikipedia address,
+  // while `(see https://x.dev)` is prose in parentheses.
+  for (;;) {
+    const last = text[text.length - 1];
+    if (last === undefined) break;
+    if (".,;:!?".includes(last)) {
+      text = text.slice(0, -1);
+      continue;
+    }
+    const open = last === ")"
+      ? "("
+      : last === "]"
+      ? "["
+      : last === "}"
+      ? "{"
+      : "";
+    if (open && count(text, last) > count(text, open)) {
+      text = text.slice(0, -1);
+      continue;
+    }
+    break;
+  }
+
+  // `www.x.dev` is an address without a scheme. https is the only reasonable
+  // guess — never http, which would silently downgrade the connection.
+  const href = text.toLowerCase().startsWith("www.") ? `https://${text}` : text;
+  // A scheme with nothing behind it is not an address.
+  if (!/^https?:\/\/[^/\s]+\./i.test(href)) return null;
+  return { href, text, end: i + text.length };
+}
+
+const count = (s: string, ch: string): number => s.split(ch).length - 1;
 
 /** The index of the next run of exactly `n` backticks at or after `from`, or
  *  `-1`. A longer run is not a closer — it belongs to a different span. */

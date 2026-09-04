@@ -245,6 +245,17 @@ export const IconCopy = (p?: Props) =>
     p,
   );
 
+/** "Hand this to the desktop" — the arrow leaving the box. */
+export const IconExternal = (p?: Props) =>
+  svg(
+    <>
+      <path d="M13.5 4h6.5v6.5" />
+      <path d="M20 4l-8.4 8.4" />
+      <path d="M18.4 14.6v4.2a1.8 1.8 0 0 1-1.8 1.8H5.2a1.8 1.8 0 0 1-1.8-1.8V7.4a1.8 1.8 0 0 1 1.8-1.8h4.2" />
+    </>,
+    p,
+  );
+
 export const IconSearch = (p?: Props) =>
   svg(
     <>

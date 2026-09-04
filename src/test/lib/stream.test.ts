@@ -8,10 +8,15 @@ import {
   blocksOf,
   contextUsed,
   contextWindowOf,
+  controlError,
   fallbackWindow,
   INTERRUPT_PREFIX,
   isAgentTool,
   isInterruptAck,
+  isModelAck,
+  isSynthetic,
+  MODEL_PREFIX,
+  modelOf,
   parseLine,
   resultText,
   toolDetail,
@@ -326,4 +331,50 @@ Deno.test("toolDetail — no separator with nothing on the other side", () => {
     ),
     true,
   );
+});
+
+Deno.test("modelOf — the picker's family behind the id the CLI reports", () => {
+  // The two vocabularies that have to meet: `--model haiku` goes out, a full
+  // id comes back. Comparing them raw called every session mismatched, and
+  // printing the raw one put an id nobody chose where a choice belongs.
+  assertEquals(modelOf("claude-haiku-4-5-20251001")?.id, "haiku");
+  assertEquals(modelOf("haiku")?.id, "haiku");
+  assertEquals(modelOf("claude-opus-5[1m]")?.id, "opus");
+  assertEquals(modelOf("<synthetic>"), null);
+  assertEquals(modelOf(null), null);
+});
+
+Deno.test("isSynthetic — a message the CLI wrote itself measures nothing", () => {
+  // 2.1.259 stamps its own messages — a limit notice, an interrupt, "No
+  // response requested" — with this sentinel where the model goes.
+  assertEquals(isSynthetic({ model: "<synthetic>", usage: {} }), true);
+  assertEquals(isSynthetic({ model: "claude-sonnet-5" }), false);
+  assertEquals(isSynthetic({}), false);
+  assertEquals(isSynthetic(null), false);
+});
+
+Deno.test("controlError — a refused request is not a silent one", () => {
+  const refused = {
+    type: "control_response",
+    response: {
+      subtype: "error",
+      request_id: `${MODEL_PREFIX}1`,
+      error: "set_model: model must be a string",
+    },
+  };
+  assertEquals(controlError(refused)?.id, `${MODEL_PREFIX}1`);
+  assertEquals(
+    controlError(refused)?.error,
+    "set_model: model must be a string",
+  );
+  assertEquals(isModelAck(refused), false);
+  // Success is not an error, and an error carries no ack.
+  const ok = {
+    type: "control_response",
+    response: { subtype: "success", request_id: `${MODEL_PREFIX}2` },
+  };
+  assertEquals(controlError(ok), null);
+  assertEquals(isModelAck(ok), true);
+  assertEquals(isInterruptAck(ok), false);
+  assertEquals(controlError({ type: "result" }), null);
 });
