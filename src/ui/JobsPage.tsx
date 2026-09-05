@@ -9,7 +9,7 @@
  * question they are actually holding on.
  */
 import { useLocal, type VNode } from "aio/air";
-import { jobs, selectedJob } from "../cell/jobs.ts";
+import { cliCanRemove, jobs, selectedJob, staleJobs } from "../cell/jobs.ts";
 import type { Job, JobState } from "../type/claude.ts";
 import { ago, clock, oneLine, tildePath, tokens } from "../lib/format.ts";
 import { workspace } from "../cell/workspace.ts";
@@ -80,7 +80,18 @@ function JobRow(
         </span>
       </span>
       <span class="rowitem__meta">
-        <StatePill state={j.state} />
+        {
+          /* "Waiting for you" and "was waiting for you, months ago, and
+            nothing is running it" ask completely different things of the
+            reader, and the state pill alone said the same for both. */
+        }
+        {j.stale
+          ? (
+            <span title="No background service is running this any more">
+              <Pill>leftover</Pill>
+            </span>
+          )
+          : <StatePill state={j.state} />}
         <br />
         {j.updatedAt > 0 ? ago(j.updatedAt, props.now) : "—"}
       </span>
@@ -107,6 +118,9 @@ function JobDetail(props: { job: Job; now: number }): VNode {
   // back from the dock — so this one arms instead. Two clicks, and the second
   // says what it does rather than asking "are you sure?".
   const [armed, setArmed] = useLocal(false);
+  // …and the second escape hatch, which needs its own arming for a different
+  // reason: it does not go through the CLI at all.
+  const [armedForget, setArmedForget] = useLocal(false);
 
   return (
     <div class="grid">
@@ -130,8 +144,10 @@ function JobDetail(props: { job: Job; now: number }): VNode {
               <button
                 type="button"
                 class="btn btn--sm"
-                disabled={busy}
-                title="Restart it under the current CLI version"
+                disabled={busy || !cliCanRemove()}
+                title={cliCanRemove()
+                  ? "Restart it under the current CLI version"
+                  : "Respawning goes through the background service, and none is running"}
                 onClick={() => jobs.act(j.id, "respawn")}
               >
                 {IconRefresh({ size: 14 })} Respawn
@@ -175,6 +191,64 @@ function JobDetail(props: { job: Job; now: number }): VNode {
           </>
         }
       >
+        {
+          /* The state the CLI cannot get out of. `claude stop` and `claude rm`
+            confirm their work through the background service, so with none
+            running they refuse — and a job whose daemon exited weeks ago says
+            "waiting for you" forever, with no button that removes it. This is
+            the way out, and it says exactly what it does. */
+        }
+        {j.stale && (
+          <Banner tone="warn">
+            <strong>Nothing is running this any more.</strong>{" "}
+            The background service that owned it has exited, so its own
+            <code>claude stop</code> and <code>claude rm</code>{" "}
+            cannot confirm anything and refuse. What is left is the record on
+            disk.
+            {armedForget
+              ? (
+                <span
+                  style={{
+                    display: "inline-flex",
+                    gap: "6px",
+                    marginLeft: "8px",
+                  }}
+                >
+                  <button
+                    type="button"
+                    class="btn btn--sm btn--danger"
+                    disabled={busy}
+                    onClick={() => {
+                      setArmedForget(false);
+                      void jobs.forget(j.id);
+                    }}
+                  >
+                    {IconTrash({ size: 13 })} Remove the record
+                  </button>
+                  <button
+                    type="button"
+                    class="btn btn--ghost btn--sm"
+                    onClick={() => setArmedForget(false)}
+                  >
+                    Cancel
+                  </button>
+                </span>
+              )
+              : (
+                <button
+                  type="button"
+                  class="btn btn--sm"
+                  style={{ marginLeft: "8px" }}
+                  disabled={busy}
+                  title="Delete ~/.claude/jobs/{id} — the conversation and any worktree stay"
+                  onClick={() => setArmedForget(true)}
+                >
+                  Clean it up
+                </button>
+              )}
+          </Banner>
+        )}
+
         {
           /* The reason this page exists, at the top of the page: what the job
             is waiting for, and the question it asked. Everything else about a
@@ -293,6 +367,8 @@ export function JobsPage(): VNode {
     RANK[a.state] - RANK[b.state] || b.updatedAt - a.updatedAt
   );
   const current = selectedJob();
+  const stale = staleJobs();
+  const [armedAll, setArmedAll] = useLocal(false);
   const blocked = jobs.jobs.filter((j) => j.state === "blocked").length;
   const working = jobs.jobs.filter((j) => j.state === "working").length;
 
@@ -326,6 +402,67 @@ export function JobsPage(): VNode {
       />
       <div class="page__body grid">
         {jobs.error && <Banner tone="warn">{jobs.error}</Banner>}
+
+        {
+          /* Said once, at the top, because it explains every button on this
+            page that will not work. The service runs on demand and exits when
+            idle, so "not running" is ordinary — what is not ordinary is that
+            stop and remove go *through* it and refuse without it. */
+        }
+        {stale.length > 0 && (
+          <Banner tone="warn">
+            <strong>
+              {stale.length === 1
+                ? "One job is a leftover."
+                : `${stale.length} jobs are leftovers.`}
+            </strong>{" "}
+            They say they are working or waiting, and no background service is
+            running to be doing it — so the CLI's own <code>stop</code> and{" "}
+            <code>rm</code>{" "}
+            cannot confirm anything and refuse. Removing the record is the only
+            thing left that works.
+            {armedAll
+              ? (
+                <span
+                  style={{
+                    display: "inline-flex",
+                    gap: "6px",
+                    marginLeft: "8px",
+                  }}
+                >
+                  <button
+                    type="button"
+                    class="btn btn--sm btn--danger"
+                    onClick={() => {
+                      setArmedAll(false);
+                      for (const j of stale) void jobs.forget(j.id);
+                    }}
+                  >
+                    {IconTrash({ size: 13 })} Remove {stale.length}{" "}
+                    record{stale.length === 1 ? "" : "s"}
+                  </button>
+                  <button
+                    type="button"
+                    class="btn btn--ghost btn--sm"
+                    onClick={() => setArmedAll(false)}
+                  >
+                    Cancel
+                  </button>
+                </span>
+              )
+              : (
+                <button
+                  type="button"
+                  class="btn btn--sm"
+                  style={{ marginLeft: "8px" }}
+                  title="Delete their entries under ~/.claude/jobs. Conversations and worktrees stay."
+                  onClick={() => setArmedAll(true)}
+                >
+                  Clean them up
+                </button>
+              )}
+          </Banner>
+        )}
 
         {jobs.jobs.length === 0
           ? (

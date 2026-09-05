@@ -289,7 +289,11 @@ function MessageRow(
           <MsgMeta at={m.at} text={text} editable={isUser} />
         </div>
         {m.blocks.map((b, i) => <BlockView key={`${m.id}-${i}`} block={b} />)}
-        {m.turn && <TurnFooter key="turn" turn={m.turn} />}
+        {
+          /* Always rendered: a receipt that comes and goes changes this row's
+            child count, and the reconciler pairs the survivors by position. */
+        }
+        <div key="turn">{m.turn ? <TurnFooter turn={m.turn} /> : null}</div>
       </div>
     </article>
   );

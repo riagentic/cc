@@ -26,6 +26,7 @@ import {
 import { prefs } from "../cell/prefs.ts";
 import {
   activeProject,
+  activeSessionKey,
   activeSettings,
   pruneUnknown,
   workspace,
@@ -171,7 +172,7 @@ export function SettingsPage(): VNode {
   const localTranscript = () =>
     localTranscriptMarkdown(
       activeProject()?.name ?? "Conversation",
-      localChat(workspace.activeId).messages,
+      localChat(activeSessionKey()).messages,
     );
   // Slow, but ticking: "started 3s ago" otherwise stayed "3s ago" for as long as
   // an idle session left the page with nothing else to re-render it.
@@ -285,7 +286,7 @@ export function SettingsPage(): VNode {
           scope="session"
           actions={
             <ExportActions
-              empty={localChat(workspace.activeId).messages.length === 0}
+              empty={localChat(activeSessionKey()).messages.length === 0}
               markdown={localTranscript}
             />
           }

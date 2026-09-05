@@ -21,7 +21,12 @@ import {
   session,
   view,
 } from "../cell/session.ts";
-import { activeProject, activeSettings, workspace } from "../cell/workspace.ts";
+import {
+  activeProject,
+  activeSessionKey,
+  activeSettings,
+  workspace,
+} from "../cell/workspace.ts";
 import { activeIsLocal, localChat, localConfig } from "../cell/local.ts";
 import { ENGINE_NAMES } from "./LocalChatPage.tsx";
 import { blockedJobs, jobs } from "../cell/jobs.ts";
@@ -31,6 +36,7 @@ import { storage } from "../cell/storage.ts";
 import { bytes, modelLabel } from "../lib/format.ts";
 import { Badge, Dot } from "./parts.tsx";
 import { MachineStrip } from "./Machine.tsx";
+import { terminal, terminalLive } from "../cell/console.ts";
 import { closeOverlay, showOverlay } from "./overlays.tsx";
 import { CommandPalette } from "./Palette.tsx";
 import {
@@ -51,6 +57,7 @@ import {
   IconSettings,
   IconSpark,
   IconTasks,
+  IconTerminal,
   IconTree,
 } from "./icons.tsx";
 
@@ -116,6 +123,16 @@ function NavCard(
 const Group = (props: { children: unknown }): VNode => (
   <div class="rail__group">{props.children}</div>
 );
+
+/** What the Console card says under its name: the shell, or why there is none
+ *  yet. A card that always reads "Console" tells the reader nothing they could
+ *  not see from the label. */
+function consoleHint(): string {
+  const t = terminal();
+  if (t.status === "live") return `${t.cols}×${t.rows}`;
+  if (t.status === "exited") return `exited ${t.exitCode ?? 0}`;
+  return "A real shell, here";
+}
 
 /** Move focus between rail cards. Focus only — a card navigates on Enter, like
  *  every link, and arrowing through pages would fire fourteen navigations. */
@@ -213,6 +230,20 @@ export function Rail(): VNode {
           badge={holds > 0
             ? <Badge value="approve" tone="danger" />
             : live
+            ? <Badge value="live" tone="live" />
+            : undefined}
+        />
+        {
+          /* Under Chat, because that is what it sits next to: the other thing
+            you do inside a project, in the same directory, at the same time. */
+        }
+        <NavCard
+          key="console"
+          to="/console"
+          icon={IconTerminal({ size: 16 })}
+          label="Console"
+          hint={consoleHint()}
+          badge={terminalLive()
             ? <Badge value="live" tone="live" />
             : undefined}
         />
@@ -402,7 +433,7 @@ export function Rail(): VNode {
               style={{ display: "flex", alignItems: "center", gap: "8px" }}
             >
               <Dot
-                status={localChat(workspace.activeId).status === "working"
+                status={localChat(activeSessionKey()).status === "working"
                   ? "working"
                   : "ready"}
               />
@@ -414,7 +445,7 @@ export function Rail(): VNode {
                   color: "var(--ink-soft)",
                 }}
               >
-                {localChat(workspace.activeId).status === "working"
+                {localChat(activeSessionKey()).status === "working"
                   ? "Working"
                   : "Ready"}
               </span>

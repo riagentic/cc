@@ -24,6 +24,7 @@ import { Rail } from "./ui/Rail.tsx";
 import { Dock } from "./ui/Dock.tsx";
 import { StatusStrip } from "./ui/StatusStrip.tsx";
 import { ChatPage } from "./ui/ChatPage.tsx";
+import { ConsolePage } from "./ui/ConsolePage.tsx";
 import { AgentsPage } from "./ui/AgentsPage.tsx";
 import { TasksPage } from "./ui/TasksPage.tsx";
 import { ActivityPage } from "./ui/ActivityPage.tsx";
@@ -69,10 +70,11 @@ import { prefs, ZOOM_STEP } from "./cell/prefs.ts";
 /** Paths that stay meaningful when a project runs a local engine — about the
  *  project or the app, never about the Claude Code CLI. `/` is not listed:
  *  the local-page branch below owns it. */
-const LOCAL_PAGES = new Set(["/tree", "/settings"]);
+const LOCAL_PAGES = new Set(["/console", "/tree", "/settings"]);
 
 const PAGES: Record<string, () => VNode> = {
   "/": ChatPage,
+  "/console": ConsolePage,
   "/agents": AgentsPage,
   "/tasks": TasksPage,
   "/activity": ActivityPage,

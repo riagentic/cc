@@ -75,7 +75,14 @@ import {
   userEvent,
 } from "./session-reduce.ts";
 
-import { activeProject, activeSettings, workspace } from "./workspace.ts";
+import {
+  activeProject,
+  activeSessionKey,
+  activeSettings,
+  panesOf,
+  projectOfPane,
+  workspace,
+} from "./workspace.ts";
 
 /** How often a running session's working directory is re-checked. Long enough
  *  to be free, short enough that a deleted folder is noticed while the user is
@@ -193,7 +200,7 @@ async function endSession(
  *  makes — send, stop, interrupt, answer an approval — which are always about
  *  what they are looking at. */
 const currentKey = (s: SessionState): string =>
-  workspace.activeId || s.activeKey;
+  activeSessionKey() || s.activeKey;
 
 export const session = cell("session", {
   persist: "none",
@@ -287,12 +294,16 @@ export const session = cell("session", {
      *  the CLI replays none of it on the wire, so the transcript here starts
      *  empty and fills from the next turn on (measured against 2.1.232). */
     async start(s: SessionState, resume = false) {
+      // The conversation being started is the one on screen — which is a pane
+      // now, not a project: a project can hold several, and starting one must
+      // not restart another.
+      const key = currentKey(s);
       const project = activeProject();
       // The switch normally arrives from `workspace.select`; doing it here too
       // makes `start()` correct when it is the first thing that happens, which
       // is what boot and every test do. Applied directly rather than
       // dispatched — see `applySwitch`.
-      if (project) applySwitch(s, project.id);
+      if (project) applySwitch(s, key);
       if (!project) {
         s.error = "Add a project directory first — Settings → Projects.";
         s.status = "error";
@@ -314,7 +325,6 @@ export const session = cell("session", {
         note(s, "error", "Project folder is gone", project.path);
         return;
       }
-      const key = project.id;
       const settings = activeSettings();
       const resumeId = resume ? s.resumeId : null;
 
@@ -900,7 +910,7 @@ export const session = cell("session", {
  * never flash the wrong transcript.
  */
 export const view = (): ProjectSession => {
-  const key = workspace.activeId;
+  const key = activeSessionKey();
   // No project at all: the top level is the only conversation there is.
   if (!key || key === session.activeKey) return session;
   return session.parked[key] ?? EMPTY_SESSION;
@@ -910,33 +920,52 @@ export const view = (): ProjectSession => {
  *  written to — it stands in for "nothing has happened here". */
 const EMPTY_SESSION: ProjectSession = blank();
 
-/** One project's conversation, wherever it lives. Used by the dock, which has
- *  to report every project's session, not just the one on screen. */
-export const sessionOf = (projectId: string): ProjectSession =>
-  projectId === session.activeKey || !session.activeKey
+/** One conversation, wherever it lives. Takes a *pane* id — which for a
+ *  project's first conversation is the project's own id, so every existing
+ *  caller keeps working. */
+export const sessionOf = (key: string): ProjectSession =>
+  key === session.activeKey || !session.activeKey
     ? session
-    : session.parked[projectId] ?? EMPTY_SESSION;
+    : session.parked[key] ?? EMPTY_SESSION;
 
-/** Projects with a conversation that is doing something right now. */
+/** Every conversation a project has, by pane id. */
+export const sessionsOf = (projectId: string): string[] =>
+  panesOf(projectId).filter((p) => p.kind === "session").map((p) => p.id);
+
+/** Projects with *any* conversation doing something right now. The dock marks
+ *  a project, not one of its tabs, so one busy conversation lights the tab. */
 export const busyProjects = (): string[] =>
   workspace.projects
     .map((p) => p.id)
-    .filter((id) => sessionOf(id).status === "working");
+    .filter((id) =>
+      sessionsOf(id).some((k) => sessionOf(k).status === "working")
+    );
 
 /** Approvals waiting in a project that is NOT on screen.
  *
  *  The CLI is blocked on each of them, and the prompt only renders for the
  *  project you are looking at — so without this, switching away from a session
  *  mid-approval would leave it stalled with nothing anywhere saying so. */
-export const backgroundApprovals = (): { id: string; count: number }[] =>
-  workspace.projects
-    .filter((p) => p.id !== workspace.activeId)
+export const backgroundApprovals = (): { id: string; count: number }[] => {
+  const showing = activeSessionKey();
+  return workspace.projects
     .map((p) => ({
       id: p.id,
-      count: sessionOf(p.id).permissions.filter((r) => r.status === "pending")
-        .length,
+      // Every conversation the project has, except the one on screen — a
+      // second chat in the *same* project can be blocked just as invisibly as
+      // one in another project.
+      count: sessionsOf(p.id)
+        .filter((k) => k !== showing)
+        .reduce(
+          (n, k) =>
+            n +
+            sessionOf(k).permissions.filter((r) => r.status === "pending")
+              .length,
+          0,
+        ),
     }))
     .filter((x) => x.count > 0);
+};
 
 export const agentRuns = (): ToolRun[] =>
   view().tools.filter((t) => t.kind === "agent");

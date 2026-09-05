@@ -23,7 +23,7 @@ import {
   localSpeed,
 } from "../cell/local.ts";
 import { LOCAL_PERMISSIONS, permissionOf } from "../lib/agent.ts";
-import { workspace } from "../cell/workspace.ts";
+import { activeSessionKey, workspace } from "../cell/workspace.ts";
 import type { LocalMode, LocalMsg } from "../type/local.ts";
 import { clock, modelLabel, tailPath, tokens } from "../lib/format.ts";
 import {
@@ -82,7 +82,7 @@ const ENGINE_OPTIONS = [
 ] as const;
 
 export function LocalChatPage(): VNode {
-  const id = workspace.activeId;
+  const id = activeSessionKey();
   const cfg = localConfig(id);
   const chat = localChat(id);
   // Same scrolling contract as the Claude thread, from the same code — and the
@@ -196,7 +196,7 @@ export function LocalChatPage(): VNode {
  * conversation that has quietly stopped.
  */
 function CommandPrompt(): VNode | null {
-  const id = workspace.activeId;
+  const id = activeSessionKey();
   const pending = localChat(id).pending;
   const card = useRef<HTMLElement>(null!);
   // Same contract as the Claude prompt: the CARD takes focus when it appears,
@@ -278,7 +278,7 @@ function CommandPrompt(): VNode | null {
 /** Model, mode and window pressure — small on purpose: it must never cost
  *  more attention than the conversation under it. */
 function LocalStrip(): VNode {
-  const id = workspace.activeId;
+  const id = activeSessionKey();
   const cfg = localConfig(id);
   const chat = localChat(id);
   // Agent mode arms and asks, like Allow-all on the Claude side: it lets the
@@ -431,7 +431,7 @@ function PermissionBadge(props: { id: string }): VNode {
  * error is about something else and a button would be a wrong guess.
  */
 function UnreachableFix(): VNode | null {
-  const id = workspace.activeId;
+  const id = activeSessionKey();
   const cfg = localConfig(id);
   const found =
     detectedEngines().find((d) => d.engine === cfg.engine && d.reachable)
@@ -484,7 +484,7 @@ function UnreachableFix(): VNode | null {
  * here which one the user is running.
  */
 function NoToolsBanner(): VNode | null {
-  const id = workspace.activeId;
+  const id = activeSessionKey();
   const chat = localChat(id);
   const cfg = localConfig(id);
   if (chat.toolsOk !== false) return null;
@@ -605,7 +605,7 @@ function ToolResult(props: { m: LocalMsg }): VNode {
 function LocalComposer(): VNode {
   const ref = useRef<HTMLTextAreaElement>(null!);
   const [hasText, setHasText] = useLocal(false);
-  const id = workspace.activeId;
+  const id = activeSessionKey();
   const chat = localChat(id);
   const busy = chat.status === "working";
   const speed = localSpeed(id);
@@ -722,7 +722,7 @@ function LocalComposer(): VNode {
  *  this module so SettingsPage's only knowledge of local engines is one
  *  component name. */
 export function EnginePanel(): VNode {
-  const id = workspace.activeId;
+  const id = activeSessionKey();
   const cfg = localConfig(id);
   const chat = localChat(id);
   const found = detectedEngines();

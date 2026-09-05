@@ -8,8 +8,8 @@
  */
 import { assert, assertEquals } from "@std/assert";
 import { join } from "@std/path";
-import { listJobs } from "../../cell/catalog.server.ts";
-import { blockedJobs, jobs } from "../../cell/jobs.ts";
+import { forgetJob, listJobs, readDaemon } from "../../cell/catalog.server.ts";
+import { blockedJobs, explainRefusal, jobs } from "../../cell/jobs.ts";
 import { testCell } from "aio/testing";
 
 /** A jobs root at a temp `HOME`, so the real `~/.claude/jobs` is never read. */
@@ -212,4 +212,127 @@ Deno.test("blockedJobs is the set that needs a human", () => {
   const all = jobs.jobs;
   assert(blockedJobs().every((j) => j.state === "blocked"));
   assert(blockedJobs().length <= all.length);
+});
+
+/* ── the state the CLI cannot get out of ──────────────────────────────────── */
+
+/** Write a daemon roster naming `pid` as the supervisor. */
+async function withRoster(home: string, pid: number): Promise<void> {
+  const dir = join(home, ".claude", "daemon");
+  await Deno.mkdir(dir, { recursive: true });
+  await Deno.writeTextFile(
+    join(dir, "roster.json"),
+    JSON.stringify({ proto: 1, supervisorPid: pid, updatedAt: 1, workers: {} }),
+  );
+}
+
+Deno.test("a job is a leftover when nothing is running it", async () => {
+  await withJobsHome(async (root) => {
+    await Deno.mkdir(join(root, "aaa1"));
+    await Deno.writeTextFile(
+      join(root, "aaa1", "state.json"),
+      job({ state: "blocked", daemonShort: "aaa1", needs: "an answer" }),
+    );
+    await Deno.mkdir(join(root, "bbb2"));
+    await Deno.writeTextFile(
+      join(root, "bbb2", "state.json"),
+      job({ state: "done", daemonShort: "bbb2" }),
+    );
+    // A supervisor pid that cannot be alive: pid 1 is init, so use one that is
+    // certainly free at the top of the pid space.
+    await withRoster(join(root, "..", ".."), 4_194_303);
+  }, async () => {
+    const found = await listJobs();
+    const blocked = found.find((j) => j.id === "aaa1");
+    const done = found.find((j) => j.id === "bbb2");
+    assert(blocked && done);
+    // The claim is stale — nothing is running it, so nothing will answer.
+    assertEquals(blocked.stale, true);
+    // …but a job that already finished is not a leftover. It is finished.
+    assertEquals(done.stale, false);
+  });
+});
+
+Deno.test("a live service means no job is a leftover", async () => {
+  await withJobsHome(async (root) => {
+    await Deno.mkdir(join(root, "ccc3"));
+    await Deno.writeTextFile(
+      join(root, "ccc3", "state.json"),
+      job({ state: "blocked", daemonShort: "ccc3" }),
+    );
+    // This very process: certainly alive.
+    await withRoster(join(root, "..", ".."), Deno.pid);
+  }, async () => {
+    const found = await listJobs();
+    assertEquals(found[0].stale, false);
+  });
+});
+
+Deno.test("no roster at all is not a running service", async () => {
+  await withJobsHome(async (root) => {
+    await Deno.mkdir(join(root, "ddd4"));
+    await Deno.writeTextFile(
+      join(root, "ddd4", "state.json"),
+      job({ state: "working", daemonShort: "ddd4" }),
+    );
+  }, async () => {
+    const daemon = await readDaemon();
+    assertEquals(daemon.running, false);
+    assertEquals(daemon.pid, 0);
+    const found = await listJobs();
+    assertEquals(found[0].stale, true);
+  });
+});
+
+Deno.test("forgetting a job removes its record and nothing else", async () => {
+  await withJobsHome(async (root) => {
+    await Deno.mkdir(join(root, "eee5"));
+    await Deno.writeTextFile(
+      join(root, "eee5", "state.json"),
+      job({
+        state: "blocked",
+        daemonShort: "eee5",
+        worktreePath: "/tmp/some-worktree",
+      }),
+    );
+    await Deno.writeTextFile(join(root, "eee5", "timeline.jsonl"), "{}\n");
+  }, async () => {
+    const done = await forgetJob("eee5");
+    assertEquals(done.error, null);
+    // The worktree is reported rather than deleted: it is the user's code, and
+    // a record removed without the CLI cannot clean one up safely.
+    assertEquals(done.worktree, "/tmp/some-worktree");
+    assertEquals((await listJobs()).length, 0);
+  });
+});
+
+Deno.test("forgetting is idempotent, and refuses a made-up id", async () => {
+  await withJobsHome(async () => {}, async () => {
+    // Already gone is the outcome the caller wanted.
+    assertEquals((await forgetJob("nothere")).error, null);
+    // An id that is not an id never becomes a path.
+    const bad = await forgetJob("../../../etc");
+    assert(bad.error !== null && bad.error.includes("Not a job id"));
+  });
+});
+
+Deno.test("a refusal about the service is corrected, not repeated", () => {
+  // The CLI's own words, verified against 2.1.261. It advises waiting for a
+  // restart that will not happen, because nothing restarts the service on its
+  // own — and following that advice is what a user does before giving up.
+  const cliSaid = "couldn't remove 6c6ad404 — the background service may be " +
+    "restarting. Try again in a moment.";
+
+  const corrected = explainRefusal(cliSaid, false);
+  assert(!corrected.includes("Try again in a moment"), corrected);
+  assert(corrected.includes("Removing the record"), corrected);
+  // The part that names what failed is kept: the reader still needs it.
+  assert(corrected.includes("couldn't remove 6c6ad404"), corrected);
+
+  // With a service actually running, the CLI's advice is sound and is left
+  // alone — this app does not rewrite messages it cannot improve.
+  assertEquals(explainRefusal(cliSaid, true), cliSaid);
+  // And a refusal about something else is never touched.
+  const other = "couldn't remove 6c6ad404 — the worktree has unpushed commits";
+  assertEquals(explainRefusal(other, false), other);
 });

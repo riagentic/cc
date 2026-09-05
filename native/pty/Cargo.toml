@@ -1,0 +1,21 @@
+# A pseudo-terminal host, and nothing else.
+#
+# No dependencies, on purpose. This binary is built on the machine that runs the
+# app and shipped inside it, so every crate it pulled would be a download that
+# has to succeed on somebody else's laptop before their terminal works. The
+# whole of libc it needs is nine functions, declared by hand below.
+[package]
+name = "cc-pty"
+version = "0.2.0"
+edition = "2021"
+
+[[bin]]
+name = "cc-pty"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

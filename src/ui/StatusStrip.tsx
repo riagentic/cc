@@ -241,6 +241,7 @@ export function StatusStrip(): VNode {
       </Stat>
 
       <Stat
+        key="lastturn"
         label={view().turnStartedAt !== null ? "Running" : "Last turn"}
         numeric
         title="Processing time of the most recent request"

@@ -16,28 +16,189 @@
  * only way to find out it had finished — or had stopped to ask you something,
  * and would wait forever — would be to click through every project in the list.
  */
-import { useLocal, type VNode } from "aio/air";
+import { navigate, useLocal, type VNode } from "aio/air";
 import {
+  activePane,
   activeProject,
   forgottenProjects,
+  panesOf,
   workspace,
 } from "../cell/workspace.ts";
 import { session, sessionOf } from "../cell/session.ts";
-import { engineOf, localChat } from "../cell/local.ts";
-import type { Project } from "../type/claude.ts";
+import { consoleCell, terminalById } from "../cell/console.ts";
+import { engineOf, localChatsOf } from "../cell/local.ts";
+import type { Pane, Project } from "../type/claude.ts";
 import { hueOf, tildePath } from "../lib/format.ts";
 import { matches, Search } from "./parts.tsx";
 import { AbsentOffer, BrowseButton } from "./AddProject.tsx";
 import { showToast } from "./toast.tsx";
 import {
   IconBranch,
+  IconChat,
   IconFolderOpen,
+  IconPlay,
   IconPlus,
   IconPower,
   IconRefresh,
+  IconTerminal,
   IconTrash,
   IconX,
 } from "./icons.tsx";
+
+/**
+ * A project's conversations and shells, and the four ways to add one.
+ *
+ * Under the tab rather than beside it: these belong to the project, and a flat
+ * list of everything open in every project is a list nobody can find anything
+ * in. Only the project being worked in shows them — see the caller.
+ */
+function PaneList(props: { project: Project }): VNode {
+  const p = props.project;
+  const panes = panesOf(p.id);
+  const showing = activePane(p.id)?.id ?? "";
+  const sessions = panes.filter((x) => x.kind === "session").length;
+
+  /**
+   * Make a shell, with an optional command to run in it.
+   *
+   * Order matters, and it took a wrong one to see why: the shell is made
+   * FIRST, and only then does a pane point at it. Adding the pane is what
+   * makes it the active one, and a Console page that is already open reacts to
+   * that at once by starting a shell for it — a plain shell, with no command,
+   * because the launcher had not got that far yet. The dock's own start then
+   * killed that one and began again, so `deno task start` never ran and the
+   * tab read "exited 0".
+   *
+   * The id is minted here so the terminal can exist before anything points at
+   * it. Two calls rather than one cross-cell method: the dock owns the pane,
+   * the console cell owns the terminal, and the id is what joins them.
+   */
+  const openConsole = async (title?: string, command?: string) => {
+    const id = crypto.randomUUID();
+    await consoleCell.open(id, p.id, { title, command });
+    const pane = await workspace.addPane(p.id, "console", id, command);
+    if (!pane) return;
+    if (title) await workspace.renamePane(id, title);
+    navigate("/console");
+  };
+
+  return (
+    <div class="panes">
+      {panes.map((pane) => (
+        <div
+          key={pane.id}
+          class={"pane" + (pane.id === showing ? " selected" : "")}
+        >
+          <button
+            type="button"
+            class="pane__main"
+            aria-label={`${pane.title} in ${p.name}`}
+            title={pane.kind === "console"
+              ? `${pane.title} — a shell in ${p.path}`
+              : `${pane.title} — a conversation in ${p.path}`}
+            onClick={() => {
+              workspace.selectPane(pane.id);
+              navigate(pane.kind === "console" ? "/console" : "/");
+            }}
+          >
+            <span class="pane__icon">
+              {pane.kind === "console"
+                ? IconTerminal({ size: 11 })
+                : IconChat({ size: 11 })}
+            </span>
+            <span class="truncate">{pane.title}</span>
+            {paneBusy(pane) && <span class="pane__live" />}
+          </button>
+          {
+            /* The last conversation has no close button: a project with none
+              is a Chat page with nothing to show and no way back. */
+          }
+          {!(pane.kind === "session" && sessions === 1) && (
+            <button
+              type="button"
+              class="pane__close"
+              aria-label={`Close ${pane.title}`}
+              title={pane.kind === "console"
+                ? "End this shell and close it"
+                : "Close this conversation"}
+              onClick={() => {
+                if (pane.kind === "console") void consoleCell.remove(pane.id);
+                workspace.removePane(pane.id);
+              }}
+            >
+              {IconX({ size: 10 })}
+            </button>
+          )}
+        </div>
+      ))}
+
+      <div class="panes__add" key="add">
+        <button
+          type="button"
+          class="pane__add"
+          aria-label="New conversation"
+          title="Another conversation in this project — its own session, its own context"
+          onClick={() => {
+            void workspace.addPane(p.id, "session");
+            navigate("/");
+          }}
+        >
+          {IconChat({ size: 11 })}
+          <span class="pane__plus">+</span>
+        </button>
+        <button
+          type="button"
+          class="pane__add"
+          aria-label="New console"
+          title="Another shell in this project's directory"
+          onClick={() => openConsole()}
+        >
+          {IconTerminal({ size: 11 })}
+          <span class="pane__plus">+</span>
+        </button>
+        {
+          /* What this project itself says starts it, read off its own
+            manifests — see lib/launch.ts. Absent rather than disabled when the
+            project does not say: a run button that runs the wrong thing is
+            worse than no run button. */
+        }
+        {p.launch.dev && (
+          <button
+            type="button"
+            class="pane__add pane__add--run"
+            aria-label="Start in developer mode"
+            title={`Run ${p.launch.dev.command} in a new console (from ${p.launch.dev.from})`}
+            onClick={() => openConsole("dev", p.launch.dev?.command)}
+          >
+            {IconPlay({ size: 11 })}
+            <span class="pane__runlabel">dev</span>
+          </button>
+        )}
+        {p.launch.prod && (
+          <button
+            type="button"
+            class="pane__add pane__add--run"
+            aria-label="Start in production mode"
+            title={`Run ${p.launch.prod.command} in a new console (from ${p.launch.prod.from})`}
+            onClick={() => openConsole("production", p.launch.prod?.command)}
+          >
+            {IconPlay({ size: 11 })}
+            <span class="pane__runlabel">prod</span>
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** Is this pane doing something right now? The dot is the only thing a
+ *  collapsed row can say, so it has to mean exactly one thing: work in
+ *  progress. */
+function paneBusy(pane: Pane): boolean {
+  return pane.kind === "console"
+    ? terminalById(pane.id).status === "live"
+    : sessionOf(pane.id).status === "working";
+}
 
 /** What each status is called, for the tab's tooltip. */
 const STATUS_TEXT: Record<string, string> = {
@@ -72,11 +233,12 @@ function ProjectTab(
   // and the same stakes (nothing moves, forever, until it is answered), so it
   // gets the same dot and the same words.
   const isLocal = engineOf(p.id) !== "claude";
+  const chats = isLocal ? localChatsOf(p.id) : [];
   const holds = isLocal
-    ? (localChat(p.id).pending ? 1 : 0)
+    ? chats.filter((c) => c.pending).length
     : s.permissions.filter((r) => r.status === "pending").length;
   const working = isLocal
-    ? localChat(p.id).status === "working"
+    ? chats.some((c) => c.status === "working")
     : s.status === "working";
   // The session keeps the directory it started in, so "selected" and "where
   // Claude Code is actually working" can differ — and only one of them is the
@@ -130,97 +292,98 @@ function ProjectTab(
         workspace.moveProject(id, props.index);
       }}
     >
-      <button
-        type="button"
-        class="ptab__main"
-        aria-pressed={props.active}
-        // Alt+Up and Alt+Down reorder from the keyboard. Drag is the obvious
-        // gesture and the one nobody can perform without a pointer.
-        onKeyDown={(e: KeyboardEvent) => {
-          if (!e.altKey || (e.key !== "ArrowUp" && e.key !== "ArrowDown")) {
-            return;
-          }
-          e.preventDefault();
-          e.stopPropagation();
-          workspace.moveProject(
-            p.id,
-            props.index + (e.key === "ArrowDown" ? 1 : -1),
-          );
-        }}
-        // The name alone, plus the one qualifier that changes what the tab
-        // *means*. Announcing the branch and path here would make every tab a
-        // sentence to listen through, and both are already in the title.
-        aria-label={p.missing ? `${p.name} (folder is gone)` : p.name}
-        title={`${p.name}\n${p.path}${
-          p.missing
-            ? "\nFolder is gone"
-            : `\n${STATUS_TEXT[s.status] ?? s.status}`
-        }${chord}`}
-        onClick={() => workspace.select(p.id)}
-      >
-        {
-          /* A colour per project, from its path. With six tabs open the one
+      <div class="ptab__row">
+        <button
+          type="button"
+          class="ptab__main"
+          aria-pressed={props.active}
+          // Alt+Up and Alt+Down reorder from the keyboard. Drag is the obvious
+          // gesture and the one nobody can perform without a pointer.
+          onKeyDown={(e: KeyboardEvent) => {
+            if (!e.altKey || (e.key !== "ArrowUp" && e.key !== "ArrowDown")) {
+              return;
+            }
+            e.preventDefault();
+            e.stopPropagation();
+            workspace.moveProject(
+              p.id,
+              props.index + (e.key === "ArrowDown" ? 1 : -1),
+            );
+          }}
+          // The name alone, plus the one qualifier that changes what the tab
+          // *means*. Announcing the branch and path here would make every tab a
+          // sentence to listen through, and both are already in the title.
+          aria-label={p.missing ? `${p.name} (folder is gone)` : p.name}
+          title={`${p.name}\n${p.path}${
+            p.missing
+              ? "\nFolder is gone"
+              : `\n${STATUS_TEXT[s.status] ?? s.status}`
+          }${chord}`}
+          onClick={() => workspace.select(p.id)}
+        >
+          {
+            /* A colour per project, from its path. With six tabs open the one
             you want is found by its shape before its name is read — and two
             projects called "app" in different directories are otherwise
             identical until you hover. */
-        }
-        <span
-          class="ptab__mark"
-          style={{ "--hue": String(hueOf(p.path)) }}
-        >
-          {initials(p.name)}
-        </span>
-        <span class="ptab__text truncate">
-          <span class="ptab__name truncate">{p.name}</span>
-          <br />
-          {
-            /* Three children, always. Both of these used to be bare
+          }
+          <span
+            class="ptab__mark"
+            style={{ "--hue": String(hueOf(p.path)) }}
+          >
+            {initials(p.name)}
+          </span>
+          <span class="ptab__text truncate">
+            <span class="ptab__name truncate">{p.name}</span>
+            <br />
+            {
+              /* Three children, always. Both of these used to be bare
               conditionals, so child 0 flipped between a branch icon and
               nothing every time the session's status changed — and the
               reconciler then wrote the next child into the vacated slot. The
               symptom was a tab briefly wearing another tab's subtitle. */
-          }
-          <span class="ptab__sub truncate">
-            <span
-              class="ptab__icon"
-              hidden={!(!p.missing && p.branch && holds === 0 && !working)}
-            >
-              {IconBranch({ size: 10 })}
-            </span>
-            <span class="truncate">{sub}</span>
-            <span
-              title="Uncommitted changes"
-              hidden={!(p.dirty && !p.missing && holds === 0 && !working)}
-            >
-              ●
+            }
+            <span class="ptab__sub truncate">
+              <span
+                class="ptab__icon"
+                hidden={!(!p.missing && p.branch && holds === 0 && !working)}
+              >
+                {IconBranch({ size: 10 })}
+              </span>
+              <span class="truncate">{sub}</span>
+              <span
+                title="Uncommitted changes"
+                hidden={!(p.dirty && !p.missing && holds === 0 && !working)}
+              >
+                ●
+              </span>
             </span>
           </span>
-        </span>
-      </button>
+        </button>
 
-      {
-        /* The signal that survives the tab collapsing to an icon: a dot for a
+        {
+          /* The signal that survives the tab collapsing to an icon: a dot for a
           live session, and a loud one when it is blocked on the user. It gives
           way to the close control on hover, which is the only thing you would
           reach for in that corner once you can see the session is there. */
-      }
-      <span
-        class={`ptab__state${
-          holds > 0
-            ? " ptab__state--holds"
-            : working
-            ? " ptab__state--working"
-            : s.status === "ready"
-            ? " ptab__state--ready"
-            : s.status === "error"
-            ? " ptab__state--error"
-            : ""
-        }`}
-        aria-hidden="true"
-      />
+        }
+        <span
+          class={`ptab__state${
+            holds > 0
+              ? " ptab__state--holds"
+              : working
+              ? " ptab__state--working"
+              : s.status === "ready"
+              ? " ptab__state--ready"
+              : s.status === "error"
+              ? " ptab__state--error"
+              : ""
+          }`}
+          aria-hidden="true"
+        />
 
-      {
-        /* Two different actions, so two different controls with two different
+        {
+          /* Two different actions, so two different controls with two different
           icons — a single × that meant "end the session" on a running tab and
           "remove the project" on an idle one is the ambiguity that kept the
           second one out of this column entirely.
@@ -229,46 +392,54 @@ function ProjectTab(
           undoable: it forgets a row, leaves the folder and Claude Code's own
           history alone, and the strip below this list offers it straight back.
           A confirmation on a reversible action is a tax on the common case. */
-      }
-      <span class="ptab__acts">
-        {running && (
+        }
+        <span class="ptab__acts">
+          {running && (
+            <button
+              type="button"
+              class="ptab__act"
+              title={`End ${p.name}'s session — the conversation is kept, and Resume brings its context back`}
+              aria-label={`Close ${p.name} session`}
+              onClick={() => session.stop(p.id)}
+            >
+              {IconPower({ size: 12 })}
+            </button>
+          )}
+          {
+            /* Open the folder in whatever the desktop uses for one. The tab is
+            where somebody is already thinking about this project, and the
+            alternative is copying a path out of Settings. */
+          }
           <button
             type="button"
             class="ptab__act"
-            title={`End ${p.name}'s session — the conversation is kept, and Resume brings its context back`}
-            aria-label={`Close ${p.name} session`}
-            onClick={() => session.stop(p.id)}
+            title={`Open ${p.path}`}
+            aria-label={`Open ${p.name} folder`}
+            onClick={async () => {
+              const why = await workspace.openPath(p.path);
+              if (why !== null) showToast({ text: why, tone: "danger" });
+            }}
           >
-            {IconPower({ size: 12 })}
+            {IconFolderOpen({ size: 12 })}
           </button>
-        )}
-        {
-          /* Open the folder in whatever the desktop uses for one. The tab is
-            where somebody is already thinking about this project, and the
-            alternative is copying a path out of Settings. */
-        }
-        <button
-          type="button"
-          class="ptab__act"
-          title={`Open ${p.path}`}
-          aria-label={`Open ${p.name} folder`}
-          onClick={async () => {
-            const why = await workspace.openPath(p.path);
-            if (why !== null) showToast({ text: why, tone: "danger" });
-          }}
-        >
-          {IconFolderOpen({ size: 12 })}
-        </button>
-        <button
-          type="button"
-          class="ptab__act ptab__act--danger"
-          title={`Remove ${p.name} from this list — the folder and its Claude Code history are untouched, and this can be undone`}
-          aria-label={`Remove ${p.name}`}
-          onClick={() => workspace.removeProject(p.id)}
-        >
-          {IconTrash({ size: 12 })}
-        </button>
-      </span>
+          <button
+            type="button"
+            class="ptab__act ptab__act--danger"
+            title={`Remove ${p.name} from this list — the folder and its Claude Code history are untouched, and this can be undone`}
+            aria-label={`Remove ${p.name}`}
+            onClick={() => workspace.removeProject(p.id)}
+          >
+            {IconTrash({ size: 12 })}
+          </button>
+        </span>
+      </div>
+
+      {
+        /* What this project has open, and the ways to open more. Only for the
+          project being worked in: five projects' worth of children is a wall,
+          and the ones you are not looking at have nothing to say. */
+      }
+      {props.active && <PaneList project={p} />}
     </div>
   );
 }

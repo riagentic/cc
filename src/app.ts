@@ -8,6 +8,7 @@ import "./cell/workspace.ts";
 import "./cell/prefs.ts";
 import "./cell/browse.ts";
 import "./cell/metrics.ts";
+import "./cell/console.ts";
 import "./cell/session.ts";
 import "./cell/jobs.ts";
 import "./cell/loops.ts";

@@ -11,6 +11,8 @@ import {
   local,
   localChat,
   localConfig,
+  MAX_LOCAL_MESSAGES,
+  MAX_ROUNDS,
   speedOf,
 } from "../../cell/local.ts";
 import { workspace } from "../../cell/workspace.ts";
@@ -335,7 +337,7 @@ Deno.test("a runaway model hits the round cap and says so", async () => {
   // A model that never stops calling. The cap holds, the reader is told, and
   // the calls from the final round — for which no tools were offered — are
   // not run: the turn has no rounds left to spend on them.
-  const always = Array.from({ length: 24 }, (_, i) => ({
+  const always = Array.from({ length: MAX_ROUNDS }, (_, i) => ({
     toolCalls: [{ id: `r${i}`, name: "ls", args: "{}" }],
   }));
   await withEngine(always, async (id, requests) => {
@@ -344,9 +346,23 @@ Deno.test("a runaway model hits the round cap and says so", async () => {
     const chat = localChat(id);
     assertEquals(chat.status, "idle");
     assert(chat.error?.includes("tool limit"), chat.error ?? "(null)");
-    assertEquals(requests.length, 24);
-    assertEquals((requests[23] as { tools?: unknown[] }).tools, undefined);
-    assertEquals(chat.messages.filter((m) => m.role === "tool").length, 23);
+    // The cap held, and the final round offered no tools — so the model had to
+    // answer with words instead of asking for another one.
+    assertEquals(requests.length, MAX_ROUNDS);
+    assertEquals(
+      (requests[MAX_ROUNDS - 1] as { tools?: unknown[] }).tools,
+      undefined,
+    );
+    // The transcript is bounded whatever the round cap is. Asserted as the
+    // bound rather than as a count: with a cap above the transcript's own
+    // limit, most of those rounds are trimmed away by design, and a hard-coded
+    // number here fails for the one reason that is not a bug.
+    assert(
+      chat.messages.length <= MAX_LOCAL_MESSAGES,
+      `transcript grew to ${chat.messages.length}`,
+    );
+    const tools = chat.messages.filter((m) => m.role === "tool").length;
+    assert(tools > 0 && tools <= MAX_ROUNDS - 1, `${tools} tool rows`);
   });
 });
 
@@ -1136,11 +1152,13 @@ Deno.test("a write makes the same read a new question again", async () => {
 });
 
 Deno.test("running out of tool rounds still ends in an answer", async () => {
-  // Twenty-three rounds that keep calling, then the round limit: the last
-  // request carries no tools, so the model has to say something. Ending a
-  // turn with an error and no answer throws away all the work it just did.
+  // Rounds that keep calling, right up to the limit: the last request carries
+  // no tools, so the model has to say something. Ending a turn with an error
+  // and no answer throws away all the work it just did.
   const script: Scripted[] = [];
-  for (let i = 0; i < 23; i++) {
+  // One short of the cap, so the limit is reached exactly — derived from the
+  // constant, not copied from it.
+  for (let i = 0; i < MAX_ROUNDS - 1; i++) {
     script.push({
       toolCalls: [{ id: `t${i}`, name: "ls", args: `{"path":"${i}"}` }],
     });

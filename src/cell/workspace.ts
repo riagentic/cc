@@ -11,12 +11,14 @@
  */
 import { cell, log, type MethodDraftMeta, schedule } from "aio";
 import type {
+  Pane,
   PermissionMode,
   Project,
   ProjectSettings,
 } from "../type/claude.ts";
 import { baseName } from "../lib/format.ts";
 import { EFFORTS, MODELS, PERMISSION_MODES } from "../lib/stream.ts";
+import { launches } from "../lib/launch.ts";
 
 /**
  * The palette. `contrast` is a fourth choice rather than a toggle on top of
@@ -67,6 +69,17 @@ type WorkspaceState = {
   /** This session's undo buffer for removed projects. */
   forgotten: Project[];
   /**
+   * What each project has open: its conversations and its shells, in the order
+   * they were made.
+   *
+   * On the workspace rather than on the `Project` because a pane is not a
+   * setting — it is not seeded from the CLI, not copied to a new project, and
+   * not part of what "this project is configured like this" means.
+   */
+  panes: Record<string, Pane[]>;
+  /** Which pane each project is showing. */
+  activePane: Record<string, string>;
+  /**
    * The folder the last add could not find, resolved.
    *
    * A field rather than something parsed back out of `error`: the offer to
@@ -110,6 +123,27 @@ const tidy = (path: unknown): string =>
  */
 
 /**
+ * Every project has at least one conversation.
+ *
+ * The first one's pane id is the *project* id, deliberately: that is the key
+ * the session cell has always used, so a project remembered from before panes
+ * existed keeps its conversation instead of silently starting a new one.
+ */
+function ensurePanes(s: WorkspaceState, projectId: string): Pane[] {
+  const list = (s.panes[projectId] ??= []);
+  if (!list.some((p) => p.kind === "session")) {
+    list.unshift({
+      id: projectId,
+      kind: "session",
+      title: "Chat",
+      createdAt: Date.now(),
+    });
+  }
+  s.activePane[projectId] ??= list[0].id;
+  return list;
+}
+
+/**
  * The state as it is NOW, for a cell whose reads are otherwise pinned at method
  * entry.
  *
@@ -138,6 +172,11 @@ async function probe(s: Draft, id: string): Promise<void> {
 
   const exists = await io.isDirectory(path);
   const git = exists ? await io.gitInfo(path) : { branch: null, dirty: false };
+  // Re-read on every probe. A `dev` task added five minutes ago should make the
+  // button appear, not wait for somebody to guess that Refresh is the answer.
+  const run = exists
+    ? launches(await (await import("./catalog.server.ts")).readManifests(path))
+    : { dev: null, prod: null };
 
   // Re-found after the awaits, in CURRENT state: the list can be edited while
   // git runs, and another probe may have written the same answer already.
@@ -154,6 +193,11 @@ async function probe(s: Draft, id: string): Promise<void> {
   }
   if (target.branch !== git.branch) target.branch = git.branch;
   if (target.dirty !== git.dirty) target.dirty = git.dirty;
+  // Compared before writing, like everything else here: this runs every twenty
+  // seconds, and an unchanged value written anyway is a full-state broadcast.
+  if (JSON.stringify(target.launch) !== JSON.stringify(run)) {
+    target.launch = run;
+  }
 }
 
 /**
@@ -197,6 +241,23 @@ async function probeAll(s: Draft): Promise<void> {
   const git = active && gone.get(activeId)
     ? await io.gitInfo(active.path)
     : null;
+  // What each project says starts it. For EVERY project, not just the active
+  // one: the dock draws these buttons on every tab, and a button that only
+  // appears after you have clicked the tab is a button you never learn about.
+  // Four small file reads per project, on a pass that already stats each one.
+  const catalog = await import("./catalog.server.ts");
+  const runs = new Map(
+    await Promise.all(
+      targets.map(async (t) =>
+        [
+          t.id,
+          gone.get(t.id)
+            ? launches(await catalog.readManifests(t.path))
+            : { dev: null, prod: null },
+        ] as const
+      ),
+    ),
+  );
 
   // ── write ──
   //
@@ -208,6 +269,13 @@ async function probeAll(s: Draft): Promise<void> {
   for (const p of live.projects) {
     const exists = gone.get(p.id);
     if (exists === undefined) continue; // added while we were gathering
+    // Compared before writing, like everything else on this pass: it runs
+    // every twenty seconds, and an unchanged value written anyway is a
+    // full-state broadcast to every client.
+    const run = runs.get(p.id);
+    if (run && JSON.stringify(p.launch) !== JSON.stringify(run)) {
+      p.launch = run;
+    }
     // Written only when it actually changes. Every path that re-checks the disk
     // computes the same answer, so an unconditional assignment is a *write* of
     // an unchanged value — which is still a write, and still collides with the
@@ -252,6 +320,30 @@ function parentOf(path: string): string {
  * never touches the folder or Claude Code's transcripts for it; it forgets a
  * row, which is why one click is enough and a confirmation would be theatre.
  */
+/**
+ * Drop the panes of projects nothing can reach any more.
+ *
+ * Panes outlive a removal on purpose: `forgotten` is an undo, and a project
+ * brought back should come back with its conversations rather than as a bare
+ * tab. But `forgotten` is capped and is not persisted, so a project that falls
+ * off it — or that was removed in an earlier run — leaves its panes behind
+ * with nothing able to reach them, in state that IS persisted.
+ */
+function prunePanes(s: WorkspaceState): number {
+  const reachable = new Set([
+    ...s.projects.map((p) => p.id),
+    ...s.forgotten.map((p) => p.id),
+  ]);
+  let dropped = 0;
+  for (const id of Object.keys(s.panes)) {
+    if (reachable.has(id)) continue;
+    delete s.panes[id];
+    delete s.activePane[id];
+    dropped += 1;
+  }
+  return dropped;
+}
+
 function forget(s: WorkspaceState, ids: string[]): void {
   // Snapshotted, not referenced. `s.projects` is overwritten two lines down,
   // and a live draft reference taken before that silently resolves to the NEW
@@ -270,6 +362,7 @@ function forget(s: WorkspaceState, ids: string[]): void {
     paths: doomed.map((p) => p.path),
   });
   released(doomed.map((p) => p.id));
+  prunePanes(s);
   if (ids.includes(s.activeId)) {
     // Prefer a project that is actually there — moving to another dead one
     // would just carry the dead end along the list.
@@ -316,6 +409,13 @@ async function applyAddProject(
   const cli = exists
     ? await (await import("./catalog.server.ts")).readCliDefaults(clean)
     : { model: "", effort: "", permissionMode: "" };
+  // What the project says starts it. Read here with everything else, so the
+  // buttons are right the moment the tab appears rather than after a refresh.
+  const run = exists
+    ? launches(
+      await (await import("./catalog.server.ts")).readManifests(clean),
+    )
+    : { dev: null, prod: null };
 
   // ── write ──
   //
@@ -367,6 +467,7 @@ async function applyAddProject(
     dirty: git.dirty,
     missing: false,
     addedAt: Date.now(),
+    launch: run,
     // Layered: this app's seed, then whatever the CLI is configured to do for
     // this directory. Only values the settings files actually name win, so a
     // project with no configuration of its own inherits the seed rather than
@@ -460,19 +561,40 @@ function released(ids: string[]): void {
  * it is being compared against.
  */
 export function pruneUnknown(): void {
+  void workspace.prunePanes();
   void import("./local.ts").then((m) => m.local.pruneUnknown()).catch(() => {});
   void import("./loops.ts").then((m) => m.loops.pruneUnknown()).catch(() => {});
 }
 
-function reprojected(id: string): void {
+/**
+ * Which conversation a project is showing, read off the DRAFT.
+ *
+ * The selector version of this reads the committed cell, which is a render
+ * behind while a method is still writing — and this is called immediately
+ * after `activePane` is set, to tell the session cell which record to bring to
+ * the top. A render behind here would switch to the previous conversation.
+ */
+function sessionKeyIn(s: WorkspaceState, projectId: string): string {
+  const list = s.panes[projectId] ?? [];
+  const chosen = s.activePane[projectId];
+  const pane = list.find((p) => p.id === chosen);
+  if (pane?.kind === "session") return pane.id;
+  // Either a shell is showing, or there are no panes yet: the project's first
+  // conversation is the answer, and its id is the project's own.
+  return list.find((p) => p.kind === "session")?.id ?? projectId;
+}
+
+function reprojected(id: string, sessionKey = id): void {
   // The conversation first: it is the thing on screen. `view()` resolves by key
   // so nothing renders the wrong transcript while this is in flight, but the
-  // top level must still come to hold the project you are looking at.
-  void import("./session.ts").then((m) => m.session.switchTo(id)).catch((e) => {
-    log.warn("workspace", "could not switch the session", {
-      error: e instanceof Error ? e.message : String(e),
-    });
-  });
+  // top level must still come to hold the conversation you are looking at.
+  void import("./session.ts").then((m) => m.session.switchTo(sessionKey)).catch(
+    (e) => {
+      log.warn("workspace", "could not switch the session", {
+        error: e instanceof Error ? e.message : String(e),
+      });
+    },
+  );
   void import("./tree.ts").then((m) => m.tree.reproject()).catch(() => {});
   void import("./catalog.ts").then((m) => m.catalog.reproject()).catch(
     () => {},
@@ -511,6 +633,10 @@ export const workspace = cell("workspace", {
      * asked for about a decision they made last week.
      */
     forgotten: [] as Project[],
+    /** What each project has open — see the type above. */
+    panes: {} as Record<string, Pane[]>,
+    /** Which pane each project is showing. */
+    activePane: {} as Record<string, string>,
   },
 
   // Everything here is a user choice worth surviving a restart. `error` is not:
@@ -529,16 +655,35 @@ export const workspace = cell("workspace", {
    * project that has none of its own, so an upgrade lands on exactly the
    * configuration the user last chose, now attached to each of their codebases.
    */
-  version: 3,
+  version: 4,
   onMigrate(state, from) {
+    // v4 gave every project a `launch` — what its own manifests say starts it.
+    // A stored project has none, and aio refuses to boot on a shape it does
+    // not recognise, so it is filled in here with "the project does not say".
+    // The next probe reads the manifests and replaces it, seconds later.
+    if (from >= 3) {
+      const old = state as unknown as { projects?: unknown[] };
+      return {
+        ...(state as unknown as Record<string, unknown>),
+        projects: (old.projects ?? []).map((p) => ({
+          launch: { dev: null, prod: null },
+          ...(p as Record<string, unknown>),
+        })),
+      } as typeof state;
+    }
     // v3 added `autoForget` (and the unpersisted `forgotten`). Stored state
     // from v2 simply has no such key, and aio refuses to boot on a shape it
     // does not recognise — so it is filled in here rather than left to the
     // first write to discover.
     if (from >= 2) {
+      const old = state as unknown as { projects?: unknown[] };
       return {
         autoForget: true,
         ...(state as unknown as Record<string, unknown>),
+        projects: (old.projects ?? []).map((p) => ({
+          launch: { dev: null, prod: null },
+          ...(p as Record<string, unknown>),
+        })),
       } as typeof state;
     }
     const old = state as unknown as Record<string, unknown>;
@@ -747,6 +892,125 @@ export const workspace = cell("workspace", {
       s.projects.splice(target, 0, moved);
     },
 
+    /**
+     * Add a conversation or a shell to a project, and show it.
+     *
+     * Returns the new pane's id, which is also the session key or the terminal
+     * id — one identifier, so nothing has to map between two.
+     */
+    addPane(
+      s: WorkspaceState,
+      projectId: unknown,
+      kind: unknown,
+      // Minted by the caller when the thing the pane points at has to exist
+      // first — see the dock's `openConsole`.
+      id?: unknown,
+      /** For a launcher's console: what it runs. See `Pane.command`. */
+      command?: unknown,
+    ): string {
+      if (kind !== "session" && kind !== "console") return "";
+      const pid = typeof projectId === "string" && projectId
+        ? projectId
+        : s.activeId;
+      if (!s.projects.some((p) => p.id === pid)) return "";
+
+      const list = ensurePanes(s, pid);
+      const nth = list.filter((p) => p.kind === kind).length + 1;
+      const pane: Pane = {
+        // The first session keeps the project id (see `ensurePanes`); every
+        // other pane gets one of its own.
+        id: typeof id === "string" && id !== "" ? id : crypto.randomUUID(),
+        kind,
+        title: kind === "session"
+          ? `Chat ${nth}`
+          : nth === 1
+          ? "Console"
+          : `Console ${nth}`,
+        createdAt: Date.now(),
+        command: typeof command === "string" && command !== ""
+          ? command
+          : undefined,
+      };
+      list.push(pane);
+      s.activePane[pid] = pane.id;
+      if (kind === "session") {
+        // A new conversation is empty until something switches to it — the
+        // session cell keeps one record at the top level and parks the rest.
+        reprojected(pid, pane.id); // aiol-ok: orchestration, after the write
+      }
+      return pane.id;
+    },
+
+    /** Show a pane. The project it belongs to becomes the active one, because
+     *  clicking a child row is a way of choosing its parent too. */
+    selectPane(s: WorkspaceState, id: unknown) {
+      if (typeof id !== "string" || id === "") return;
+      for (const [pid, list] of Object.entries(s.panes)) {
+        if (!list.some((p) => p.id === id)) continue;
+        s.activePane[pid] = id;
+        // The session cell is told which conversation to bring to the top even
+        // when the project has not changed — switching between two chats in
+        // one project is the whole point of a pane.
+        reprojected(pid, sessionKeyIn(s, pid)); // aiol-ok: after the write
+        s.activeId = pid;
+        return;
+      }
+    },
+
+    /**
+     * Close a pane.
+     *
+     * The last conversation cannot be closed: a project with no conversation
+     * is a project whose Chat page has nothing to show and no way to get one
+     * back. Shells can all be closed — an empty Console page offers to open
+     * one, which a Chat page cannot honestly do.
+     */
+    removePane(s: WorkspaceState, id: unknown) {
+      if (typeof id !== "string") return;
+      for (const [pid, list] of Object.entries(s.panes)) {
+        const at = list.findIndex((p) => p.id === id);
+        if (at < 0) continue;
+        if (
+          list[at].kind === "session" &&
+          list.filter((p) => p.kind === "session").length === 1
+        ) return;
+        list.splice(at, 1);
+        if (s.activePane[pid] === id) {
+          s.activePane[pid] = (list[at] ?? list[at - 1] ?? list[0])?.id ?? "";
+        }
+        return;
+      }
+    },
+
+    /** Rename a pane. Long names are cut rather than refused: a title is a
+     *  label, and the tab has a fixed width whatever it says. */
+    renamePane(s: WorkspaceState, id: unknown, title: unknown) {
+      if (typeof id !== "string" || typeof title !== "string") return;
+      const clean = title.trim().slice(0, 40);
+      if (clean === "") return;
+      for (const list of Object.values(s.panes)) {
+        const pane = list.find((p) => p.id === id);
+        if (pane) {
+          pane.title = clean;
+          return;
+        }
+      }
+    },
+
+    /** The panes half of the leftovers sweep — see {@link prunePanes} and the
+     *  button in Settings that runs it. */
+    prunePanes(s: WorkspaceState) {
+      // Same reason as the local cell's sweep: an EMPTY project list means the
+      // workspace has not settled, not that there are no projects.
+      if (s.projects.length === 0) return;
+      const dropped = prunePanes(s);
+      if (dropped > 0) {
+        log.info("workspace", "dropped panes for unknown projects", {
+          dropped,
+        });
+      }
+    },
+
     /** Drop the offer to create a folder — the user typed something else, or
      *  changed their mind. */
     forgetAbsent(s: WorkspaceState) {
@@ -860,7 +1124,7 @@ export const workspace = cell("workspace", {
     ) {
       if (!s.projects.some((p) => p.id === id) || s.activeId === id) return;
       s.activeId = id;
-      reprojected(id);
+      reprojected(id, sessionKeyIn(s, id));
       s.$do?.(schedule.next("probe-active", workspace.refreshGit.action()));
     },
 
@@ -1034,4 +1298,54 @@ export const activeSettings = (): ProjectSettings => {
     allowedDirs: p.allowedDirs ?? [],
     skipPermissions: p.skipPermissions ?? false,
   };
+};
+
+/** A project's panes, with its first conversation guaranteed. Read-only: the
+ *  `ensurePanes` that creates one lives in a method, because a selector that
+ *  writes is a selector that fires on render. */
+export const panesOf = (projectId?: string): Pane[] => {
+  const pid = projectId ?? workspace.activeId;
+  const list = workspace.panes[pid] ?? [];
+  // A project from before panes existed, or one whose panes have not been
+  // written yet, still has exactly one conversation — under the project's own
+  // id, which is the key the session cell has always used.
+  if (!list.some((p) => p.kind === "session") && pid) {
+    return [
+      { id: pid, kind: "session", title: "Chat", createdAt: 0 },
+      ...list,
+    ];
+  }
+  return list;
+};
+
+/** The pane a project is showing, or its first. */
+export const activePane = (projectId?: string): Pane | null => {
+  const pid = projectId ?? workspace.activeId;
+  const list = panesOf(pid);
+  if (list.length === 0) return null;
+  const chosen = workspace.activePane[pid];
+  return list.find((p) => p.id === chosen) ?? list[0];
+};
+
+/**
+ * The session key the Chat page is showing.
+ *
+ * The active pane when it is a conversation; otherwise the project's first
+ * one — looking at a shell does not change which conversation Chat is about.
+ */
+export const activeSessionKey = (projectId?: string): string => {
+  const pid = projectId ?? workspace.activeId;
+  const pane = activePane(pid);
+  if (pane?.kind === "session") return pane.id;
+  return panesOf(pid).find((p) => p.kind === "session")?.id ?? pid;
+};
+
+/** Which project a pane belongs to, or `""`. Used by the session cell, which
+ *  is handed a key and has to find the directory to spawn in. */
+export const projectOfPane = (paneId: string): string => {
+  for (const [pid, list] of Object.entries(workspace.panes)) {
+    if (list.some((p) => p.id === paneId)) return pid;
+  }
+  // The first conversation's id IS the project id — see `ensurePanes`.
+  return workspace.projects.some((p) => p.id === paneId) ? paneId : "";
 };

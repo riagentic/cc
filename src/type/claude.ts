@@ -284,6 +284,51 @@ export type Project = ProjectSettings & {
    *  all land here, and the UI offers the remedy instead of failing at spawn. */
   missing: boolean;
   addedAt: number;
+  /**
+   * The commands this project says start it, read off its own manifests.
+   *
+   * Stored rather than derived on demand because the dock draws a button for
+   * each one on every render, and reading four files per project per frame is
+   * not a thing to do. `null` means the project does not say — and the button
+   * is then not offered, because a run button that runs the wrong thing is
+   * worse than no run button.
+   */
+  launch: ProjectLaunch;
+};
+
+/**
+ * One thing open inside a project: a conversation, or a shell.
+ *
+ * A project is a codebase, not a window — people run two agents on one
+ * codebase, or an agent and a build, and until now each project could hold
+ * exactly one of each. A pane is the unit the dock lists and the unit a page
+ * renders.
+ *
+ * The id is the key everything else uses: a session pane's id is the session
+ * cell's key, a console pane's id is the terminal's id. One identifier, so
+ * nothing has to map between two.
+ */
+export type Pane = {
+  id: string;
+  kind: "session" | "console";
+  /** What the dock calls it. Editable later; auto-named now. */
+  title: string;
+  createdAt: number;
+  /**
+   * For a console opened by a launcher: the command it runs.
+   *
+   * Panes are remembered across restarts and shells are not, so without this a
+   * tab that says `dev` comes back as an ordinary prompt that has forgotten
+   * what it was for. Empty for a plain shell.
+   */
+  command?: string;
+};
+
+/** What a project's manifests say about running it. Filled by `readManifests`
+ *  and interpreted by `lib/launch.ts`. */
+export type ProjectLaunch = {
+  dev: { command: string; title: string; from: string } | null;
+  prod: { command: string; title: string; from: string } | null;
 };
 
 export type ModelOption = {
@@ -364,6 +409,44 @@ export type Job = {
   updatedAt: number;
   /** Newest last. Capped — a long job's timeline is not a transcript. */
   timeline: JobEvent[];
+  /**
+   * The git worktree this job was given, if it was given one.
+   *
+   * It matters at removal time and nowhere else: `claude rm` deletes the
+   * worktree along with the job, and anything that removes the job *without*
+   * the CLI leaves the worktree behind — which has to be said out loud rather
+   * than discovered later.
+   */
+  worktree: string | null;
+  /**
+   * The job claims to be running or waiting, and there is no background
+   * service alive to be running it.
+   *
+   * Not a state of its own: `state` is what the job last wrote about itself,
+   * and it is still true that it *was* blocked. This says the claim can no
+   * longer be acted on — which is the difference between "answer this" and
+   * "this is a leftover".
+   */
+  stale: boolean;
+};
+
+/**
+ * The background service, as its own roster file describes it.
+ *
+ * Claude Code's daemon runs on demand and exits when idle, so "no service" is
+ * an ordinary state rather than a fault. It matters because `claude stop` and
+ * `claude rm` confirm their work *through* the daemon: with none running they
+ * refuse, and the job cannot be removed by any command at all.
+ */
+export type DaemonInfo = {
+  /** The supervisor process is alive right now. */
+  running: boolean;
+  /** The pid the roster names, or `0` when there is no roster. */
+  pid: number;
+  /** When the roster was last written. `0` when there is none. */
+  updatedAt: number;
+  /** Job ids the roster lists as live workers. */
+  workers: string[];
 };
 
 /* ── loops ───────────────────────────────────────────────────────────────────

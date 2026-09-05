@@ -14,7 +14,7 @@
  * and there is nothing to subscribe to.
  */
 import { cell, log, type MethodDraftMeta, schedule } from "aio";
-import type { Job } from "../type/claude.ts";
+import type { DaemonInfo, Job } from "../type/claude.ts";
 import type { JobAction } from "./catalog.server.ts";
 
 /** Poll cadence. Fast enough that a job changing state is noticed while the
@@ -30,11 +30,38 @@ const POLL_MS = 5_000;
  * the draft and sees it exactly as it is.
  */
 
+/**
+ * The CLI's refusal, corrected when we know more than it said.
+ *
+ * `claude stop` and `claude rm` answer a missing background service with "the
+ * background service may be restarting. Try again in a moment." That is true
+ * of a service that is coming back and false of one that exited weeks ago —
+ * and following the advice is exactly what somebody does, several times, before
+ * giving up. When the roster shows no live supervisor, the app knows better and
+ * says so.
+ *
+ * Pure, and exported, because the wording is the whole point of it.
+ */
+export function explainRefusal(
+  failed: string,
+  serviceRunning: boolean,
+): string {
+  if (serviceRunning || !/background service/i.test(failed)) return failed;
+  return `${failed.replace(/\s*Try again in a moment\.?/i, "").trim()} ` +
+    "It is not restarting: it exited, and nothing starts it again on its own. " +
+    "Removing the record is the only thing that works from here.";
+}
+
 /** Re-read every background session into the draft. */
 async function scan(s: JobsState): Promise<void> {
   try {
     const io = await import("./catalog.server.ts");
+    const daemon = await io.readDaemon();
     const found = await io.listJobs();
+    // Compared the same way the list is: this is polled every few seconds and
+    // an unconditional write would broadcast the whole cell for a value that
+    // changes when a daemon starts or stops, which is roughly never.
+    if (JSON.stringify(daemon) !== JSON.stringify(s.daemon)) s.daemon = daemon;
     // Written only when something actually moved. This runs every few seconds
     // and the value is large — four jobs carry four capped timelines — so an
     // unconditional assignment made every poll a full-state broadcast and a
@@ -55,6 +82,15 @@ async function scan(s: JobsState): Promise<void> {
 
 type JobsState = {
   jobs: Job[];
+  /**
+   * The background service, as its own roster describes it.
+   *
+   * On the page because it explains the one failure users cannot otherwise
+   * make sense of: with no service running, `claude stop` and `claude rm`
+   * cannot confirm their work and refuse — so a job sits there, "waiting for
+   * you", and no button removes it.
+   */
+  daemon: DaemonInfo;
   /** The job whose detail is open, by id. Empty when the list is showing. */
   selectedId: string;
   scannedAt: number;
@@ -70,6 +106,12 @@ export const jobs = cell("jobs", {
 
   state: {
     jobs: [] as Job[],
+    daemon: {
+      running: false,
+      pid: 0,
+      updatedAt: 0,
+      workers: [] as string[],
+    } as DaemonInfo,
     selectedId: "",
     scannedAt: 0,
     busyId: "",
@@ -147,7 +189,61 @@ export const jobs = cell("jobs", {
       // Written after the rescan, which clears the error field on a clean
       // listing — an action's failure must outlive the refresh it triggers,
       // or the page shows nothing where a refusal belongs.
-      if (failed) s.error = failed;
+      //
+      // …and translated when we know better than the message does. The CLI
+      // says "the background service may be restarting. Try again in a
+      // moment." for a service that exited weeks ago and is not coming back on
+      // its own — so "try again in a moment" is advice that never works, and
+      // following it is exactly what a user does before giving up.
+      // aiol-ok: `daemon` is read after the rescan on purpose — the rescan
+      // just refreshed it, and it is that fresh answer the message depends on.
+      if (failed) s.error = explainRefusal(failed, s.daemon.running); // aiol-ok
+    },
+
+    /**
+     * Delete the app's and the CLI's record of a job, without the CLI.
+     *
+     * The escape hatch, and the only thing that works in the state that
+     * produced it: `claude rm` confirms the removal *through* the background
+     * service, so with none running it refuses — and a job whose daemon exited
+     * weeks ago can be removed by no command at all. It sits in the list
+     * saying "waiting for you" forever.
+     *
+     * Deliberately a different verb from `remove`. This one does not ask the
+     * CLI, does not stop anything, and does not touch a worktree; it deletes
+     * `~/.claude/jobs/<id>`, which is the record. The conversation is in
+     * `~/.claude/projects` and stays there. The UI says all of that before
+     * offering it.
+     */
+    async forget(s: JobsState, id: string) {
+      if (typeof id !== "string" || id === "") return;
+      s.busyId = id;
+      s.error = null;
+      let failed: string | null = null;
+      let worktree: string | null = null;
+      try {
+        const io = await import("./catalog.server.ts");
+        const done = await io.forgetJob(id);
+        failed = done.error;
+        worktree = done.worktree;
+        if (failed === null) {
+          log.info("jobs", "forgot a job record", { id, worktree });
+        } else {
+          log.warn("jobs", "could not forget a job", { id, error: failed });
+        }
+      } catch (e) {
+        failed = e instanceof Error ? e.message : String(e);
+      } finally {
+        s.busyId = "";
+      }
+      if (failed === null) s.selectedId = "";
+      await scan(s);
+      s.error = failed ??
+        (worktree
+          // Not an error — a fact that would otherwise be discovered as a
+          // stray directory months later.
+          ? `Removed the job record. Its worktree is still at ${worktree}.`
+          : null);
     },
   },
 });
@@ -164,3 +260,16 @@ export const activeJobs = (): Job[] =>
  *  user for: nothing moves them until somebody answers. */
 export const blockedJobs = (): Job[] =>
   jobs.jobs.filter((j) => j.state === "blocked");
+
+/** Jobs whose claim can no longer be acted on: they say they are working or
+ *  waiting, and there is no background service alive to be doing it. */
+export const staleJobs = (): Job[] => jobs.jobs.filter((j) => j.stale);
+
+/**
+ * Whether the CLI's own stop/remove can work at all right now.
+ *
+ * Both confirm through the background service. With none running they refuse
+ * with "the background service may be restarting" — which is misleading when
+ * it exited weeks ago and is not restarting at all.
+ */
+export const cliCanRemove = (): boolean => jobs.daemon.running;

@@ -322,6 +322,23 @@ Deno.test("tree — a changed file carries its committed version", async () => {
     await workspace.addProject(dir);
     await tree.refresh();
 
+    // The committed version is only fetched for a file git says has CHANGED,
+    // so the list of changed files is this test's real precondition. Waited
+    // for rather than assumed: `addProject` also schedules a refresh of its
+    // own, and in a full run — every test file shares one process, and so one
+    // set of cells — another file's pending work can land in between and leave
+    // this one reading a list that has been re-read but not yet refilled.
+    // Asserting the precondition turns a rare confusing failure into an
+    // immediate clear one.
+    for (let i = 0; i < 50 && !tree.modified.includes(`${dir}/a.txt`); i++) {
+      await new Promise((r) => setTimeout(r, 10));
+    }
+    assertEquals(
+      tree.modified.includes(`${dir}/a.txt`),
+      true,
+      "git should have reported a.txt as changed before we ask for its HEAD",
+    );
+
     await tree.select(`${dir}/a.txt`);
     assertEquals(tree.previewHead, "before\n", "the committed version");
 

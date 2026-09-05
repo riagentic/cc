@@ -16,6 +16,7 @@
 import { log } from "aio";
 import { join } from "@std/path";
 import type {
+  DaemonInfo,
   HookInfo,
   Job,
   JobEvent,
@@ -27,6 +28,7 @@ import type {
   TreeNode,
 } from "../type/claude.ts";
 import { homeDir, resolvePath } from "./claude.server.ts";
+import { makeTargets, type Manifests, noManifests } from "../lib/launch.ts";
 
 /* ── small readers ───────────────────────────────────────────────────────── */
 
@@ -155,6 +157,9 @@ async function jobTimeline(dir: string): Promise<JobEvent[]> {
 export async function listJobs(): Promise<Job[]> {
   const root = join(homeDir(), ".claude", "jobs");
   const out: Job[] = [];
+  // Read once for the whole listing: staleness is a fact about the service,
+  // not about each job, and asking per job would stat the same pid N times.
+  const daemon = await readDaemon();
   let entries: Deno.DirEntry[];
   try {
     entries = await Array.fromAsync(Deno.readDir(root));
@@ -202,10 +207,145 @@ export async function listJobs(): Promise<Job[]> {
       createdAt: time(s.createdAt),
       updatedAt: time(s.updatedAt),
       timeline: await jobTimeline(dir),
+      worktree: str(s.worktreePath) || null,
+      // A job that says it is working or waiting, with no service alive to be
+      // running it. Deliberately narrow: it is not "the daemon does not list
+      // it" — the roster only names live *workers*, and a blocked job is not
+      // one — it is "there is no service at all", which is provable from one
+      // pid and is the exact condition under which `claude rm` refuses.
+      stale: !daemon.running &&
+        (jobState(s.state) === "working" || jobState(s.state) === "blocked"),
     });
   }
   // Freshest first: a job that moved a second ago is the one being watched.
   return out.sort((a, b) => b.updatedAt - a.updatedAt);
+}
+
+/* ── how a project is run ─────────────────────────────────────────────────── */
+
+/**
+ * Read what a project's manifests say about running it.
+ *
+ * Four cheap file reads, none of which is required to exist. Everything that
+ * decides what the buttons offer is in `lib/launch.ts`, which is pure — this
+ * only gathers.
+ */
+export async function readManifests(root: string): Promise<Manifests> {
+  const found = noManifests();
+
+  for (const name of ["deno.json", "deno.jsonc"]) {
+    const cfg = obj(await readJson(join(root, name)));
+    const tasks = obj(cfg.tasks);
+    if (Object.keys(tasks).length > 0) {
+      found.denoTasks = Object.keys(tasks);
+      break;
+    }
+  }
+
+  const pkg = obj(await readJson(join(root, "package.json")));
+  found.npmScripts = Object.keys(obj(pkg.scripts));
+
+  found.cargo = await Deno.stat(join(root, "Cargo.toml"))
+    .then((st) => st.isFile).catch(() => false);
+
+  for (const name of ["Makefile", "makefile", "GNUmakefile"]) {
+    const text = await Deno.readTextFile(join(root, name)).catch(() => null);
+    if (text !== null) {
+      // Bounded: a generated Makefile can be enormous, and only the first few
+      // hundred lines ever hold the targets a person types.
+      found.makeTargets = makeTargets(text.slice(0, 64 * 1024));
+      break;
+    }
+  }
+
+  return found;
+}
+
+/* ── the background service ──────────────────────────────────────────────── */
+
+/**
+ * Is a process alive, without disturbing it?
+ *
+ * `/proc` on Linux: a directory lookup, exact, and with no signal sent to
+ * somebody else's supervisor. Everywhere else, `SIGCONT` — which a running
+ * process ignores and a dead one answers with `NotFound`. On a platform where
+ * neither works the answer is `true`, because claiming a service is dead when
+ * we cannot tell would turn "I do not know" into a wrong instruction.
+ */
+async function pidAlive(pid: number): Promise<boolean> {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  if (Deno.build.os === "linux") {
+    return await Deno.stat(`/proc/${pid}`).then(() => true).catch(() => false);
+  }
+  try {
+    Deno.kill(pid, "SIGCONT");
+    return true;
+  } catch (e) {
+    if (e instanceof Deno.errors.NotFound) return false;
+    // PermissionDenied means it exists and belongs to somebody else.
+    return true;
+  }
+}
+
+/**
+ * What the background service's own roster says, and whether the process it
+ * names is still there.
+ *
+ * The roster is the daemon's file, not ours: it is read, never written. A
+ * supervisor that exited leaves its pid behind — which is exactly the state
+ * that makes `claude stop` and `claude rm` fail, so the stale pid is the
+ * signal rather than a nuisance.
+ */
+export async function readDaemon(): Promise<DaemonInfo> {
+  const roster = obj(
+    await readJson(join(homeDir(), ".claude", "daemon", "roster.json")),
+  );
+  const pid = num(roster.supervisorPid);
+  const workers = Object.keys(obj(roster.workers));
+  return {
+    pid,
+    updatedAt: time(roster.updatedAt),
+    workers,
+    running: pid > 0 ? await pidAlive(pid) : false,
+  };
+}
+
+/**
+ * Delete this app's — and the CLI's — record of a background session.
+ *
+ * The escape hatch for a job the CLI will not remove. `claude rm` confirms the
+ * kill through the daemon, so when no daemon is running it refuses, and a job
+ * whose daemon died months ago can never be removed by any command. That is
+ * the state this exists for, and the caller is expected to have checked it.
+ *
+ * What it removes is `~/.claude/jobs/<id>` and nothing else. The conversation
+ * lives in `~/.claude/projects`, and a worktree lives wherever git put it —
+ * both survive, and the worktree path is returned so the caller can say so
+ * rather than leave it as a surprise.
+ */
+export async function forgetJob(
+  id: string,
+): Promise<{ error: string | null; worktree: string | null }> {
+  if (!/^[A-Za-z0-9_-]+$/.test(id)) {
+    return { error: `Not a job id: ${id}`, worktree: null };
+  }
+  const dir = join(homeDir(), ".claude", "jobs", id);
+  // Read before removing, so the answer can name what was left behind.
+  const state = obj(await readJson(join(dir, "state.json")));
+  const worktree = str(state.worktreePath) || null;
+  try {
+    await Deno.remove(dir, { recursive: true });
+    return { error: null, worktree };
+  } catch (e) {
+    if (e instanceof Deno.errors.NotFound) {
+      // Already gone. The caller wanted it gone; it is gone.
+      return { error: null, worktree };
+    }
+    return {
+      error: e instanceof Error ? e.message : String(e),
+      worktree,
+    };
+  }
 }
 
 /** What a job can be told to do, and the subcommand that does it. `attach` is

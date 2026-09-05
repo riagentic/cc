@@ -481,32 +481,36 @@ export async function chatStream(req: ChatRequest): Promise<void> {
 
 /* ── run registry ─────────────────────────────────────────────────────────── */
 
-/** The in-flight run per project — process bookkeeping, inherently mutable,
- *  and deliberately here rather than in cell state: an AbortController is not
- *  a value. Starting a run cancels the previous one for the same project. */
+/** The in-flight run per CONVERSATION — process bookkeeping, inherently
+ *  mutable, and deliberately here rather than in cell state: an
+ *  AbortController is not a value.
+ *
+ *  Keyed by pane, not by project, because a project holds several chats and
+ *  they are allowed to think at the same time. Starting a run cancels the
+ *  previous one for the same conversation, and only that one. */
 const RUNNING = new Map<string, AbortController>();
 
-export function beginRun(projectId: string): AbortSignal {
-  RUNNING.get(projectId)?.abort();
+export function beginRun(key: string): AbortSignal {
+  RUNNING.get(key)?.abort();
   const ctrl = new AbortController();
-  RUNNING.set(projectId, ctrl);
+  RUNNING.set(key, ctrl);
   return ctrl.signal;
 }
 
 /** Close out one run — but only the run that owns `signal`. Without the
  *  check, a superseded loop's `finally` would delete its *replacement's*
  *  controller and Stop would silently stop nothing. */
-export function endRun(projectId: string, signal: AbortSignal): void {
-  if (RUNNING.get(projectId)?.signal === signal) RUNNING.delete(projectId);
+export function endRun(key: string, signal: AbortSignal): void {
+  if (RUNNING.get(key)?.signal === signal) RUNNING.delete(key);
 }
 
-/** Stop a project's run, if one is in flight. Safe to call when idle. */
-export function stopRun(projectId: string): void {
-  RUNNING.get(projectId)?.abort();
-  RUNNING.delete(projectId);
+/** Stop one conversation's run, if it has one in flight. Safe when idle. */
+export function stopRun(key: string): void {
+  RUNNING.get(key)?.abort();
+  RUNNING.delete(key);
   // A turn parked on a decision has to come down with it, or Stop would leave
   // the loop waiting for an answer to a question nobody can see any more.
-  answerApproval(projectId, false);
+  answerApproval(key, false);
 }
 
 /* ── command approvals ────────────────────────────────────────────────────── */
@@ -523,28 +527,28 @@ const ASKING = new Map<string, (allowed: boolean) => void>();
 /** Park until the user answers, or until the turn is aborted (which counts as
  *  a refusal — a stopped turn must never go on to run the command). */
 export function awaitApproval(
-  projectId: string,
+  key: string,
   signal: AbortSignal,
 ): Promise<boolean> {
-  answerApproval(projectId, false); // supersede any earlier question
+  answerApproval(key, false); // supersede any earlier question
   if (signal.aborted) return Promise.resolve(false);
   return new Promise<boolean>((resolve) => {
     const done = (allowed: boolean) => {
       signal.removeEventListener("abort", onAbort);
-      ASKING.delete(projectId);
+      ASKING.delete(key);
       resolve(allowed);
     };
     const onAbort = () => done(false);
     signal.addEventListener("abort", onAbort, { once: true });
-    ASKING.set(projectId, done);
+    ASKING.set(key, done);
   });
 }
 
 /** Answer the question, if one is outstanding. Safe to call when none is. */
-export function answerApproval(projectId: string, allowed: boolean): void {
-  const resolve = ASKING.get(projectId);
+export function answerApproval(key: string, allowed: boolean): void {
+  const resolve = ASKING.get(key);
   if (!resolve) return;
-  ASKING.delete(projectId);
+  ASKING.delete(key);
   resolve(allowed);
 }
 

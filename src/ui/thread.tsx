@@ -59,7 +59,20 @@ export function useStickToBottom(count = 0): {
 
   afterRender(() => {
     const el = ref.current;
-    if (el && stick.current) el.scrollTop = el.scrollHeight;
+    if (!el || !stick.current) return;
+    // Instantly, and every render. A transcript that is being written to grows
+    // a few pixels at a time, and anything that animates the follow is a view
+    // that chases the bottom without reaching it.
+    el.scrollTop = el.scrollHeight;
+    // Once more after the frame, because the height at this moment is the
+    // height BEFORE the browser has laid out what was just added — a long
+    // code block or a table finishes measuring after this callback, and
+    // without the second pass the view stops a screenful short of the end.
+    requestAnimationFrame(() => {
+      if (stick.current && ref.current) {
+        ref.current.scrollTop = ref.current.scrollHeight;
+      }
+    });
   });
 
   return {

@@ -15,6 +15,7 @@
 import type { VNode } from "aio/air";
 import { workspace } from "../cell/workspace.ts";
 import { ACCENTS, prefs } from "../cell/prefs.ts";
+import { XTERM_CSS } from "./xterm-css.ts";
 
 /** The light palette, defined once and applied from two places: an explicit
  *  `data-theme="light"` choice, and `prefers-color-scheme` when the user has
@@ -75,6 +76,7 @@ ${at} .ptab__state { top: 6px; right: 6px; transform: none; }
    switcher, and removal lives in Settings at this width. */
 ${at} .ptab__acts { display: none; }
 ${at} .dock__undo span:first-child { display: none; }
+${at} .panes { display: none; }
 ${at} .dock__foot .wide { display: none; }
 `;
 
@@ -253,6 +255,62 @@ body {
 }
 .rail__group:first-child { padding-top: 2px; }
 
+/* ── panes: what a project has open ─────────────────────────────────────────
+   Child rows under the selected tab. Indented under the project's badge, so
+   the hierarchy is legible without a line drawing it, and quiet enough that a
+   project with six of them is still a column you can read. */
+
+.panes { display: grid; gap: 1px; padding: 2px 4px 6px 34px; }
+.pane {
+  display: flex; align-items: center; gap: 2px;
+  border-radius: 6px; color: var(--ink-dim);
+}
+.pane:hover { background: var(--panel-2); color: var(--ink-soft); }
+.pane.selected { background: var(--accent-soft); color: var(--ink); }
+.pane__main {
+  flex: 1; min-width: 0;
+  display: flex; align-items: center; gap: 6px;
+  padding: 3px 4px; border: 0; background: none; color: inherit;
+  font: inherit; font-size: 11.5px; text-align: left; cursor: pointer;
+  border-radius: inherit;
+}
+.pane__icon { display: grid; place-items: center; opacity: .8; flex: none; }
+/* Something is happening in a pane you may not be looking at. The only thing a
+   row this small has room to say, so it says exactly one thing. */
+.pane__live {
+  width: 5px; height: 5px; border-radius: 99px; flex: none;
+  background: var(--ok);
+  animation: pulse 1.6s var(--ease) infinite;
+}
+@keyframes pulse { 50% { opacity: .35; } }
+.pane__close {
+  flex: none; width: 16px; height: 16px; display: grid; place-items: center;
+  border: 0; border-radius: 4px; background: none; color: var(--ink-dim);
+  cursor: pointer; opacity: 0; transition: opacity .12s var(--ease);
+}
+.pane:hover .pane__close, .pane__close:focus-visible { opacity: 1; }
+.pane__close:hover { background: var(--raise); color: var(--danger); }
+
+.panes__add { display: flex; gap: 3px; padding-top: 3px; }
+.pane__add {
+  display: inline-flex; align-items: center; gap: 2px;
+  padding: 2px 6px; border: 1px solid var(--line-soft); border-radius: 6px;
+  background: none; color: var(--ink-dim); cursor: pointer;
+  font: inherit; font-size: 10px;
+  transition: border-color .14s var(--ease), color .14s var(--ease);
+}
+.pane__add:hover { border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); color: var(--ink); }
+.pane__plus { font-size: 11px; line-height: 1; }
+/* The two that start the project itself. Named rather than iconic: "dev" and
+   "prod" are the words people already use for them, and a second play icon
+   with no label is a button nobody presses. */
+.pane__add--run { color: var(--ink-soft); }
+.pane__runlabel { font-weight: 650; letter-spacing: .02em; }
+
+/* Collapsed dock: the children go with the labels. A 56px column has no room
+   for a second level, and the tab still switches project. */
+[data-dock="off"] .panes { display: none; }
+
 /* ── project dock ───────────────────────────────────────────────────────── */
 
 .dock {
@@ -274,8 +332,11 @@ body {
    what makes "this is the one the session runs in" readable at a glance.
    The tab is a WRAPPER — the select and the close are two real buttons, since a
    button inside a button is invalid and collapses to one ambiguous target. */
+/* A column: the tab's own row, then the project's panes under it. It was a
+   plain flex row until a project could hold more than one thing, and adding a
+   second level put the children beside the badge instead of below it. */
 .ptab {
-  position: relative; display: flex; align-items: center;
+  position: relative; display: flex; flex-direction: column; align-items: stretch;
   border-radius: var(--radius-sm);
   border: 1px solid transparent; background: transparent; color: var(--ink-soft);
   transition: background .16s var(--ease), color .16s var(--ease), border-color .16s var(--ease);
@@ -284,6 +345,7 @@ body {
    the overlays. It used to be a flex sibling of the state dot, which left a
    ~16px strip down the right of every tab that looked like the tab and clicked
    like nothing — the "sometimes switching does nothing" bug. */
+.ptab__row { display: flex; align-items: center; width: 100%; }
 .ptab__main {
   width: 100%; min-width: 0;
   display: grid; grid-template-columns: 26px minmax(0, 1fr);
@@ -652,7 +714,13 @@ button.rowitem:hover { background: var(--panel-2); }
 /* ── chat ───────────────────────────────────────────────────────────────── */
 
 .chatwrap { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; }
-.chat { flex: 1; min-height: 0; overflow-y: auto; padding: 20px 22px 8px; scroll-behavior: smooth; }
+/* No smooth scrolling here, deliberately.
+   Following a live transcript means setting scrollTop on every render — and
+   under smooth scrolling each of those starts an ANIMATION the next one
+   interrupts, so the view chases the bottom and never arrives while the model
+   is still typing. The one place smoothness belongs is the jump button, which
+   asks for it by name. */
+.chat { flex: 1; min-height: 0; overflow-y: auto; padding: 20px 22px 8px; }
 .thread { max-width: var(--measure); margin: 0 auto; display: flex; flex-direction: column; gap: 18px; }
 
 .msg { display: grid; grid-template-columns: 30px minmax(0,1fr); gap: 12px; animation: rise .22s var(--ease); }
@@ -1614,6 +1682,36 @@ const ACCENT_CSS = ACCENTS.map((a) =>
 ).join("\n");
 
 /**
+ * The Console's own layout.
+ *
+ * Separate from the vendored xterm stylesheet above so the two can be told
+ * apart at a glance: everything here is this app's, and nothing here overrides
+ * a rule xterm.js needs to position its rows.
+ */
+const CONSOLE_CSS = `
+/* The terminal fills the page and scrolls internally. A zero min-height on
+   both is what stops a flex child from refusing to shrink — without it the
+   terminal grows the page instead of scrolling, and everything under it is
+   pushed off screen. */
+.console__body { display: flex; flex-direction: column; min-height: 0; padding-bottom: 14px; }
+.console {
+  flex: 1; min-height: 0;
+  border: 1px solid var(--line); border-radius: var(--radius);
+  background: var(--panel); padding: 8px 4px 8px 10px;
+  overflow: hidden;
+}
+/* A focused terminal is a terminal that is taking your keystrokes, which is
+   worth saying — it is the one panel where the difference matters. */
+.console:focus-within { border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); }
+.console .xterm-viewport { background: transparent !important; }
+.console .xterm-viewport::-webkit-scrollbar { width: 10px; }
+.console .xterm-viewport::-webkit-scrollbar-thumb {
+  background: color-mix(in srgb, var(--ink-dim) 34%, transparent);
+  border-radius: 99px; border: 3px solid transparent; background-clip: padding-box;
+}
+`;
+
+/**
  * The whole stylesheet, as it is served.
  *
  * Exported so a test can parse it. This sheet is a template literal built from
@@ -1621,7 +1719,8 @@ const ACCENT_CSS = ACCENTS.map((a) =>
  * brace and the CSSOM discards the rule *after* it, which shows up weeks later
  * as one control that ignores its own margin. Nothing else should read this.
  */
-export const themeCss = (): string => CSS + "\n" + ACCENT_CSS;
+export const themeCss = (): string =>
+  CSS + "\n" + ACCENT_CSS + "\n" + XTERM_CSS + "\n" + CONSOLE_CSS;
 
 /**
  * Renders the stylesheet and keeps the root element's attributes in sync with

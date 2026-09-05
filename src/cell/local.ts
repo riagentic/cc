@@ -44,15 +44,19 @@ import type {
   LocalMsg,
   LocalPermission,
 } from "../type/local.ts";
-import { workspace } from "./workspace.ts";
+import { panesOf, projectOfPane, workspace } from "./workspace.ts";
 import { perSecond } from "../lib/format.ts";
 
 /** Tool-call rounds one user turn may take. A local model that has not
- *  converged after this many acts is looping, not working. */
-const MAX_ROUNDS = 24;
+ *  converged after this many acts is looping, not working.
+ *
+ *  Exported so its tests can be written against the limit rather than against
+ *  a number copied out of it — the two drifted apart once already, and a test
+ *  that hard-codes a cap fails for the one reason that is not a bug. */
+export const MAX_ROUNDS = 1024;
 /** Transcript cap, same stance as the Claude session: a control surface shows
- *  the recent past. */
-const MAX_LOCAL_MESSAGES = 400;
+ *  the recent past. Exported for the same reason as above. */
+export const MAX_LOCAL_MESSAGES = 400;
 
 /** Where each engine serves by default. */
 export const DEFAULT_URLS: Record<LocalEngine, string> = {
@@ -114,8 +118,22 @@ type LocalState = {
   detectedAt: number;
 };
 
+/**
+ * Every id below is a *pane* id — one conversation.
+ *
+ * The two halves of a local project are scoped differently on purpose. A
+ * conversation belongs to its pane: a project with three chats has three, and
+ * closing one must not take the others with it. The engine, address and model
+ * belong to the *project*: they describe one server on this machine, and
+ * making the user pick llama.cpp again for every new chat in the same folder
+ * would be tedious for no gain.
+ *
+ * `projectOfPane` maps one to the other, and returns the id unchanged for the
+ * first conversation — whose pane id IS the project id.
+ */
+const projectOf = (id: string): string => projectOfPane(id) || id;
 const cfgAt = (s: LocalState, id: string): LocalConfig =>
-  s.configs[id] ??= blankConfig();
+  s.configs[projectOf(id)] ??= blankConfig();
 const chatAt = (s: LocalState, id: string): LocalChat =>
   s.chats[id] ??= blankChat();
 
@@ -162,13 +180,13 @@ export const local = cell("local", {
      *  changes nothing else — the local config stays for the switch back. */
     setEngine(
       s: LocalState & Partial<MethodDraftMeta>,
-      projectId: string,
+      key: string,
       engine: Engine,
     ) {
       if (!["claude", "lmstudio", "ollama", "llamacpp"].includes(engine)) {
         return;
       }
-      const cfg = cfgAt(s, projectId);
+      const cfg = cfgAt(s, key);
       const wasDefault = !cfg.baseUrl ||
         Object.values(DEFAULT_URLS).includes(cfg.baseUrl);
       cfg.engine = engine;
@@ -188,25 +206,23 @@ export const local = cell("local", {
       if (engine !== "claude") {
         const found = s.detected.find((d) => d.engine === engine);
         if (found?.models.length) {
-          chatAt(s, projectId).models = found.models;
+          chatAt(s, key).models = found.models;
           if (!found.models.includes(cfg.model)) cfg.model = found.models[0];
         }
         // The scan already asked whether that server can use tools; carrying
         // the answer over means the warning is on screen the moment the
         // engine is picked, not one round trip later.
-        chatAt(s, projectId).toolsOk = found?.reachable
-          ? found.tools ?? null
-          : null;
+        chatAt(s, key).toolsOk = found?.reachable ? found.tools ?? null : null;
       }
-      log.info("local", "engine set", { projectId, engine });
+      log.info("local", "engine set", { project: projectOf(key), engine });
       // …and then go and look, rather than trusting a scan that may be stale
       // or may never have run. Picking an engine is exactly the moment the
       // question "where is it?" has an answer worth having, and the finder
       // only adopts what it can prove answered.
       if (engine !== "claude") {
         s.$do?.(schedule.next(
-          `local-find:${projectId}`,
-          local.findServer.action(projectId),
+          `local-find:${key}`,
+          local.findServer.action(key),
         ));
       }
     },
@@ -220,19 +236,19 @@ export const local = cell("local", {
      * `urlManual`. A dead hand-set address gets an offer in the chat banner
      * instead, which is a click rather than a surprise.
      */
-    async findServer(s: LocalState, projectId: string) {
+    async findServer(s: LocalState, key: string) {
       // Before the await: which engine this project is on is the question the
       // scan is being run to answer, and it must not change under it.
-      const engine = cfgAt(s, projectId).engine;
+      const engine = cfgAt(s, key).engine;
       if (engine === "claude") return;
       await local.detect(true); // aiol-ok: orchestration
-      await local.adoptFound(projectId); // aiol-ok: orchestration
+      await local.adoptFound(key); // aiol-ok: orchestration
     },
 
     /** The sync half of {@link findServer}: point the project at the address
      *  the scan got an answer from, and carry over what it learned there. */
-    adoptFound(s: LocalState, projectId: string) {
-      const cfg = cfgAt(s, projectId);
+    adoptFound(s: LocalState, key: string) {
+      const cfg = cfgAt(s, key);
       if (cfg.engine === "claude" || cfg.urlManual) return;
       const found = s.detected.find((d) =>
         d.engine === cfg.engine && d.reachable
@@ -241,11 +257,11 @@ export const local = cell("local", {
       if (cfg.baseUrl !== found.baseUrl) {
         cfg.baseUrl = found.baseUrl;
         log.info("local", "adopted the address that answered", {
-          projectId,
+          key,
           baseUrl: found.baseUrl,
         });
       }
-      const chat = chatAt(s, projectId);
+      const chat = chatAt(s, key);
       chat.models = found.models;
       chat.toolsOk = found.tools ?? null;
       if (found.models.length && !found.models.includes(cfg.model)) {
@@ -254,19 +270,19 @@ export const local = cell("local", {
       chat.error = null;
     },
 
-    setBaseUrl(s: LocalState, projectId: string, url: string) {
+    setBaseUrl(s: LocalState, key: string, url: string) {
       if (url && !/^https?:\/\//.test(url)) {
         // Refusing silently would look like a saved value that "does not
         // work" — say why nothing changed.
-        chatAt(s, projectId).error =
+        chatAt(s, key).error =
           `Not a server address: "${url}" — it needs to start with http(s)://`;
         return;
       }
-      cfgAt(s, projectId).baseUrl = url.replace(/\/+$/, "");
+      cfgAt(s, key).baseUrl = url.replace(/\/+$/, "");
       // Typed by a human — the finder stops moving it from here on. Clearing
       // the field hands it back: an empty address is not a choice.
-      cfgAt(s, projectId).urlManual = url.trim() !== "";
-      chatAt(s, projectId).error = null;
+      cfgAt(s, key).urlManual = url.trim() !== "";
+      chatAt(s, key).error = null;
     },
 
     /**
@@ -278,32 +294,32 @@ export const local = cell("local", {
      */
     setModel(
       s: LocalState & Partial<MethodDraftMeta>,
-      projectId: string,
+      key: string,
       model: string,
     ) {
-      cfgAt(s, projectId).model = model;
+      cfgAt(s, key).model = model;
       // Each model in a server can be loaded at a different window, so the
       // number to budget against is a property of the *pair*. Re-read on the
       // next tick, keyed by project so two of them cannot cancel each other.
       s.$do?.(schedule.next(
-        `local-ctx:${projectId}`,
+        `local-ctx:${key}`,
         // `true` = leave a hand-typed window alone. Switching model must
         // re-read the server, never quietly discard an override.
-        local.autoCtx.action(projectId, true),
+        local.autoCtx.action(key, true),
       ));
     },
 
-    setMode(s: LocalState, projectId: string, mode: LocalMode) {
+    setMode(s: LocalState, key: string, mode: LocalMode) {
       if (!["chat", "read", "agent"].includes(mode)) return;
-      cfgAt(s, projectId).mode = mode;
+      cfgAt(s, key).mode = mode;
     },
 
     /** The window to budget against. Clamped to sane bounds rather than
      *  rejected: the difference between 64k and 65_536 is not worth an
      *  error state. */
-    setCtx(s: LocalState, projectId: string, ctx: number) {
+    setCtx(s: LocalState, key: string, ctx: number) {
       if (!Number.isFinite(ctx)) return;
-      const cfg = cfgAt(s, projectId);
+      const cfg = cfgAt(s, key);
       cfg.ctx = Math.min(2_000_000, Math.max(4_096, Math.floor(ctx)));
       // Typed by a human — detection stops overwriting it from here on.
       cfg.ctxManual = true;
@@ -315,35 +331,35 @@ export const local = cell("local", {
      * Orchestrator only — see {@link detect} for why nothing here holds a
      * draft across the await.
      */
-    async refreshModels(_s: LocalState, projectId: string) {
-      const cfg = local.configs[projectId];
+    async refreshModels(_s: LocalState, key: string) {
+      const cfg = local.configs[projectOf(key)];
       if (!cfg || cfg.engine === "claude" || !cfg.baseUrl) return;
       const baseUrl = cfg.baseUrl;
       try {
         const io = await import("./local.server.ts");
         const models = await io.listModels(baseUrl);
-        await local.applyModels(projectId, models); // aiol-ok: orchestration
+        await local.applyModels(key, models); // aiol-ok: orchestration
       } catch (e) {
         const why = `Cannot reach ${baseUrl}: ${
           e instanceof Error ? e.message : String(e)
         }`;
-        await local.modelsFailed(projectId, why); // aiol-ok: orchestration
-        log.warn("local", "model listing failed", { projectId, error: why });
+        await local.modelsFailed(key, why); // aiol-ok: orchestration
+        log.warn("local", "model listing failed", { key, error: why });
       }
     },
 
     /** The sync halves of {@link refreshModels}. */
-    applyModels(s: LocalState, projectId: string, models: string[]) {
-      const c = chatAt(s, projectId);
+    applyModels(s: LocalState, key: string, models: string[]) {
+      const c = chatAt(s, key);
       c.models = models;
       c.error = null;
       // A picked model that is gone is worth replacing with a real one.
-      const p = cfgAt(s, projectId);
+      const p = cfgAt(s, key);
       if (!models.includes(p.model)) p.model = models[0] ?? "";
     },
 
-    modelsFailed(s: LocalState, projectId: string, why: string) {
-      chatAt(s, projectId).error = why;
+    modelsFailed(s: LocalState, key: string, why: string) {
+      chatAt(s, key).error = why;
     },
 
     /**
@@ -355,10 +371,10 @@ export const local = cell("local", {
      * one's committed result, which is what an orchestrator wants and what a
      * single long method cannot give.
      */
-    async syncEngine(_s: LocalState, projectId: string) {
-      await local.refreshModels(projectId); // aiol-ok: orchestration, see above
-      await local.autoCtx(projectId, true); // aiol-ok: orchestration
-      await local.autoTools(projectId); // aiol-ok: orchestration
+    async syncEngine(_s: LocalState, key: string) {
+      await local.refreshModels(key); // aiol-ok: orchestration, see above
+      await local.autoCtx(key, true); // aiol-ok: orchestration
+      await local.autoTools(key); // aiol-ok: orchestration
     },
 
     /**
@@ -374,9 +390,9 @@ export const local = cell("local", {
      */
     async autoTools(
       s: LocalState & Partial<MethodDraftMeta>,
-      projectId: string,
+      key: string,
     ) {
-      const cfg = local.configs[projectId];
+      const cfg = local.configs[projectOf(key)];
       if (!cfg || cfg.engine === "claude" || !cfg.baseUrl) return;
       const engine = cfg.engine as LocalEngine;
       const { baseUrl } = cfg;
@@ -385,7 +401,7 @@ export const local = cell("local", {
         // The method's own abort, threaded to the socket: a probe must not
         // outlive the app, or the harness waiting for it to go quiet.
         const ok = await io.probeTools(engine, baseUrl, s.$signal);
-        await local.applyTools(projectId, engine, baseUrl, ok); // aiol-ok
+        await local.applyTools(key, engine, baseUrl, ok); // aiol-ok
       } catch { /* best effort: a failed turn still says the same thing */ }
     },
 
@@ -394,14 +410,14 @@ export const local = cell("local", {
      *  answer about one server says nothing about another. */
     applyTools(
       s: LocalState,
-      projectId: string,
+      key: string,
       engine: string,
       baseUrl: string,
       ok: boolean | null,
     ) {
-      const cfg = s.configs[projectId];
+      const cfg = s.configs[projectOf(key)];
       if (!cfg || cfg.engine !== engine || cfg.baseUrl !== baseUrl) return;
-      chatAt(s, projectId).toolsOk = ok;
+      chatAt(s, key).toolsOk = ok;
     },
 
     /**
@@ -410,9 +426,14 @@ export const local = cell("local", {
      *
      * Orchestrator only, like {@link detect} and {@link refreshModels}.
      */
-    async autoCtx(_s: LocalState, projectId: string, keepManual = false) {
-      if (!keepManual) await local.clearManualCtx(projectId); // aiol-ok
-      const cfg = local.configs[projectId];
+    async autoCtx(_s: LocalState, key: string, keepManual = false) {
+      // Taken from the method's RETURN value, not re-read from the cell. On a
+      // browser client the patch from `clearManualCtx` may not have arrived
+      // yet, and a re-read would see the old `ctxManual: true` and bail out of
+      // the very detection this call exists to restart.
+      const cfg = keepManual
+        ? local.configs[projectOf(key)]
+        : await local.clearManualCtx(key);
       if (!cfg || cfg.engine === "claude" || cfg.ctxManual || !cfg.baseUrl) {
         return;
       }
@@ -422,12 +443,16 @@ export const local = cell("local", {
         const io = await import("./local.server.ts");
         const ctx = await io.probeContext(engine, baseUrl, model);
         if (ctx === null) return;
-        await local.applyCtx(projectId, engine, model, ctx); // aiol-ok
+        await local.applyCtx(key, engine, model, ctx); // aiol-ok
       } catch { /* best effort: the typed default still works */ }
     },
 
-    clearManualCtx(s: LocalState, projectId: string) {
-      cfgAt(s, projectId).ctxManual = false;
+    /** Hand the context window back to detection, and answer with the config
+     *  as it is AFTER that — see the caller. */
+    clearManualCtx(s: LocalState, key: string): LocalConfig {
+      const cfg = cfgAt(s, key);
+      cfg.ctxManual = false;
+      return { ...cfg };
     },
 
     /**
@@ -437,19 +462,19 @@ export const local = cell("local", {
      */
     applyCtx(
       s: LocalState,
-      projectId: string,
+      key: string,
       engine: string,
       model: string,
       ctx: number,
     ) {
-      const cfg = s.configs[projectId];
+      const cfg = s.configs[projectOf(key)];
       if (
         !cfg || cfg.engine !== engine || cfg.model !== model || cfg.ctxManual
       ) return;
       const clamped = Math.min(2_000_000, Math.max(4_096, ctx));
       if (cfg.ctx === clamped) return;
       cfg.ctx = clamped;
-      log.info("local", "context window detected", { projectId, ctx: clamped });
+      log.info("local", "context window detected", { key, ctx: clamped });
     },
 
     /**
@@ -461,14 +486,18 @@ export const local = cell("local", {
      */
     async forgetProjects(_s: LocalState, ids: string[]) {
       const io = await import("./local.server.ts");
-      for (const id of ids) io.stopRun(id);
-      await local.dropProjects(ids); // aiol-ok: orchestration, see `detect`
+      // A project can hold several conversations, and each one runs under its
+      // own pane id. Stopping the project id alone would leave the other
+      // turns talking to a server for a project that is gone.
+      const keys = ids.flatMap((id) => [id, ...panesOf(id).map((p) => p.id)]);
+      for (const key of keys) io.stopRun(key);
+      await local.dropProjects(keys); // aiol-ok: orchestration, see `detect`
     },
 
-    dropProjects(s: LocalState, ids: string[]) {
-      for (const id of ids) {
-        delete s.configs[id];
-        delete s.chats[id];
+    dropProjects(s: LocalState, keys: string[]) {
+      for (const key of keys) {
+        delete s.configs[key];
+        delete s.chats[key];
       }
     },
 
@@ -494,13 +523,22 @@ export const local = cell("local", {
       if (workspace.projects.length === 0) return;
       const known = new Set(workspace.projects.map((p) => p.id));
       const stale = Object.keys(s.configs).filter((id) => !known.has(id));
-      if (stale.length === 0) return;
-      for (const id of stale) {
-        delete s.configs[id];
-        delete s.chats[id];
-      }
+      // Conversations are keyed by pane, so they are swept against the panes
+      // — but only when the pane resolves to *some* project. An id that
+      // resolves to nothing is not proof of garbage: `panes` is filled in
+      // lazily, and a chat deleted here would be a conversation deleted from
+      // under someone who is reading it. Configuration is persisted and can
+      // afford to be strict; a chat is not, and cannot.
+      const orphans = Object.keys(s.chats).filter((key) => {
+        const owner = projectOfPane(key);
+        return owner !== "" && !known.has(owner);
+      });
+      if (stale.length === 0 && orphans.length === 0) return;
+      for (const id of stale) delete s.configs[id];
+      for (const key of [...stale, ...orphans]) delete s.chats[key];
       log.info("local", "dropped config for unknown projects", {
         count: stale.length,
+        chats: orphans.length,
       });
     },
 
@@ -577,11 +615,14 @@ export const local = cell("local", {
      *  survive an await in a non-transactional method, only the root `s` stays
      *  live, and a stale reference loses the write silently
      *  (dep/aio/docs/state/methods.md; reported in dep/aio/feedback/cc.md). */
-    async send(s: LocalState, text: string, projectId?: string) {
-      const id = projectId ?? workspace.activeId;
+    async send(s: LocalState, text: string, key?: string) {
+      const id = key ?? workspace.activeId;
       // Config is read once into plain values — it is not written below.
       const cfg = { ...cfgAt(s, id) };
-      const cwd = workspace.projects.find((p) => p.id === id)?.path ?? "";
+      // The project's directory, not the pane's — `id` is one conversation,
+      // and every conversation in a project works in the same folder.
+      const owner = projectOf(id);
+      const cwd = workspace.projects.find((p) => p.id === owner)?.path ?? "";
       if (cfg.engine === "claude" || !text.trim()) return;
       if (chatAt(s, id).status === "working") return; // one turn at a time
       if (!cfg.model) {
@@ -715,12 +756,18 @@ export const local = cell("local", {
                 " on the server.";
             }
             chatAt(s, id).messages.push(msg("assistant", acc.text));
+            cap(chatAt(s, id).messages);
             break;
           }
 
           chatAt(s, id).messages.push(
             msg("assistant", acc.text, { toolCalls: calls }),
           );
+          // Capped here as well as after the tool results below. Every push
+          // has to be followed by one: a cap applied at only some of them lets
+          // the transcript sit one row over its limit forever, which is how a
+          // bound stops being a bound.
+          cap(chatAt(s, id).messages);
           for (const call of calls) {
             // A command is the one act this agent cannot confine to the
             // project, so it is the one act that asks. Everything else — list,
@@ -768,6 +815,7 @@ export const local = cell("local", {
           // mean `clear()`, and the marker must not resurrect a wiped chat.
           if (chatAt(s, id).messages.length > 0) {
             chatAt(s, id).messages.push(msg("assistant", "*(stopped)*"));
+            cap(chatAt(s, id).messages);
           }
         } else {
           const raw = e instanceof Error ? e.message : String(e);
@@ -792,7 +840,7 @@ export const local = cell("local", {
               d.engine === cfg.engine && d.reachable
             )?.baseUrl ?? null,
           });
-          log.error("local", "turn failed", { projectId: id, error: raw });
+          log.error("local", "turn failed", { key: id, error: raw });
           // A dead address is the one failure the app can answer by itself:
           // look, and the banner offers whatever answered. Without this the
           // offer only appeared if somebody had already opened Settings and
@@ -820,31 +868,31 @@ export const local = cell("local", {
      */
     async answer(
       s: LocalState,
-      projectId: string,
+      key: string,
       allowed: boolean,
       always = false,
     ) {
-      const chat = chatAt(s, projectId);
+      const chat = chatAt(s, key);
       if (!chat.pending) return;
       // "…and stop asking" promotes to the *guarded* mode, not to Bypass.
       // The old two-valued field had nowhere else to go; now there is a mode
       // that means what the button says — stop interrupting me — without also
       // meaning "and delete whatever you like".
-      if (allowed && always) cfgAt(s, projectId).permission = "dontAsk";
+      if (allowed && always) cfgAt(s, key).permission = "dontAsk";
       chat.pending = null;
       const io = await import("./local.server.ts");
-      io.answerApproval(projectId, allowed);
+      io.answerApproval(key, allowed);
     },
 
     /** The question, and its withdrawal — sync, so neither rides on the long
      *  `send` draft. `pending` is what the page renders the prompt from, so a
      *  lost write here is a turn parked on a question nobody can see. */
-    askCommand(s: LocalState, projectId: string, id: string, cmd: string) {
-      chatAt(s, projectId).pending = { id, cmd, at: Date.now() };
+    askCommand(s: LocalState, key: string, id: string, cmd: string) {
+      chatAt(s, key).pending = { id, cmd, at: Date.now() };
     },
 
-    clearPending(s: LocalState, projectId: string) {
-      chatAt(s, projectId).pending = null;
+    clearPending(s: LocalState, key: string) {
+      chatAt(s, key).pending = null;
     },
 
     /**
@@ -854,20 +902,20 @@ export const local = cell("local", {
      * value decides whether a shell command runs with nobody looking, so a
      * junk value from the control plane has to fail closed.
      */
-    setPermission(s: LocalState, projectId: string, mode: string) {
+    setPermission(s: LocalState, key: string, mode: string) {
       const known = LOCAL_PERMISSIONS.some((p) => p.id === mode);
       const next = (known ? mode : "ask") as LocalPermission;
-      cfgAt(s, projectId).permission = next;
+      cfgAt(s, key).permission = next;
       // The field this replaced is left behind rather than carried forward: a
       // stale "always" outliving a switch back to Ask would be read by
       // `permissionOf` on the next boot as Bypass.
-      delete cfgAt(s, projectId).shApproval;
-      log.info("local", "permission set", { projectId, mode: next });
+      delete cfgAt(s, key).shApproval;
+      log.info("local", "permission set", { key, mode: next });
     },
 
     /** Abort the in-flight turn. The loop's own catch writes the outcome. */
-    async stop(s: LocalState, projectId?: string) {
-      const id = projectId ?? workspace.activeId;
+    async stop(s: LocalState, key?: string) {
+      const id = key ?? workspace.activeId;
       if (chatAt(s, id).status !== "working") return;
       const io = await import("./local.server.ts");
       io.stopRun(id);
@@ -884,8 +932,8 @@ export const local = cell("local", {
      * else in this app, which makes an unrecoverable Clear the most expensive
      * button on the page.
      */
-    async clear(s: LocalState, projectId?: string) {
-      const id = projectId ?? workspace.activeId;
+    async clear(s: LocalState, key?: string) {
+      const id = key ?? workspace.activeId;
       if (chatAt(s, id).status === "working") {
         const io = await import("./local.server.ts");
         io.stopRun(id);
@@ -897,8 +945,8 @@ export const local = cell("local", {
 
     /** Put back what the last clear took away. Refused once anything new has
      *  been said: this is an undo for the moment right after, not a merge. */
-    undoClear(s: LocalState, projectId?: string) {
-      const id = projectId ?? workspace.activeId;
+    undoClear(s: LocalState, key?: string) {
+      const id = key ?? workspace.activeId;
       const kept = s.cleared[id] ?? [];
       const chat = chatAt(s, id);
       if (kept.length === 0 || chat.messages.length > 0) return;
@@ -947,7 +995,7 @@ async function approveCommand(
     const why = destructiveReason(cmd);
     if (why === null) return null;
     log.info("local", "command refused by the guardrail", {
-      projectId: id,
+      key: id,
       why,
     });
     return `Error: refused without asking — ${why}. This project runs in` +
@@ -964,7 +1012,7 @@ async function approveCommand(
   const allowed = await io.awaitApproval(id, signal);
   await local.clearPending(id); // aiol-ok: orchestration
   if (allowed) return null;
-  log.info("local", "command refused", { projectId: id, chars: cmd.length });
+  log.info("local", "command refused", { key: id, chars: cmd.length });
   return signal.aborted
     ? "Stopped."
     : "Error: the user did not allow that command to run. " +
@@ -1010,15 +1058,29 @@ async function summarize(
 const EMPTY_CONFIG = blankConfig();
 const EMPTY_CHAT = blankChat();
 
-export const localConfig = (projectId: string): LocalConfig =>
-  local.configs[projectId] ?? EMPTY_CONFIG;
+export const localConfig = (key: string): LocalConfig =>
+  local.configs[projectOf(key)] ?? EMPTY_CONFIG;
 
-export const localChat = (projectId: string): LocalChat =>
-  local.chats[projectId] ?? EMPTY_CHAT;
+export const localChat = (key: string): LocalChat =>
+  local.chats[key] ?? EMPTY_CHAT;
+
+/**
+ * Every conversation in a project.
+ *
+ * The dock's dot answers a question about the *project* — "is anything here
+ * working, is anything here waiting for me?" — and a project can hold several
+ * chats. Asking only the first one would hide a second conversation stopped on
+ * a permission prompt, which is the exact case the dot exists for.
+ */
+export const localChatsOf = (projectId: string): LocalChat[] => {
+  const panes = panesOf(projectId).filter((p) => p.kind === "session");
+  return panes.length === 0
+    ? [local.chats[projectId] ?? EMPTY_CHAT]
+    : panes.map((p) => local.chats[p.id] ?? EMPTY_CHAT);
+};
 
 /** What runs this project. The one question every Claude-facing module asks. */
-export const engineOf = (projectId: string): Engine =>
-  localConfig(projectId).engine;
+export const engineOf = (key: string): Engine => localConfig(key).engine;
 
 /** Is the *active* project on a local engine? The routing question. */
 export const activeIsLocal = (): boolean =>
@@ -1056,5 +1118,5 @@ export const speedOf = (
   turn: { lastMs: number; lastTokens: number },
 ): number | null => perSecond(turn.lastTokens, turn.lastMs);
 
-export const localSpeed = (projectId?: string): number | null =>
-  speedOf(localChat(projectId ?? workspace.activeId));
+export const localSpeed = (key?: string): number | null =>
+  speedOf(localChat(key ?? workspace.activeId));
