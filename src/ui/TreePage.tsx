@@ -47,9 +47,17 @@ function TreeRow(
   const n = props.node;
   const touchClass = props.touch ? ` treerow--${props.touch}` : "";
 
-  // Directories are not marked: git reports files, and a folder wearing an "M"
-  // would be a claim about everything inside it.
-  const mark = n.dir ? "" : gitMark(n.path);
+  // Asked for EVERY row, and used only for files.
+  //
+  // Directories are not marked — git reports files, and a folder wearing an
+  // "M" would be a claim about everything inside it — but skipping the call
+  // for them meant a directory row's body read no cell state at all, and a
+  // component that reads nothing subscribes to nothing. The renderer says so
+  // out loud: "this instance will never re-render". It happened to look right
+  // because the parent re-renders and hands down fresh props; that is a
+  // coincidence of the current shape, not a guarantee, and it is one refactor
+  // away from a folder that never redraws.
+  const mark = gitMark(n.path);
 
   return (
     <button
@@ -76,8 +84,23 @@ function TreeRow(
           questions — "is this yours to review" and "did the agent touch it" —
           and a file can easily be one and not the other. */
       }
-      <span class={"treerow__git" + (mark ? ` treerow__git--${mark}` : "")}>
-        {mark === "modified" ? "M" : mark === "new" ? "A" : ""}
+      {
+        /* A non-breaking space rather than "": an empty text child renders to
+          no node at all, which changes this span's child count and desyncs the
+          reconciler. The column is fixed-width, so the space is what was being
+          drawn here anyway. */
+      }
+      <span
+        class={"treerow__git" +
+          (mark && !n.dir ? ` treerow__git--${mark}` : "")}
+      >
+        {n.dir
+          ? "\u00a0"
+          : mark === "modified"
+          ? "M"
+          : mark === "new"
+          ? "A"
+          : "\u00a0"}
       </span>
       <span class="treerow__touch">
         {props.touch === "written"
@@ -96,7 +119,7 @@ function TreeRow(
           ? null
           : (
             <span class="treerow__size">
-              {n.bytes === null ? "" : bytes(n.bytes)}
+              {n.bytes === null ? "\u00a0" : bytes(n.bytes)}
             </span>
           )}
       </span>

@@ -130,7 +130,7 @@ testUI(App, "ui fuzz: the app never renders blank", async (ui: any) => {
   // Every destination in the rail. A page added without being walked here is a
   // page whose first blank render nobody notices.
   const links = [
-    "ChatLink",
+    "ProjectLink",
     "SubAgentsLink",
     "TasksLink",
     "ActivityLink",
@@ -146,7 +146,7 @@ testUI(App, "ui fuzz: the app never renders blank", async (ui: any) => {
     "StorageLink",
     "SettingsLink",
   ];
-  ui.ChatLink.click();
+  ui.ProjectLink.click();
   await ui.settle();
 
   for (let step = 0; step < STEPS; step++) {

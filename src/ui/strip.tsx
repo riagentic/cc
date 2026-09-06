@@ -13,7 +13,11 @@
  * on both sides. What is genuinely engine-specific comes after them.
  */
 import type { VNode } from "aio/air";
-import { activeProject, workspace } from "../cell/workspace.ts";
+import {
+  activeProject,
+  activeSessionKey,
+  workspace,
+} from "../cell/workspace.ts";
 import { detectedEngines, local, localConfig } from "../cell/local.ts";
 import { pct, tildePath, tokens } from "../lib/format.ts";
 import { Menu, Meter, Stat } from "./parts.tsx";
@@ -95,14 +99,16 @@ export function BranchStat(): VNode {
  * it was useful if it had been gathered at boot.
  */
 export function EngineStat(): VNode {
-  const target = activeProject()?.id ?? workspace.activeId;
+  // The conversation on screen, not the project: each chat picks its own
+  // engine, and the strip sits above one chat.
+  const target = activeSessionKey();
   return (
     <Stat label="Engine">
       {IconPlug({ size: 14 })}
       <Menu
         label="Engine"
         value={localConfig(target).engine}
-        title="What runs this project"
+        title="What answers this conversation"
         onOpen={() => void local.detect()}
         options={ENGINE_OPTIONS.map((e) => ({
           id: e.id,

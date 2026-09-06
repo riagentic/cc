@@ -29,6 +29,7 @@ const IN_DATA = 0;
 const IN_RESIZE = 1;
 const OUT_DATA = 0;
 const OUT_EXITED = 1;
+const OUT_BUSY = 2;
 
 /** One frame: a type byte, a big-endian length, the payload. */
 function frame(kind: number, body: Uint8Array): Uint8Array {
@@ -47,8 +48,14 @@ const hostPath = (): string =>
   join(homeDir(), ".claude-control", "bin", `cc-pty-${HOST_VERSION}`);
 
 /** Bumped whenever the protocol or the host changes in a way the app depends
- *  on. It is in the unpacked file's name, so the two can never disagree. */
-const HOST_VERSION = "1";
+ *  on. It is in the unpacked file's name, so the two can never disagree.
+ *
+ *  3: the busy frame carries the running command's short name.
+ *  2: the host reports whether a command holds the terminal's foreground
+ *     (`OUT_BUSY`) and what it is called, waiting a few quiet polls before it
+ *     says a command has finished, and hangs up on its shell when the app
+ *     goes away. */
+const HOST_VERSION = "3";
 
 /** The binary as it sits in the source tree, for `deno task dev`. */
 const devHost = new URL("../../native/pty/bin/cc-pty", import.meta.url);
@@ -98,6 +105,15 @@ async function findHost(): Promise<string> {
     await Deno.writeFile(temp, fromSource, { mode: 0o755 });
     await Deno.chmod(temp, 0o755).catch(() => {});
     await Deno.rename(temp, unpacked);
+    // Sweep the previous version's copy. The name carries the version so both
+    // can sit there safely, but an app that has been upgraded a few times
+    // should not leave a museum of 300 KB binaries behind in a user's home.
+    // Best effort: one of them may be the host of a session still running.
+    for await (const entry of Deno.readDir(dir)) {
+      const stale = entry.isFile && entry.name.startsWith("cc-pty-") &&
+        entry.name !== `cc-pty-${HOST_VERSION}`;
+      if (stale) await Deno.remove(join(dir, entry.name)).catch(() => {});
+    }
     return unpacked;
   }
 
@@ -157,6 +173,19 @@ export type PtyEvents = {
   onData: (text: string) => void;
   /** The shell finished. `code` is what a shell would report. */
   onExit: (code: number) => void;
+  /**
+   * A command took the terminal's foreground, or gave it back.
+   *
+   * The host reports this from `tcgetpgrp`, which is what the terminal itself
+   * knows, so it is true for a command that prints nothing — `sleep 30`, a
+   * compile that is thinking, a test run between its lines. Watching output
+   * would call all of those idle. Edge-triggered: only changes arrive.
+   *
+   * `name` is that command's short name, from the kernel — the executable
+   * alone, no path and no arguments — or empty when there is nothing running
+   * or the process went before it could be read.
+   */
+  onBusy: (busy: boolean, name: string) => void;
   /**
    * Is the consumer behind?
    *
@@ -335,6 +364,11 @@ async function pump(
           pending += decode.decode(body, { stream: true });
           if (pending.length >= COALESCE_BYTES) flush();
           else soon();
+        } else if (kind === OUT_BUSY) {
+          // Flushed first, so "a command started" never arrives ahead of the
+          // output that was already on its way from before it.
+          flush();
+          events.onBusy(body[0] === 1, new TextDecoder().decode(body.slice(1)));
         } else if (kind === OUT_EXITED) {
           exit = new DataView(body.buffer, body.byteOffset).getInt32(0);
         }

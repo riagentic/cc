@@ -8,3 +8,6 @@ dep/
 # native/pty/bin/cc-pty so a clean checkout builds without a Rust toolchain;
 # everything cargo generates on the way there is not worth versioning.
 native/pty/target/
+
+# Scratch that is mine to run, not the project's to carry.
+untrack/

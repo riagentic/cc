@@ -28,7 +28,7 @@ testUI(
   App,
   "switching engines swaps the chat page and the rail",
   async (ui) => {
-    ui.ChatLink.click();
+    ui.ProjectLink.click();
     await ui.settle();
     await withProject(ui, async (id) => {
       // Claude engine: the Claude composer and the full rail.
@@ -61,7 +61,7 @@ testUI(
   App,
   "the local page carries model, mode and the context meter",
   async (ui) => {
-    ui.ChatLink.click();
+    ui.ProjectLink.click();
     await ui.settle();
     await withProject(ui, async (id) => {
       await local.setEngine(id, "llamacpp");
@@ -127,7 +127,7 @@ testUI(
   App,
   "agent mode arms and asks before it is granted",
   async (ui) => {
-    ui.ChatLink.click();
+    ui.ProjectLink.click();
     await ui.settle();
     await withProject(ui, async (id) => {
       await local.setEngine(id, "llamacpp");
@@ -169,7 +169,7 @@ testUI(
   App,
   "a local project waiting on a command says so from anywhere",
   async (ui) => {
-    ui.ChatLink.click();
+    ui.ProjectLink.click();
     await ui.settle();
     const other = await Deno.makeTempDir();
     await withProject(ui, async (id) => {
@@ -201,7 +201,7 @@ testUI(
   App,
   "a server that cannot run tools says so, and says how to fix it",
   async (ui) => {
-    ui.ChatLink.click();
+    ui.ProjectLink.click();
     await ui.settle();
     await withProject(ui, async (id) => {
       await local.setEngine(id, "llamacpp");
@@ -230,7 +230,7 @@ testUI(
   App,
   "an answer about one server never lands on another",
   async (ui) => {
-    ui.ChatLink.click();
+    ui.ProjectLink.click();
     await ui.settle();
     await withProject(ui, async (id) => {
       await local.setEngine(id, "llamacpp");

@@ -18,6 +18,7 @@
  * the palette it draws in, and the loop that moves bytes between it and the
  * cell.
  */
+import { worksInTerminal } from "./commands.ts";
 import { afterRender, onCleanup, onMount, useRef, type VNode } from "aio/air";
 // Vendored, not imported from npm.
 //
@@ -252,6 +253,21 @@ function TerminalView(props: { terminalId: string }): VNode {
       theme: palette(),
       macOptionIsMeta: true,
     });
+    // Let the app's own navigation through.
+    //
+    // A focused terminal takes every keystroke, which is what a terminal is
+    // for — but it meant that clicking into a shell disabled moving around the
+    // app until you clicked back out. Returning `false` tells xterm to neither
+    // handle the event nor call `preventDefault` on it, so it carries on
+    // bubbling to the window and the ordinary shortcut fires.
+    //
+    // Which chords those are is decided in one place, beside the shortcuts
+    // themselves, so a key cannot be listed in help as working everywhere and
+    // then be swallowed here. Everything else still belongs to the shell.
+    t.attachCustomKeyEventHandler((e: KeyboardEvent) =>
+      !(e.type === "keydown" && worksInTerminal(e))
+    );
+
     const f = new FitAddon();
     t.loadAddon(f);
     t.open(el);
@@ -277,10 +293,19 @@ function TerminalView(props: { terminalId: string }): VNode {
     // Size. The kernel raises SIGWINCH from the resize, which is how a
     // full-screen program learns to redraw itself.
     const measure = () => {
+      // A terminal that has been disposed answers `rows` and `cols` by
+      // reaching into a core that is no longer there, and the throw comes out
+      // of whatever called this — a resize observer, a window listener — where
+      // there is nobody to catch it. Guarding only `fit()` was not enough: the
+      // uncaught "reading 'dimensions'" in the logs is the line BELOW it.
+      //
+      // It happens on an ordinary move between two shells: the old view is
+      // torn down while its observers still have a callback in flight.
+      if (term.current !== t) return;
       try {
         f.fit();
-      } catch { /* not laid out yet */ }
-      void consoleCell.resize(props.terminalId, t.rows, t.cols);
+        void consoleCell.resize(props.terminalId, t.rows, t.cols);
+      } catch { /* not laid out yet, or gone */ }
     };
     measure();
     // …and again once the browser has actually laid the panel out. The first
@@ -314,12 +339,15 @@ function TerminalView(props: { terminalId: string }): VNode {
     t.focus();
 
     onCleanup(() => {
+      // Cleared FIRST. Everything that might still fire — an observer callback
+      // already queued, a listener mid-flight — checks this to decide whether
+      // the terminal it closed over is still the live one.
+      term.current = null;
       typed.dispose();
       win?.removeEventListener("resize", onResize);
       ro?.disconnect();
       void consoleCell.unwatch(props.terminalId);
       t.dispose();
-      term.current = null;
     });
   });
 

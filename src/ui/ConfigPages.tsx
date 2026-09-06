@@ -17,7 +17,8 @@
  * Showing only the first hides a hook you just wrote; showing only the second
  * claims a capability the session does not have.
  */
-import { navigate, useLocal, type VNode } from "aio/air";
+import { go } from "./go.ts";
+import { useLocal, type VNode } from "aio/air";
 import {
   catalog,
   commandEntries,
@@ -248,7 +249,7 @@ export function CommandsPage(): VNode {
         // in the box that the CLI will refuse is a worse outcome than making
         // somebody type it.
         use={(name) => {
-          navigate("/");
+          go("/", true);
           // After the navigation, so the composer it fills is the one that has
           // just been mounted rather than the one being torn down.
           queueMicrotask(() => fillComposer(`/${name.replace(/^\//, "")} `));

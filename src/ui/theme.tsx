@@ -277,10 +277,62 @@ body {
 .pane__icon { display: grid; place-items: center; opacity: .8; flex: none; }
 /* Something is happening in a pane you may not be looking at. The only thing a
    row this small has room to say, so it says exactly one thing. */
-.pane__live {
+/* Which provider answers this conversation, in words. Quiet by default and
+   plain when the row is chosen: it is a qualifier on the title, not a second
+   title, and it must never win the row it labels. */
+/* A colour per provider, so the mix in a project is legible before the word
+   is read. The hue is the only thing that changes: one shape, one weight, one
+   opacity, so four labels in a column still look like one kind of thing.
+
+   Both the text and the ground are mixed from the same hue, which is what
+   keeps them readable in either theme — the ground is nearly transparent and
+   the text is nearly the hue itself. */
+.pane__tag {
+  --tag: var(--ink-dim);
+  flex: none; font-size: 9.5px; line-height: 1.6; letter-spacing: .02em;
+  padding: 0 4px; border-radius: 4px;
+  color: color-mix(in srgb, var(--tag) 88%, var(--ink));
+  background: color-mix(in srgb, var(--tag) 15%, transparent);
+  max-width: 62px; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pane__tag--claude { --tag: #d97757; }
+.pane__tag--llamacpp { --tag: #2eaa93; }
+.pane__tag--ollama { --tag: #a98bf5; }
+.pane__tag--lmstudio { --tag: #4f97f0; }
+/* A shell's tag is the command running in it. It shares the busy light's
+   colour, because it is the same fact said twice: something is happening, and
+   here is what. */
+.pane__tag--running { --tag: var(--ok); }
+.pane.selected .pane__tag { background: color-mix(in srgb, var(--tag) 22%, transparent); }
+
+/* ── status lights ──────────────────────────────────────────────────────────
+   One vocabulary, everywhere (see ui/pulse.ts):
+     idle       grey   nothing is there
+     ready      blue   alive, waiting for you — a prompt, an idle chat
+     busy       green  work happening now; the only one that moves
+     attention  amber  stopped, waiting for an answer only you can give
+   Only "busy" animates. A light that is always pulsing is a light nobody
+   reads, which is exactly what the old always-green dot became. */
+.pulse {
   width: 5px; height: 5px; border-radius: 99px; flex: none;
-  background: var(--ok);
-  animation: pulse 1.6s var(--ease) infinite;
+  background: var(--ink-dim); opacity: .45;
+  transition: background .2s var(--ease), opacity .2s var(--ease);
+}
+.pulse--ready { background: var(--info); opacity: .75; }
+.pulse--busy {
+  background: var(--ok); opacity: 1;
+  animation: pulse 1.4s var(--ease) infinite;
+}
+/* A ring, not a dot: it will wait forever, and it should not look like
+   progress. */
+.pulse--attention {
+  background: transparent; opacity: 1;
+  box-shadow: 0 0 0 1.5px var(--warn) inset, 0 0 0 3px
+    color-mix(in srgb, var(--warn) 22%, transparent);
+}
+@media (prefers-reduced-motion: reduce) {
+  .pulse--busy { animation: none; box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 30%, transparent); }
 }
 @keyframes pulse { 50% { opacity: .35; } }
 .pane__close {
@@ -345,7 +397,12 @@ body {
    the overlays. It used to be a flex sibling of the state dot, which left a
    ~16px strip down the right of every tab that looked like the tab and clicked
    like nothing — the "sometimes switching does nothing" bug. */
-.ptab__row { display: flex; align-items: center; width: 100%; }
+/* The anchor for the state dot and the hover actions.
+
+   It has to be THIS row, not the tab: once a tab grew a list of panes beneath
+   it, a dot positioned against the tab sat halfway down that list, beside
+   whichever conversation happened to be third. */
+.ptab__row { position: relative; display: flex; align-items: center; width: 100%; }
 .ptab__main {
   width: 100%; min-width: 0;
   display: grid; grid-template-columns: 26px minmax(0, 1fr);
@@ -399,14 +456,17 @@ body {
   width: 7px; height: 7px; border-radius: 99px; background: transparent;
   pointer-events: none;
 }
-.ptab__state--ready { background: color-mix(in srgb, var(--ok) 70%, transparent); }
-.ptab__state--working { background: var(--accent); animation: pulse 1.5s var(--ease) infinite; }
+/* The project's own light is the strongest of its panes' — same vocabulary,
+   one size up because it survives the dock collapsing to icons. */
+.ptab__state--ready { background: var(--info); opacity: .75; }
+.ptab__state--busy { background: var(--ok); animation: pulse 1.4s var(--ease) infinite; }
+.ptab__state--idle { background: var(--ink-dim); opacity: .35; }
 .ptab__state--error { background: var(--danger); }
 /* Blocked on a human: it will wait forever, so it gets a ring rather than a dot. */
-.ptab__state--holds {
-  background: var(--warn);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--warn) 26%, transparent);
-  animation: pulse 1.8s var(--ease) infinite;
+.ptab__state--attention {
+  background: transparent;
+  box-shadow: 0 0 0 2px var(--warn) inset, 0 0 0 4px
+    color-mix(in srgb, var(--warn) 22%, transparent);
 }
 
 /* End this project's session, and remove the project — revealed together on
@@ -518,6 +578,11 @@ body {
 .page { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; animation: pageIn .2s var(--ease); }
 @keyframes pageIn { from { opacity: 0; transform: translateY(4px); } }
 .page__body { flex: 1; min-height: 0; overflow-y: auto; padding: 18px 22px 26px; }
+/* A settings page is a single column, and a single column on a wide screen is
+   its own ergonomic problem: a row 1900px wide puts the label at one edge and
+   the control at the other. Capped to the same measure the chat uses, so the
+   two read at the same width and neither sprawls. */
+.page--measured .page__body > .grid { max-width: var(--measure); }
 .page__head { padding: 16px 22px 10px; display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
 .page__title { font-size: 17px; font-weight: 640; letter-spacing: -.015em; margin: 0; }
 .page__sub { font-size: 12.5px; color: var(--ink-dim); }

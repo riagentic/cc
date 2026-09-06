@@ -96,6 +96,10 @@ extern "C" {
     fn close(fd: c_int) -> c_int;
     fn waitpid(pid: c_int, status: *mut c_int, options: c_int) -> c_int;
     fn kill(pid: c_int, sig: c_int) -> c_int;
+    /// The process group currently in the FOREGROUND of this terminal. It is
+    /// the shell's own group at a prompt, and the command's group while one
+    /// runs — which is what "is something happening in here" really means.
+    fn tcgetpgrp(fd: c_int) -> c_int;
     fn execvp(file: *const c_char, argv: *const *const c_char) -> c_int;
     fn chdir(path: *const c_char) -> c_int;
     fn setenv(name: *const c_char, value: *const c_char, overwrite: c_int) -> c_int;
@@ -124,6 +128,16 @@ const IN_DATA: u8 = 0;
 const IN_RESIZE: u8 = 1;
 const OUT_DATA: u8 = 0;
 const OUT_EXITED: u8 = 1;
+/// One byte — 1 while a command holds the terminal's foreground, 0 at a prompt
+/// — followed by that command's short name, when there is one. Sent when
+/// either half changes, so a pipeline that moves from `cargo` to `rustc`
+/// reports the second without going idle in between.
+const OUT_BUSY: u8 = 2;
+/// Quiet polls before "idle" is believed. The poll below waits 200ms when
+/// nothing is happening, so this is roughly half a second — long enough to
+/// cover the handover between two commands, short enough that a finished
+/// command's light goes out while you are still looking at it.
+const IDLE_TICKS: u8 = 3;
 
 /// Write one frame to stdout, and flush it.
 ///
@@ -271,6 +285,19 @@ fn pump(master: c_int, child: c_int) -> ! {
     let mut chunk = [0u8; 65536];
     let mut exited: Option<i32> = None;
 
+    // Whether a command is running, as the terminal itself knows it.
+    //
+    // `forkpty` made the shell a session leader, so the shell's process group
+    // IS its pid. Under job control the shell puts each command it runs into a
+    // group of its own and hands the terminal to it, so "foreground group is
+    // not the shell" means "a command is running" — and it is true for
+    // `sleep 30`, which prints nothing at all. Watching output instead would
+    // call that idle, and would call a slow build idle between its lines.
+    let mut busy = false;
+    let mut idle_ticks = 0u8;
+    let mut name = String::new();
+    emit(OUT_BUSY, &[0]);
+
     loop {
         let mut fds = [
             PollFd { fd: 0, events: POLLIN, revents: 0 },
@@ -346,6 +373,47 @@ fn pump(master: c_int, child: c_int) -> ! {
             }
         }
 
+        // ── is a command holding the terminal? ──
+        //
+        // Read every tick. It is one syscall on an fd already open, cheaper
+        // than the poll that just returned, and it is edge-reported: the app
+        // hears only when the answer changes.
+        {
+            let fg = unsafe { tcgetpgrp(master) };
+            // A negative answer means the terminal has no foreground group any
+            // more — the session is ending. Not busy.
+            let now = fg > 0 && fg != child;
+            if now {
+                idle_ticks = 0;
+                let found = comm_of(fg);
+                if !busy || found != name {
+                    busy = true;
+                    name = found;
+                    let mut frame = Vec::with_capacity(1 + name.len());
+                    frame.push(1);
+                    frame.extend_from_slice(name.as_bytes());
+                    emit(OUT_BUSY, &frame);
+                }
+            } else if busy {
+                // Going idle waits for a few quiet ticks; going busy does not.
+                //
+                // A pipeline hands the terminal from one command to the next,
+                // and a shell is honestly "at a prompt" for the moment in
+                // between. Reported as it happens, a `make` running a hundred
+                // short commands strobes. The wait belongs HERE rather than in
+                // the app, because the app cannot re-render when a deadline
+                // passes — nothing changes at that instant for it to notice,
+                // and a light left on until the next unrelated event is worse
+                // than no light. Here there is already a loop with a clock.
+                idle_ticks += 1;
+                if idle_ticks >= IDLE_TICKS {
+                    busy = false;
+                    name.clear();
+                    emit(OUT_BUSY, &[0]);
+                }
+            }
+        }
+
         // ── has the child finished? ──
         if exited.is_none() {
             let mut status: c_int = 0;
@@ -402,6 +470,29 @@ fn pump(master: c_int, child: c_int) -> ! {
     };
     emit(OUT_EXITED, &code.to_be_bytes());
     exit(0);
+}
+
+/// The short name of the process leading group `pgid`, or empty.
+///
+/// `/proc/<pid>/comm` is the kernel's own short name — the executable, no path
+/// and no arguments, capped at 15 bytes. That is exactly what a tab wants, and
+/// it is why this reads `comm` rather than parsing `cmdline`: a tag that said
+/// `deno run -A --unstable-kv src/app.ts` would be a tag nobody can read, and
+/// trimming that back down to `deno` is guessing at what the kernel already
+/// knows.
+///
+/// The process group id IS the group leader's pid, which is the command the
+/// shell put in the foreground. Best effort: the process can exit between the
+/// `tcgetpgrp` and this read, and an empty name simply means the light is on
+/// with nothing to label it.
+fn comm_of(pgid: c_int) -> String {
+    if pgid <= 0 {
+        return String::new();
+    }
+    match std::fs::read_to_string(format!("/proc/{pgid}/comm")) {
+        Ok(text) => text.trim_end_matches('\n').to_string(),
+        Err(_) => String::new(),
+    }
 }
 
 /// Turn a `waitpid` status into the number a shell would report.

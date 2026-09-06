@@ -14,8 +14,10 @@
  * tells the reader something is possible somewhere; leaving it out tells them
  * what they can do now.
  */
-import { navigate, type VNode } from "aio/air";
-import { workspace } from "../cell/workspace.ts";
+import { go } from "./go.ts";
+import { type VNode } from "aio/air";
+import { activePane, panesOf, workspace } from "../cell/workspace.ts";
+import { consoleCell } from "../cell/console.ts";
 import { session, view } from "../cell/session.ts";
 import { activeIsLocal, local, localChat } from "../cell/local.ts";
 import { prefs, ZOOM_STEP } from "../cell/prefs.ts";
@@ -173,13 +175,125 @@ const NEXT_THEME = {
  */
 export function stepProject(by: number): void {
   const list = workspace.projects;
-  if (list.length < 2) return;
-  const at = list.findIndex((p) => p.id === workspace.activeId);
-  const next = list[
-    ((at < 0 ? 0 : at + by) % list.length + list.length) %
-    list.length
-  ];
+  const next = from(
+    list,
+    list.findIndex((p) => p.id === workspace.activeId),
+    by,
+  );
   if (next) workspace.select(next.id);
+}
+
+/**
+ * The next item along, wrapping — and the sensible one when there is no
+ * current item at all.
+ *
+ * `at < 0` means nothing here is selected: a page with no card of its own, a
+ * project list that has just loaded. Pressing "next" should then land on the
+ * FIRST item and "previous" on the LAST, which is where those two keys point
+ * when the list is thought of as a ring you are stepping onto. Treating "no
+ * selection" as index 0 gave the first item for both, so pressing up from
+ * nowhere went down.
+ */
+export function from<T>(list: T[], at: number, by: number): T | undefined {
+  if (list.length === 0) return undefined;
+  if (at < 0) return by > 0 ? list[0] : list[list.length - 1];
+  return list[((at + by) % list.length + list.length) % list.length];
+}
+
+/**
+ * Move to the next thing in the LEFT panel — the dock.
+ *
+ * One flat walk over every conversation and shell, in the order they are
+ * drawn, across every project. Crossing from the last row of one project into
+ * the first of the next is what the eye expects from a list that is all on
+ * screen at once, and selecting a pane selects its project anyway.
+ *
+ * Project rows are not stops of their own. A project row is a way of reaching
+ * its conversations, and this walk already visits every one of them — stopping
+ * on the heading first would mean two presses to reach what one press reaches
+ * now.
+ */
+export function stepPane(by: number): void {
+  const rows = workspace.projects.flatMap((p) => panesOf(p.id));
+  const showing = activePane(workspace.activeId)?.id ?? "";
+  const next = from(rows, rows.findIndex((pane) => pane.id === showing), by);
+  if (!next) return;
+  workspace.selectPane(next.id);
+  if (next.kind === "console") {
+    go("/console");
+    return;
+  }
+  go("/", true);
+  // A shell is arrived at to watch; a conversation is arrived at to talk to.
+  focusComposerSoon();
+}
+
+/**
+ * Close the conversation or shell you are looking at.
+ *
+ * The pane and whatever fills it go together: a shell is ended, a conversation
+ * is let go. The last conversation in a project stays — `removePane` refuses
+ * it, because a Chat page with nothing to show has no way back.
+ */
+export function closePane(): void {
+  const pane = activePane(workspace.activeId);
+  if (!pane) return;
+  if (pane.kind === "console") void consoleCell.remove(pane.id);
+  workspace.removePane(pane.id);
+}
+
+/**
+ * Move to the next page in the RIGHT panel — the rail.
+ *
+ * Read off the DOM rather than from a list of routes, and deliberately: the
+ * rail hides cards that do not apply — a local project has no sub-agents, a
+ * Claude one has no engine settings — so a list written here would drift from
+ * what is on screen, and stepping would land on a page that is not offered.
+ * The cards themselves are the list.
+ */
+export function stepRail(by: number): void {
+  if (typeof document === "undefined") return;
+  const cards = [...document.querySelectorAll<HTMLAnchorElement>(
+    ".rail .navcard",
+  )];
+  const at = cards.findIndex((c) => c.classList.contains("active"));
+  const to = from(cards, at, by)?.getAttribute("href");
+  if (to) go(to);
+}
+
+/**
+ * Put the cursor in the composer as soon as there is one.
+ *
+ * Arriving at a conversation and arriving at its text box are the same act:
+ * you came here to say something. But the box does not exist yet at the moment
+ * the navigation is asked for — the page has not rendered, and on a switch
+ * between two chats in one project it is the same page rendering different
+ * content, so there is no mount to hook. Hence the retry: try each frame until
+ * the box is there, and give up quickly if it never is, which is what happens
+ * when the destination turns out to have no composer at all.
+ */
+export function focusComposerSoon(): void {
+  if (typeof requestAnimationFrame === "undefined") return;
+  // Twelve frames, about a fifth of a second. Long enough for a page to draw,
+  // short enough that a stray attempt cannot steal the cursor from someone who
+  // has started typing somewhere else in the meantime.
+  //
+  // It keeps watching for the whole window rather than stopping at the first
+  // success, because the first success does not always hold: switching between
+  // two conversations re-renders a page that is already on screen, and a
+  // textarea replaced a frame after being focused takes the cursor with it.
+  // Measured — one transition in five landed on `body`.
+  let left = 12;
+  const tick = () => {
+    if (typeof document !== "undefined") {
+      const at = document.activeElement;
+      // Already there, or the person has gone somewhere else deliberately —
+      // either way this has no business taking the cursor.
+      if (!at?.closest?.(".composer")) focusComposer();
+    }
+    if (--left > 0) requestAnimationFrame(tick);
+  };
+  requestAnimationFrame(tick);
 }
 
 /** Focus whatever the page in front of you uses for typing. Used by the
@@ -215,7 +329,7 @@ export function commands(): Command[] {
       hint: "Open the page",
       icon: p.icon,
       alias: p.alias,
-      run: () => navigate(p.to),
+      run: () => go(p.to),
     });
   }
 
@@ -388,7 +502,7 @@ export function commands(): Command[] {
     hint: "Point the app at another folder",
     icon: IconPlus({ size: 15 }),
     alias: "new folder open directory",
-    run: () => navigate("/settings"),
+    run: () => go("/settings"),
   });
 
   /* ── appearance ─────────────────────────────────────────────────────── */
@@ -475,6 +589,26 @@ export function commands(): Command[] {
 }
 
 /**
+ * Does this event match a chord that must work even inside a terminal?
+ *
+ * Asked by the console, which otherwise swallows everything. It is answered
+ * from the same table the shortcuts themselves come from, so a chord cannot be
+ * listed in help as working everywhere and then be eaten by a shell.
+ */
+export function worksInTerminal(e: KeyboardEvent): boolean {
+  const mod = e.ctrlKey || e.metaKey;
+  return globalBindings({ openPalette: noop, openHelp: noop }).some((b) =>
+    b.everywhere === true &&
+    b.key.toLowerCase() === e.key.toLowerCase() &&
+    !!b.chord.mod === mod &&
+    !!b.chord.alt === e.altKey &&
+    !!b.chord.shift === e.shiftKey
+  );
+}
+
+const noop = () => {};
+
+/**
  * One global key binding.
  *
  * Bindings are *data*, not calls, for a reason that bites otherwise:
@@ -497,6 +631,20 @@ export type Binding = {
   label: string;
   /** The group it is filed under in help. */
   group: string;
+  /**
+   * This chord works even while a terminal has focus.
+   *
+   * A focused terminal eats every keystroke — that is what a terminal is for,
+   * and `vim` needs `Escape` far more than this app does. But moving around
+   * the app is not typing into a shell, and having to click away before
+   * `Ctrl ↓` works is a worse trade than losing one chord inside the shell.
+   *
+   * So each binding says which side of that line it is on, and the console
+   * declines exactly the ones marked here — see `worksInTerminal`. The rule
+   * for choosing: navigation and view, yes; anything a shell or a program
+   * running in one would want, no.
+   */
+  everywhere?: boolean;
   run: (e: KeyboardEvent) => void;
 };
 
@@ -516,6 +664,7 @@ export function globalBindings(
       chord: { mod: true, ignoreInInput: false },
       keys: "Ctrl K",
       group: "App",
+      everywhere: true,
       label: "Command palette — every action, by name",
       run: (e) => {
         e.preventDefault();
@@ -627,6 +776,11 @@ export function globalBindings(
       },
     },
     {
+      // Deliberately NOT `everywhere`. `Ctrl [` IS `Escape` — the same byte,
+      // 0x1b — so taking it from a focused terminal would take Escape from
+      // `vim`, and `Ctrl ]` is how `telnet` and `gdb` are interrupted. The
+      // arrow versions of these two do the same job and cost the shell
+      // nothing it needs as badly.
       key: "]",
       chord: { mod: true, ignoreInInput: false },
       keys: "Ctrl ]",
@@ -646,6 +800,99 @@ export function globalBindings(
       run: (e) => {
         e.preventDefault();
         stepProject(-1);
+      },
+    },
+    {
+      // Ctrl for the left panel, Alt for the right. One rule, so a chord you
+      // have not learned is still guessable from where you are looking.
+      key: "ArrowDown",
+      chord: { mod: true, ignoreInInput: false },
+      keys: "Ctrl ↓",
+      group: "Projects",
+      everywhere: true,
+      label: "Next conversation or shell (left panel)",
+      run: (e) => {
+        e.preventDefault();
+        stepPane(1);
+      },
+    },
+    {
+      key: "ArrowUp",
+      chord: { mod: true, ignoreInInput: false },
+      keys: "Ctrl ↑",
+      group: "Projects",
+      everywhere: true,
+      label: "Previous conversation or shell (left panel)",
+      run: (e) => {
+        e.preventDefault();
+        stepPane(-1);
+      },
+    },
+    {
+      // Deliberately NOT `everywhere`. `Ctrl W` is readline's delete-the-last-
+      // word, used constantly in a shell, and a terminal you are typing in has
+      // its own way out that this app has no business overriding: `exit`, or
+      // `Ctrl D`, which now closes the tab too.
+      key: "w",
+      chord: { mod: true, ignoreInInput: false },
+      keys: "Ctrl W",
+      group: "Projects",
+      label: "Close this conversation or shell",
+      run: (e) => {
+        // Electron would close the WINDOW otherwise, which is a considerably
+        // larger thing than the tab that was asked for.
+        e.preventDefault();
+        closePane();
+      },
+    },
+    {
+      // Down and up walk every row; left and right skip a whole project. Both
+      // rotate, so the end of the list is never a dead end.
+      key: "ArrowRight",
+      chord: { mod: true, ignoreInInput: false },
+      keys: "Ctrl →",
+      group: "Projects",
+      everywhere: true,
+      label: "Next project (left panel)",
+      run: (e) => {
+        e.preventDefault();
+        stepProject(1);
+      },
+    },
+    {
+      key: "ArrowLeft",
+      chord: { mod: true, ignoreInInput: false },
+      keys: "Ctrl ←",
+      group: "Projects",
+      everywhere: true,
+      label: "Previous project (left panel)",
+      run: (e) => {
+        e.preventDefault();
+        stepProject(-1);
+      },
+    },
+    {
+      key: "ArrowDown",
+      chord: { alt: true, ignoreInInput: false },
+      keys: "Alt ↓",
+      group: "App",
+      everywhere: true,
+      label: "Next page (right panel)",
+      run: (e) => {
+        e.preventDefault();
+        stepRail(1);
+      },
+    },
+    {
+      key: "ArrowUp",
+      chord: { alt: true, ignoreInInput: false },
+      keys: "Alt ↑",
+      group: "App",
+      everywhere: true,
+      label: "Previous page (right panel)",
+      run: (e) => {
+        e.preventDefault();
+        stepRail(-1);
       },
     },
     {

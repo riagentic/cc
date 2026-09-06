@@ -14,7 +14,12 @@ import {
   pendingPermissions,
   runningAgents,
 } from "../cell/session.ts";
-import { activeProject, activeSettings, workspace } from "../cell/workspace.ts";
+import {
+  activeProject,
+  activeSessionKey,
+  activeSettings,
+  workspace,
+} from "../cell/workspace.ts";
 import { detectedEngines, local, localConfig } from "../cell/local.ts";
 import { EFFORTS, modelOf, MODELS, PERMISSION_MODES } from "../lib/stream.ts";
 import { LOCAL_PERMISSIONS, permissionOf } from "../lib/agent.ts";
@@ -84,7 +89,7 @@ export function StatusStrip(): VNode {
   // A local engine runs its own agent loop with its own permission modes, and
   // the CLI's four mean nothing to it. One row, two vocabularies — a switcher
   // that cannot affect what it names is worse than no switcher at all.
-  const engineCfg = localConfig(project?.id ?? workspace.activeId);
+  const engineCfg = localConfig(activeSessionKey());
   const onLocal = engineCfg.engine !== "claude";
 
   return (

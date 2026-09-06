@@ -16,20 +16,37 @@
  * only way to find out it had finished — or had stopped to ask you something,
  * and would wait forever — would be to click through every project in the list.
  */
-import { navigate, useLocal, type VNode } from "aio/air";
+import { go } from "./go.ts";
+import { focusComposerSoon } from "./commands.ts";
+import { useLocal, type VNode } from "aio/air";
 import {
   activePane,
   activeProject,
+  activeSessionKey,
   forgottenProjects,
   panesOf,
   workspace,
 } from "../cell/workspace.ts";
 import { session, sessionOf } from "../cell/session.ts";
 import { consoleCell, terminalById } from "../cell/console.ts";
-import { engineOf, localChatsOf } from "../cell/local.ts";
+import {
+  engineOf,
+  localChat,
+  localChatsOf,
+  localConfig,
+} from "../cell/local.ts";
 import type { Pane, Project } from "../type/claude.ts";
 import { hueOf, tildePath } from "../lib/format.ts";
+import { ENGINE_TAGS } from "./LocalChatPage.tsx";
 import { matches, Search } from "./parts.tsx";
+import {
+  claudePulse,
+  consolePulse,
+  localPulse,
+  type Pulse,
+  pulseTitle,
+  strongest,
+} from "./pulse.ts";
 import { AbsentOffer, BrowseButton } from "./AddProject.tsx";
 import { showToast } from "./toast.tsx";
 import {
@@ -52,10 +69,14 @@ import {
  * list of everything open in every project is a list nobody can find anything
  * in. Only the project being worked in shows them — see the caller.
  */
-function PaneList(props: { project: Project }): VNode {
+function PaneList(props: { project: Project; active: boolean }): VNode {
   const p = props.project;
   const panes = panesOf(p.id);
-  const showing = activePane(p.id)?.id ?? "";
+  // Only the project you are in has a row on screen, so only that list may
+  // show one as selected. Every project remembers which of its panes it will
+  // open on, but two highlighted rows in two lists is a claim that two things
+  // are showing at once.
+  const showing = props.active ? activePane(p.id)?.id ?? "" : "";
   const sessions = panes.filter((x) => x.kind === "session").length;
 
   /**
@@ -73,64 +94,116 @@ function PaneList(props: { project: Project }): VNode {
    * it. Two calls rather than one cross-cell method: the dock owns the pane,
    * the console cell owns the terminal, and the id is what joins them.
    */
-  const openConsole = async (title?: string, command?: string) => {
+  const openConsole = async (title = "", command = "") => {
     const id = crypto.randomUUID();
+    // Empty strings, not `undefined`. These arguments cross a JSON wire, where
+    // `undefined` silently becomes "absent" or `null` — the server then
+    // receives something other than what was passed, which the runtime warns
+    // about and which is a real difference the moment anything reads it back.
     await consoleCell.open(id, p.id, { title, command });
     const pane = await workspace.addPane(p.id, "console", id, command);
     if (!pane) return;
-    if (title) await workspace.renamePane(id, title);
-    navigate("/console");
+    if (title !== "") await workspace.renamePane(id, title);
+    go("/console");
   };
 
   return (
     <div class="panes">
-      {panes.map((pane) => (
-        <div
-          key={pane.id}
-          class={"pane" + (pane.id === showing ? " selected" : "")}
-        >
-          <button
-            type="button"
-            class="pane__main"
-            aria-label={`${pane.title} in ${p.name}`}
-            title={pane.kind === "console"
-              ? `${pane.title} — a shell in ${p.path}`
-              : `${pane.title} — a conversation in ${p.path}`}
-            onClick={() => {
-              workspace.selectPane(pane.id);
-              navigate(pane.kind === "console" ? "/console" : "/");
-            }}
+      {panes.map((pane) => {
+        const paneState = panePulse(pane);
+        return (
+          <div
+            key={pane.id}
+            class={"pane" + (pane.id === showing ? " selected" : "")}
           >
-            <span class="pane__icon">
-              {pane.kind === "console"
-                ? IconTerminal({ size: 11 })
-                : IconChat({ size: 11 })}
-            </span>
-            <span class="truncate">{pane.title}</span>
-            {paneBusy(pane) && <span class="pane__live" />}
-          </button>
-          {
-            /* The last conversation has no close button: a project with none
-              is a Chat page with nothing to show and no way back. */
-          }
-          {!(pane.kind === "session" && sessions === 1) && (
             <button
               type="button"
-              class="pane__close"
-              aria-label={`Close ${pane.title}`}
+              class="pane__main"
+              aria-label={`${pane.title} in ${p.name}`}
               title={pane.kind === "console"
-                ? "End this shell and close it"
-                : "Close this conversation"}
+                ? `${pane.title} — a shell in ${p.path}`
+                : `${pane.title} — a conversation in ${p.path}`}
               onClick={() => {
-                if (pane.kind === "console") void consoleCell.remove(pane.id);
-                workspace.removePane(pane.id);
+                workspace.selectPane(pane.id);
+                if (pane.kind === "console") {
+                  go("/console");
+                  return;
+                }
+                go("/", true);
+                // Clicking a conversation is asking to talk to it, whether the
+                // click came from the mouse or from Ctrl+arrow.
+                focusComposerSoon();
               }}
             >
-              {IconX({ size: 10 })}
+              <span class="pane__icon">
+                {pane.kind === "console"
+                  ? IconTerminal({ size: 11 })
+                  : IconChat({ size: 11 })}
+              </span>
+              <span class="truncate">{pane.title}</span>
+              {
+                /* One tag, two questions — the same one, really: what is
+                behind this row.
+
+                For a conversation it is the provider answering it, in words.
+                Not a logo: four engine marks told apart at 11px is a puzzle,
+                and the two llama-based ones are the same handful of grey
+                pixels at that size. It is worth the room because a project can
+                hold a Claude chat and a local one at the same time, and the
+                rows are otherwise identical.
+
+                For a shell it is whatever is running in it right now, and
+                nothing at all at a prompt. The light already says a shell is
+                busy; this says what with, which is the next thing you would
+                want and the reason you would go and look. */
+              }
+              <span
+                class={`pane__tag pane__tag--${paneTagKind(pane)}`}
+                hidden={paneTag(pane) === ""}
+                title={pane.kind === "console"
+                  ? `Running ${paneTag(pane)}`
+                  : undefined}
+              >
+                {
+                  /* Never the empty string. A text child that renders to
+                    nothing changes this span's child COUNT, and the reconciler
+                    then holds the wrong node at child 0 — it says so out loud
+                    in dev. The span is hidden when there is nothing to say, so
+                    the space this reserves is never seen. */
+                }
+                {paneTag(pane) || "\u00a0"}
+              </span>
+              <span
+                class={`pulse pulse--${paneState}`}
+                title={pulseTitle(
+                  paneState,
+                  pane.kind === "console" ? "shell" : "chat",
+                )}
+              />
             </button>
-          )}
-        </div>
-      ))}
+            {
+              /* The last conversation has no close button: a project with none
+              is a Chat page with nothing to show and no way back. */
+            }
+            {!(pane.kind === "session" && sessions === 1) && (
+              <button
+                type="button"
+                class="pane__close"
+                aria-label={`Close ${pane.title}`}
+                title={pane.kind === "console"
+                  ? "End this shell and close it"
+                  : "Close this conversation"}
+                onClick={() => {
+                  if (pane.kind === "console") void consoleCell.remove(pane.id);
+                  workspace.removePane(pane.id);
+                }}
+              >
+                {IconX({ size: 10 })}
+              </button>
+            )}
+          </div>
+        );
+      })}
 
       <div class="panes__add" key="add">
         <button
@@ -140,7 +213,7 @@ function PaneList(props: { project: Project }): VNode {
           title="Another conversation in this project — its own session, its own context"
           onClick={() => {
             void workspace.addPane(p.id, "session");
-            navigate("/");
+            go("/", true);
           }}
         >
           {IconChat({ size: 11 })}
@@ -168,7 +241,7 @@ function PaneList(props: { project: Project }): VNode {
             class="pane__add pane__add--run"
             aria-label="Start in developer mode"
             title={`Run ${p.launch.dev.command} in a new console (from ${p.launch.dev.from})`}
-            onClick={() => openConsole("dev", p.launch.dev?.command)}
+            onClick={() => openConsole("dev", p.launch.dev?.command ?? "")}
           >
             {IconPlay({ size: 11 })}
             <span class="pane__runlabel">dev</span>
@@ -180,7 +253,8 @@ function PaneList(props: { project: Project }): VNode {
             class="pane__add pane__add--run"
             aria-label="Start in production mode"
             title={`Run ${p.launch.prod.command} in a new console (from ${p.launch.prod.from})`}
-            onClick={() => openConsole("production", p.launch.prod?.command)}
+            onClick={() =>
+              openConsole("production", p.launch.prod?.command ?? "")}
           >
             {IconPlay({ size: 11 })}
             <span class="pane__runlabel">prod</span>
@@ -194,10 +268,51 @@ function PaneList(props: { project: Project }): VNode {
 /** Is this pane doing something right now? The dot is the only thing a
  *  collapsed row can say, so it has to mean exactly one thing: work in
  *  progress. */
-function paneBusy(pane: Pane): boolean {
-  return pane.kind === "console"
-    ? terminalById(pane.id).status === "live"
-    : sessionOf(pane.id).status === "working";
+/**
+ * The most a tag has room to say.
+ *
+ * A process name from the kernel is already short — `comm` is capped at 15
+ * bytes — but the dock is narrower than that, and a tag that pushes the title
+ * out of its own row has stopped being a qualifier. Cut rather than shrunk:
+ * the first characters are the ones that identify a command.
+ */
+const TAG_MAX = 10;
+
+/** What this row's tag reads, or `""` for no tag: a conversation's provider,
+ *  a shell's running command, nothing at a prompt. */
+function paneTag(pane: Pane): string {
+  if (pane.kind === "console") {
+    return terminalById(pane.id).running.slice(0, TAG_MAX);
+  }
+  const engine = engineOf(pane.id);
+  return (ENGINE_TAGS[engine] ?? engine).slice(0, TAG_MAX);
+}
+
+/** Which colour the tag wears. Shells share one, because a process name is not
+ *  a member of a small set the eye can learn. */
+const paneTagKind = (pane: Pane): string =>
+  pane.kind === "console" ? "running" : engineOf(pane.id);
+
+/**
+ * What a pane's light should say.
+ *
+ * The old version asked `status === "live"` for a shell, which is "a shell
+ * exists" — true of every shell, so the light was always on and told you
+ * nothing. Now a shell is green only while a command actually holds its
+ * foreground, and blue while it sits at a prompt.
+ */
+function panePulse(pane: Pane): Pulse {
+  if (pane.kind === "console") return consolePulse(terminalById(pane.id));
+  const engine = engineOf(pane.id);
+  if (engine === "claude") {
+    const s = sessionOf(pane.id);
+    return claudePulse(
+      s.status,
+      s.permissions.filter((r) => r.status === "pending").length,
+    );
+  }
+  const cfg = localConfig(pane.id);
+  return localPulse(localChat(pane.id), cfg.baseUrl !== "" && cfg.model !== "");
 }
 
 /** What each status is called, for the tab's tooltip. */
@@ -228,18 +343,19 @@ function ProjectTab(
   const chord = props.index < 9 ? `\nCtrl/Cmd+${props.index + 1}` : "";
   // This project's own conversation, whether or not it is the one on screen.
   const s = sessionOf(p.id);
-  // A project on a local engine has no Claude session — but it can still be
-  // stopped, waiting for somebody to allow a command. That is the same signal
-  // and the same stakes (nothing moves, forever, until it is answered), so it
-  // gets the same dot and the same words.
-  const isLocal = engineOf(p.id) !== "claude";
-  const chats = isLocal ? localChatsOf(p.id) : [];
-  const holds = isLocal
-    ? chats.filter((c) => c.pending).length
-    : s.permissions.filter((r) => r.status === "pending").length;
-  const working = isLocal
-    ? chats.some((c) => c.status === "working")
-    : s.status === "working";
+  // Both kinds are counted, because a project can hold both: a Claude chat and
+  // a local one, side by side, each with its own engine. Asking "is this
+  // project local?" stopped being a question with an answer.
+  //
+  // A local chat has no Claude session, but it can still be stopped waiting
+  // for somebody to allow a command — the same signal and the same stakes
+  // (nothing moves, forever, until it is answered), so it gets the same words.
+  const chats = localChatsOf(p.id);
+  const holds = chats.filter((c) => c.pending).length +
+    s.permissions.filter((r) => r.status === "pending").length;
+  const isLocal = engineOf(activeSessionKey(p.id)) !== "claude";
+  const working = chats.some((c) => c.status === "working") ||
+    s.status === "working";
   // The session keeps the directory it started in, so "selected" and "where
   // Claude Code is actually working" can differ — and only one of them is the
   // truth about the turn in flight.
@@ -247,6 +363,11 @@ function ProjectTab(
   // A session exists when there is a process behind it. `status` alone is not
   // the question — an errored session has no process left to close.
   const running = s.pid !== null;
+
+  // The tab's own light is the strongest of everything inside it: with the
+  // panes collapsed, this dot is all there is to say that one of five shells
+  // is building or one of two chats is waiting for an answer.
+  const tabState = strongest(panesOf(p.id).map(panePulse));
 
   const sub = p.missing
     ? "Folder is gone"
@@ -297,10 +418,16 @@ function ProjectTab(
           type="button"
           class="ptab__main"
           aria-pressed={props.active}
-          // Alt+Up and Alt+Down reorder from the keyboard. Drag is the obvious
-          // gesture and the one nobody can perform without a pointer.
+          // Ctrl+Shift+Up and Ctrl+Shift+Down reorder from the keyboard. Drag
+          // is the obvious gesture and the one nobody can perform without a
+          // pointer.
+          //
+          // Ctrl because this is the left panel, and Shift because plain
+          // Ctrl+arrows already walk it: reordering is the same gesture as
+          // moving, with the row brought along.
           onKeyDown={(e: KeyboardEvent) => {
-            if (!e.altKey || (e.key !== "ArrowUp" && e.key !== "ArrowDown")) {
+            const chord = (e.ctrlKey || e.metaKey) && e.shiftKey;
+            if (!chord || (e.key !== "ArrowUp" && e.key !== "ArrowDown")) {
               return;
             }
             e.preventDefault();
@@ -368,17 +495,10 @@ function ProjectTab(
           reach for in that corner once you can see the session is there. */
         }
         <span
-          class={`ptab__state${
-            holds > 0
-              ? " ptab__state--holds"
-              : working
-              ? " ptab__state--working"
-              : s.status === "ready"
-              ? " ptab__state--ready"
-              : s.status === "error"
-              ? " ptab__state--error"
-              : ""
+          class={`ptab__state ptab__state--${
+            s.status === "error" && !isLocal ? "error" : tabState
           }`}
+          title={pulseTitle(tabState, "chat")}
           aria-hidden="true"
         />
 
@@ -435,11 +555,16 @@ function ProjectTab(
       </div>
 
       {
-        /* What this project has open, and the ways to open more. Only for the
-          project being worked in: five projects' worth of children is a wall,
-          and the ones you are not looking at have nothing to say. */
+        /* What this project has open, and the ways to open more.
+
+          Every project's, always — not just the one being worked in. The dock
+          is how you move between conversations, and a list that folds away the
+          moment you look elsewhere hides the thing you were about to click.
+          The pane rows carry their own state lights, so the ones you are not
+          in are exactly where a running build or a waiting question is worth
+          seeing. */
       }
-      {props.active && <PaneList project={p} />}
+      <PaneList project={p} active={props.active} />
     </div>
   );
 }

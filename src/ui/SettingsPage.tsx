@@ -186,7 +186,7 @@ export function SettingsPage(): VNode {
   const q = query.trim();
 
   return (
-    <div class="page">
+    <div class="page page--measured">
       <PageHead
         title="Settings"
         sub="Some of this belongs to the project, some to the machine"
@@ -315,7 +315,16 @@ export function SettingsPage(): VNode {
           </div>
         </Section>
 
-        <div class="grid grid--2">
+        {
+          /* One column, not two.
+
+            Two columns put unrelated settings side by side and made the eye
+            zig-zag down the page to read them in order — and "in order" is the
+            only order a settings page has. A single list is scanned top to
+            bottom without deciding where to look next, and the filter box
+            above makes the extra length cost nothing. */
+        }
+        <div class="grid">
           <Projects query={q} />
 
           {!isLocal && (

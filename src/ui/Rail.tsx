@@ -22,21 +22,29 @@ import {
   view,
 } from "../cell/session.ts";
 import {
+  activePane,
   activeProject,
   activeSessionKey,
   activeSettings,
   workspace,
 } from "../cell/workspace.ts";
-import { activeIsLocal, localChat, localConfig } from "../cell/local.ts";
+import {
+  activeIsLocal,
+  engineOf,
+  localChat,
+  localConfig,
+} from "../cell/local.ts";
 import { ENGINE_NAMES } from "./LocalChatPage.tsx";
 import { blockedJobs, jobs } from "../cell/jobs.ts";
 import { activeLoops, projectLoops } from "../cell/loops.ts";
 import { catalog, mcpEntries, memoryBytes } from "../cell/catalog.ts";
 import { storage } from "../cell/storage.ts";
 import { bytes, modelLabel } from "../lib/format.ts";
+import { atRoute, go } from "./go.ts";
+import { terminal } from "../cell/console.ts";
 import { Badge, Dot } from "./parts.tsx";
 import { MachineStrip } from "./Machine.tsx";
-import { terminal, terminalLive } from "../cell/console.ts";
+
 import { closeOverlay, showOverlay } from "./overlays.tsx";
 import { CommandPalette } from "./Palette.tsx";
 import {
@@ -84,20 +92,38 @@ function NavCard(
     badge?: VNode;
   },
 ): VNode {
+  // An anchor of our own rather than `Link`.
+  //
+  // `Link` navigates on every click, including a click on the card you are
+  // already looking at — and that rebuilt the whole tree, which on the Console
+  // tears the terminal down and redraws it from scrollback. A visible flash
+  // for a click that should do nothing at all. `Link` sets its own `onClick`
+  // last, so there is no way to decline from outside it; the anchor here is
+  // the same element with the same behaviour, minus that one click.
+  //
+  // The modifier check is `Link`'s, and matters for the same reason: those
+  // gestures belong to the browser, and taking them over replaces what the
+  // user asked for with an in-page route change.
+  const here = atRoute(props.to, props.exact);
   return (
-    <Link
-      to={props.to}
-      exact={props.exact}
-      // `className`, not `class`: Link merges `activeClass` into `className`
-      // (dep/aio/src/browser/browser-air-router.ts Link), so a class passed the
-      // other way is dropped the moment the link goes active.
-      // Routing reference: dep/aio/docs/ui/air-routing.md.
-      className="navcard"
-      activeClass="active"
+    <a
+      href={props.to}
+      class={`navcard${here ? " active" : ""}`}
       // Without this the link's accessible name is its label and hint run
       // together ("Chatcc"), which is what a screen reader announces and what
       // testUI/`am surface` address it by. One label, three consumers.
       aria-label={props.label}
+      aria-current={here ? "page" : undefined}
+      onClick={(e: MouseEvent) => {
+        if (
+          e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey
+        ) {
+          return;
+        }
+        e.preventDefault();
+        if (here) return;
+        go(props.to, props.exact);
+      }}
     >
       <span class="navcard__icon">{props.icon}</span>
       <span class="truncate">
@@ -114,7 +140,7 @@ function NavCard(
         <span class="navcard__hint">{props.hint}</span>
       </span>
       {props.badge}
-    </Link>
+    </a>
   );
 }
 
@@ -123,16 +149,6 @@ function NavCard(
 const Group = (props: { children: unknown }): VNode => (
   <div class="rail__group">{props.children}</div>
 );
-
-/** What the Console card says under its name: the shell, or why there is none
- *  yet. A card that always reads "Console" tells the reader nothing they could
- *  not see from the label. */
-function consoleHint(): string {
-  const t = terminal();
-  if (t.status === "live") return `${t.cols}×${t.rows}`;
-  if (t.status === "exited") return `exited ${t.exitCode ?? 0}`;
-  return "A real shell, here";
-}
 
 /** Move focus between rail cards. Focus only — a card navigates on Enter, like
  *  every link, and arrowing through pages would fire fourteen navigations. */
@@ -155,6 +171,9 @@ export function Rail(): VNode {
   // tasks, jobs, capabilities, its storage. Hiding them is the honest rail:
   // a card whose page can only say "not running here" is noise, not signal.
   const isLocal = activeIsLocal();
+  // What the dock is pointing at. The first card is the way back to it.
+  const here = activePane();
+  const onConsole = here?.kind === "console";
   const agents = runningAgents().length;
   const tasks = runningTasks().length + runningTools().length;
   const holds = pendingPermissions().length;
@@ -207,17 +226,31 @@ export function Rail(): VNode {
       }
       <div class="rail__nav" onKeyDown={walkCards}>
         <Group key="g-session">Session</Group>
+        {
+          /* The way back to what you were doing — which is not always a chat.
+
+            A project holds conversations and shells, and the dock decides
+            which one is showing. A card fixed on "Chat" sent you somewhere
+            other than where you came from, and left the Console reachable only
+            through the dock. This one follows the same active pane the dock
+            marks, so leaving for Settings and coming back lands you where you
+            were. */
+        }
         <NavCard
           key="chat"
-          to="/"
-          exact
-          icon={IconChat({ size: 16 })}
-          label="Chat"
-          hint={isLocal
+          to={onConsole ? "/console" : "/"}
+          exact={!onConsole}
+          icon={onConsole ? IconTerminal({ size: 16 }) : IconChat({ size: 16 })}
+          label="Project"
+          hint={onConsole
+            ? `${here?.title ?? "Console"}${
+              terminal().running ? ` · ${terminal().running}` : ""
+            }`
+            : isLocal
             ? `${
-              ENGINE_NAMES[localConfig(workspace.activeId).engine] ?? ""
+              ENGINE_NAMES[localConfig(activeSessionKey()).engine] ?? ""
             } · ${
-              modelLabel(localConfig(workspace.activeId).model) || "no model"
+              modelLabel(localConfig(activeSessionKey()).model) || "no model"
             }`
             : holds > 0
             ? `${holds} approval${holds > 1 ? "s" : ""} needed`
@@ -230,20 +263,6 @@ export function Rail(): VNode {
           badge={holds > 0
             ? <Badge value="approve" tone="danger" />
             : live
-            ? <Badge value="live" tone="live" />
-            : undefined}
-        />
-        {
-          /* Under Chat, because that is what it sits next to: the other thing
-            you do inside a project, in the same directory, at the same time. */
-        }
-        <NavCard
-          key="console"
-          to="/console"
-          icon={IconTerminal({ size: 16 })}
-          label="Console"
-          hint={consoleHint()}
-          badge={terminalLive()
             ? <Badge value="live" tone="live" />
             : undefined}
         />
@@ -325,7 +344,13 @@ export function Rail(): VNode {
             </div>
           )}
 
-        <Group key="g-project">Project</Group>
+        {
+          /* "Codebase", not "Project" — the first card is called Project now,
+            and one panel cannot have two things by that name. These two are
+            about the files: what is in the folder, and what the folder tells
+            Claude about itself. */
+        }
+        <Group key="g-project">Codebase</Group>
         <NavCard
           key="tree"
           to="/tree"
@@ -411,8 +436,8 @@ export function Rail(): VNode {
           label="Settings"
           hint={isLocal
             ? `${
-              ENGINE_NAMES[localConfig(workspace.activeId).engine] ?? "local"
-            } · ${localConfig(workspace.activeId).mode}`
+              ENGINE_NAMES[localConfig(activeSessionKey()).engine] ?? "local"
+            } · ${localConfig(activeSessionKey()).mode}`
             : `${activeSettings().model} · ${activeSettings().permissionMode}${
               activeSettings().effort ? ` · ${activeSettings().effort}` : ""
             }`}

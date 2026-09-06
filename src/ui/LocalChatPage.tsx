@@ -51,8 +51,23 @@ import {
 } from "./icons.tsx";
 
 export const ENGINE_NAMES: Record<string, string> = {
+  claude: "Claude",
   lmstudio: "LM Studio",
   ollama: "Ollama",
+  llamacpp: "llama.cpp",
+};
+
+/**
+ * The same names, short enough to sit on a dock row beside a title.
+ *
+ * A word beats a drawing here. Four engine logos told apart at 11px is a
+ * puzzle — the two llama-based ones are the same handful of grey pixels at
+ * that size — and the whole job of this label is to be read without effort.
+ */
+export const ENGINE_TAGS: Record<string, string> = {
+  claude: "claude",
+  lmstudio: "lm studio",
+  ollama: "ollama",
   llamacpp: "llama.cpp",
 };
 

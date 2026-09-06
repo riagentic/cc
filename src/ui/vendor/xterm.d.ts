@@ -35,6 +35,9 @@ export class Terminal {
   focus(): void;
   dispose(): void;
   onData(handler: (data: string) => void): Disposable;
+  /** Return `false` to decline an event: xterm neither handles it nor calls
+   *  `preventDefault`, so it goes on bubbling like any other key. */
+  attachCustomKeyEventHandler(handler: (e: KeyboardEvent) => boolean): void;
   // deno-lint-ignore no-explicit-any
   loadAddon(addon: any): void;
 }

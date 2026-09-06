@@ -79,7 +79,11 @@ export function FindBar(props: { total: number }): VNode | null {
         }}
       />
       <span class="find__count">
-        {q.trim() === "" ? "" : `${at} / ${props.total}`}
+        {
+          /* Never "": see the note in TreePage — an empty text child renders
+          to no node, and the reconciler loses its place. */
+        }
+        {q.trim() === "" ? "\u00a0" : `${at} / ${props.total}`}
       </span>
       <button
         type="button"

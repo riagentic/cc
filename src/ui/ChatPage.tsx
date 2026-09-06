@@ -6,14 +6,8 @@
  * and every tool call becomes a chip you can open in place — so the transcript
  * stays readable while nothing is hidden.
  */
-import {
-  afterRender,
-  navigate,
-  onMount,
-  useLocal,
-  useRef,
-  type VNode,
-} from "aio/air";
+import { go } from "./go.ts";
+import { afterRender, onMount, useLocal, useRef, type VNode } from "aio/air";
 import { Markdown } from "./Markdown.tsx";
 import { highlight, langOfFile } from "../lib/highlight.ts";
 import { session, view } from "../cell/session.ts";
@@ -426,7 +420,7 @@ function ToolChip(
           aria-label="Show in tree"
           onClick={() => {
             void tree.select(file);
-            navigate("/tree");
+            go("/tree");
           }}
         >
           {IconTree({ size: 12 })} in tree

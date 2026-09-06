@@ -69,12 +69,20 @@ export function MachineStrip(): VNode {
 
   return (
     <div class="machine">
+      {
+        /* Every child keyed, including the ones that are not there.
+          A falsy `{cond && …}` still contributes a child — an UNKEYED one —
+          and a list with both kinds reconciles by position, which is how a
+          gauge ends up wearing the label of the one beside it. */
+      }
       <Gauge
+        key="cpu"
         label="CPU"
         value={metrics.cpu}
         title="Processor busy across every core, over the last two seconds"
       />
       <Gauge
+        key="ram"
         label="RAM"
         value={mem}
         title={metrics.memTotal > 0
@@ -83,24 +91,30 @@ export function MachineStrip(): VNode {
           } in use · this app ${bytes(metrics.ownRss)}`
           : "Not measured"}
       />
-      {gpu !== null && (
-        <Gauge
-          label="GPU"
-          value={gpu.busy}
-          title={`${gpu.name}${gpu.temp !== null ? ` · ${gpu.temp}°C` : ""}`}
-        />
-      )}
-      {v !== null && v.total > 0 && (
-        <Gauge
-          label="VRAM"
-          value={(v.used / v.total) * 100}
-          title={`${bytes(v.used)} of ${bytes(v.total)} video memory in use${
-            metrics.gpus.length > 1
-              ? `, across ${metrics.gpus.length} cards`
-              : ""
-          }`}
-        />
-      )}
+      {gpu !== null
+        ? (
+          <Gauge
+            key="gpu"
+            label="GPU"
+            value={gpu.busy}
+            title={`${gpu.name}${gpu.temp !== null ? ` · ${gpu.temp}°C` : ""}`}
+          />
+        )
+        : <span key="gpu" hidden />}
+      {v !== null && v.total > 0
+        ? (
+          <Gauge
+            key="vram"
+            label="VRAM"
+            value={(v.used / v.total) * 100}
+            title={`${bytes(v.used)} of ${bytes(v.total)} video memory in use${
+              metrics.gpus.length > 1
+                ? `, across ${metrics.gpus.length} cards`
+                : ""
+            }`}
+          />
+        )
+        : <span key="vram" hidden />}
     </div>
   );
 }
@@ -140,14 +154,16 @@ export function MachinePanel(): VNode {
               : "not reported"}
           />
         ))}
-        {!metrics.gpuKnown && (
-          <div key="nogpu" class="field__hint">
-            No GPU tool answered. <code>nvidia-smi</code> and{" "}
-            <code>rocm-smi</code>{" "}
-            are the two this asks for; without one of them there is nothing to
-            read, which is not the same as a card sitting idle.
-          </div>
-        )}
+        {!metrics.gpuKnown
+          ? (
+            <div key="nogpu" class="field__hint">
+              No GPU tool answered. <code>nvidia-smi</code> and{" "}
+              <code>rocm-smi</code>{" "}
+              are the two this asks for; without one of them there is nothing to
+              read, which is not the same as a card sitting idle.
+            </div>
+          )
+          : <span key="nogpu" hidden />}
       </div>
       <div class="field__hint" style={{ marginTop: "10px" }}>
         This app itself is using{" "}

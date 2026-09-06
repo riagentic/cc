@@ -39,7 +39,7 @@ const active = (w: any) =>
  * missing component rather than a leaked URL.
  */
 async function open(ui: any) {
-  ui.ChatLink.click();
+  ui.ProjectLink.click();
   await ui.settle();
 }
 
@@ -100,7 +100,7 @@ testUI(
     // The rail is the starting point for every detail page (ui.md#1).
     for (
       const link of [
-        "ChatLink",
+        "ProjectLink",
         "SubAgentsLink",
         "TasksLink",
         "ActivityLink",
@@ -141,7 +141,7 @@ testUI(App, "each rail card opens its detail page", async (ui) => {
   ui.SettingsLink.click();
   await ui.waitFor(() => ui.html().includes("Permissions"));
 
-  ui.ChatLink.click();
+  ui.ProjectLink.click();
   await ui.waitFor(() => ui.html().includes("Ask Claude Code"));
 });
 
@@ -1407,7 +1407,7 @@ testUI(
     ui.UndoButton.click();
     await ui.expectCell(session, (s) => s.messages.length === 1);
 
-    ui.ChatLink.click();
+    ui.ProjectLink.click();
     await ui.waitFor(() => ui.html().includes("keep this"));
   },
 );

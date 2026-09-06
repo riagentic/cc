@@ -190,7 +190,9 @@ testCell(
 
       t.send.removeProject(id);
       // Still there: `forgotten` is an undo, and a project brought back should
-      // come back with its conversations rather than as a bare tab.
+      // come back with its conversations rather than as a bare tab. The sweep
+      // that collects unreachable ones is deliberately NOT part of removal —
+      // see `prunePanes`.
       assertEquals(t.getState().panes[id].length, 2);
 
       t.send.undoForget();
@@ -251,3 +253,68 @@ testCell(
     }
   },
 );
+
+testCell(
+  workspace,
+  "a project nobody has opened can still be selected",
+  async (t) => {
+    t.init();
+    const a = await Deno.makeTempDir();
+    const b = await Deno.makeTempDir();
+    try {
+      await t.send.addProject(a);
+      await t.send.addProject(b);
+      const second = t.getState().activeId;
+      const first = t.getState().projects.find((p) => p.id !== second)!.id;
+      // Nothing has written panes for either: the record appears when a second
+      // conversation is added, and neither has one. But the dock still draws a
+      // row for each, under the project's own id — see `panesOf`.
+      assertEquals(t.getState().panes[first], undefined);
+
+      t.send.selectPane(first);
+      // It must select. Doing nothing here is what made keyboard walking the
+      // dock stop dead at the first project nobody had opened.
+      assertEquals(t.getState().activeId, first);
+      assertEquals(t.getState().activePane[first], first);
+      assertEquals(t.getState().panes[first]?.[0].id, first);
+    } finally {
+      await Deno.remove(a);
+      await Deno.remove(b);
+    }
+  },
+);
+
+testCell(
+  workspace,
+  "selecting something that is not a pane does nothing",
+  (t) => {
+    t.init();
+    t.send.selectPane("not-a-pane-or-a-project");
+    assertEquals(t.getState().activeId, "");
+    assertEquals(Object.keys(t.getState().panes).length, 0);
+  },
+);
+
+testCell(workspace, "adding a pane is also choosing its project", async (t) => {
+  t.init();
+  const a = await Deno.makeTempDir();
+  const b = await Deno.makeTempDir();
+  try {
+    await t.send.addProject(a);
+    const first = t.getState().activeId;
+    await t.send.addProject(b);
+    const second = t.getState().activeId;
+    assertEquals(second !== first, true);
+
+    // The dock's "+" buttons sit on every project's row, not just the active
+    // one. Without this the pane went to the project you clicked and you went
+    // on looking at the other — and everything that acts on "the pane you are
+    // on" then acted on the wrong one.
+    const pane = await t.send.addPane(first, "console");
+    assertEquals(t.getState().activeId, first);
+    assertEquals(t.getState().activePane[first], pane);
+  } finally {
+    await Deno.remove(a);
+    await Deno.remove(b);
+  }
+});

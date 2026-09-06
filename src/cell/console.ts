@@ -88,6 +88,25 @@ export type Terminal = {
    * nothing. The session cell solves the identical problem the identical way.
    */
   run: number;
+  /**
+   * A command is holding the terminal's foreground right now.
+   *
+   * Reported by the host from `tcgetpgrp`, not guessed from output: a shell
+   * sitting at a prompt is NOT busy however much it printed a moment ago, and
+   * `sleep 30` IS busy though it prints nothing at all. This is the difference
+   * between a light that means something and a light that is always on.
+   */
+  busy: boolean;
+  /**
+   * What is running, as the kernel names it: the executable alone, no path and
+   * no arguments. Empty when nothing is.
+   *
+   * The tab shows this, and it is why the name comes from the kernel rather
+   * than from the command line the user typed. A tab reading `deno run -A
+   * --unstable-kv src/app.ts` is a tab nobody can read, and cutting that back
+   * down to `deno` is guessing at something already known exactly.
+   */
+  running: string;
 };
 
 const blank = (projectId = "", title = "Console"): Terminal => ({
@@ -96,6 +115,8 @@ const blank = (projectId = "", title = "Console"): Terminal => ({
   command: "",
   createdAt: Date.now(),
   status: "off",
+  busy: false,
+  running: "",
   exitCode: null,
   error: null,
   cwd: "",
@@ -199,6 +220,8 @@ async function startNow(
 ): Promise<void> {
   const run = (term.run = ++RUNS);
   term.status = "starting";
+  term.busy = false;
+  term.running = "";
   term.error = null;
   term.exitCode = null;
   term.out = [];
@@ -232,6 +255,7 @@ async function startNow(
     }, {
       onData: (text) => consoleCell.push(id, text, run),
       onExit: (code) => consoleCell.ended(id, code, run),
+      onBusy: (busy, name) => consoleCell.setBusy(id, busy, name, run),
       isBehind: () => queueDepth(id) >= BACKPRESSURE_AT,
     });
   } catch (e) {
@@ -253,6 +277,23 @@ async function startNow(
   live.status = "live";
   live.cwd = cwd;
   live.shell = started.shell;
+}
+
+/**
+ * Tell the dock a shell's tab has gone.
+ *
+ * Fire-and-forget across cells, the same shape the workspace uses to tell the
+ * session cell about a project change: the console cell owns terminals and the
+ * workspace owns panes, and neither should be waiting on the other to finish.
+ */
+function closedPane(id: string): void {
+  void import("./workspace.ts").then((m) => m.workspace.removePane(id)).catch(
+    (e) => {
+      log.warn("console", "could not close the tab of a finished shell", {
+        error: e instanceof Error ? e.message : String(e),
+      });
+    },
+  );
 }
 
 /** A project's terminals, oldest first — the order the tab lists them in. */
@@ -311,7 +352,11 @@ export const consoleCell = cell("console", {
       // The id comes from the caller because it is a *pane* id: the dock makes
       // the pane, and the terminal is what fills it. One identifier for both,
       // so nothing has to map between two.
-      const term = blank(pid, opts?.title ?? "Console");
+      // `||`, not `??`: an empty title is "no title", the same as a missing
+      // one. Callers pass "" rather than `undefined` because these arguments
+      // cross a JSON wire, and `??` would have let that empty string through
+      // as the tab's name.
+      const term = blank(pid, opts?.title || "Console");
       term.command = opts?.command ?? "";
       if (opts?.rows) term.rows = Math.trunc(opts.rows);
       if (opts?.cols) term.cols = Math.trunc(opts.cols);
@@ -428,6 +473,28 @@ export const consoleCell = cell("console", {
       }
     },
 
+    /**
+     * A command took the terminal's foreground, or gave it back.
+     *
+     * The whole of "is something happening in here". It comes from the host,
+     * which asks the terminal itself (`tcgetpgrp`), so it is right for a
+     * command that prints nothing and right for a shell that has just printed
+     * a screenful and gone quiet.
+     */
+    setBusy(
+      s: ConsoleState,
+      key: string,
+      busy: boolean,
+      name: string,
+      run?: number,
+    ) {
+      const term = peek(s, key);
+      if (!term) return;
+      if (typeof run === "number" && run !== term.run) return;
+      term.busy = busy === true;
+      term.running = busy === true && typeof name === "string" ? name : "";
+    },
+
     /** The page has drawn everything up to `upTo` (an absolute index). */
     ack(s: ConsoleState, key: string, upTo: number) {
       if (typeof upTo !== "number" || !Number.isFinite(upTo)) return;
@@ -440,12 +507,33 @@ export const consoleCell = cell("console", {
     },
 
     /** The shell finished. */
+    /**
+     * The shell finished — and the tab goes with it.
+     *
+     * This is what closing a terminal window has always meant: `exit` and
+     * `Ctrl-D` end the session, and the window that was showing it is done.
+     * Leaving a dead tab behind with a "Start again" button made every shell
+     * you had ever opened accumulate in the dock.
+     *
+     * A launcher is not a special case, because a launcher does not run
+     * INSTEAD of the shell — its command is typed at the prompt, so a
+     * `deno task dev` that fails leaves the shell alive with its error on
+     * screen. Only ending the shell ends the tab, and that is always something
+     * a person asked for.
+     */
     ended(s: ConsoleState, key: string, code: number, run?: number) {
       const term = peek(s, key);
       if (!term) return;
       if (typeof run === "number" && run !== term.run) return;
       term.status = "exited";
       term.exitCode = typeof code === "number" ? code : 0;
+      // A shell that has gone is not busy, whatever it was doing when it went.
+      term.busy = false;
+      term.running = "";
+      delete s.terms[key];
+      const pid = term.projectId;
+      if (s.active[pid] === key) delete s.active[pid];
+      closedPane(key); // aiol-ok: orchestration, after the write
     },
 
     /** A page is showing this terminal, or has stopped. */
@@ -530,9 +618,9 @@ export const activeTerminalId = (projectId?: string): string => {
 export const terminal = (projectId?: string): Terminal =>
   terminalById(activeTerminalId(projectId));
 
-/** Whether any of a project's shells is running right now — what the dock tab
- *  and the rail card report. */
-export const terminalLive = (projectId?: string): boolean =>
-  terminalsOf(projectId ?? workspace.activeId).some(([, t]) =>
-    t.status === "live"
-  );
+/* There were two more selectors here — "is any shell open" and "is any shell
+   busy" — for the rail's Console card. The card is gone: a project can hold as
+   many shells as it likes and each has its own row in the dock, with its own
+   light and the name of what it is running, so a single card summarising them
+   was answering a question the list already answers better. The per-pane
+   `consolePulse` is what asks now. */

@@ -328,6 +328,13 @@ function parentOf(path: string): string {
  * tab. But `forgotten` is capped and is not persisted, so a project that falls
  * off it — or that was removed in an earlier run — leaves its panes behind
  * with nothing able to reach them, in state that IS persisted.
+ *
+ * Which is why this is a sweep and not part of `forget`. Doing it there put a
+ * read of `panes` into the read set of the long disk-walking pass that calls
+ * it, and that read then collided with anything else touching panes — a
+ * refused commit, and a project that was not removed after all. It failed one
+ * run in eight before the two were separated. A removal should not depend on
+ * the garbage collector's reads.
  */
 function prunePanes(s: WorkspaceState): number {
   const reachable = new Set([
@@ -362,7 +369,6 @@ function forget(s: WorkspaceState, ids: string[]): void {
     paths: doomed.map((p) => p.path),
   });
   released(doomed.map((p) => p.id));
-  prunePanes(s);
   if (ids.includes(s.activeId)) {
     // Prefer a project that is actually there — moving to another dead one
     // would just carry the dead end along the list.
@@ -927,12 +933,23 @@ export const workspace = cell("workspace", {
           ? "Console"
           : `Console ${nth}`,
         createdAt: Date.now(),
-        command: typeof command === "string" && command !== ""
-          ? command
-          : undefined,
       };
+      // Set, never assigned `undefined`. `panes` is persisted, and JSON has no
+      // `undefined` — a key written with that value comes back missing, which
+      // the persist check calls out as state that would reload WRONG. An
+      // optional field that is absent is the same thing said in a way that
+      // survives a round trip.
+      if (typeof command === "string" && command !== "") {
+        pane.command = command;
+      }
       list.push(pane);
       s.activePane[pid] = pane.id;
+      // Adding to a project is choosing it, exactly as clicking one of its
+      // rows is — `selectPane` has always done this. Without it the dock's "+"
+      // buttons put a conversation in one project while you went on looking at
+      // another, and anything that acts on "the pane you are on" acted on the
+      // wrong one.
+      s.activeId = pid;
       if (kind === "session") {
         // A new conversation is empty until something switches to it — the
         // session cell keeps one record at the top level and parks the rest.
@@ -955,6 +972,19 @@ export const workspace = cell("workspace", {
         s.activeId = pid;
         return;
       }
+      // Not a pane on record — but that does not mean it is not a pane.
+      //
+      // `panes` is written lazily: a project nobody has opened a second
+      // conversation in has no record at all, and `panesOf` reports its single
+      // conversation under the PROJECT's id, which is what that conversation's
+      // id has always been. So the dock offers a row this loop cannot find,
+      // and selecting it did nothing at all — which is how keyboard walking
+      // the dock stopped dead at the first untouched project.
+      if (!s.projects.some((p) => p.id === id)) return;
+      ensurePanes(s, id);
+      s.activePane[id] = id;
+      reprojected(id, sessionKeyIn(s, id)); // aiol-ok: after the write
+      s.activeId = id;
     },
 
     /**

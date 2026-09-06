@@ -44,7 +44,12 @@ import type {
   LocalMsg,
   LocalPermission,
 } from "../type/local.ts";
-import { panesOf, projectOfPane, workspace } from "./workspace.ts";
+import {
+  activeSessionKey,
+  panesOf,
+  projectOfPane,
+  workspace,
+} from "./workspace.ts";
 import { perSecond } from "../lib/format.ts";
 
 /** Tool-call rounds one user turn may take. A local model that has not
@@ -119,21 +124,48 @@ type LocalState = {
 };
 
 /**
- * Every id below is a *pane* id — one conversation.
+ * Every id below is a *pane* id — one conversation, with settings of its own.
  *
- * The two halves of a local project are scoped differently on purpose. A
- * conversation belongs to its pane: a project with three chats has three, and
- * closing one must not take the others with it. The engine, address and model
- * belong to the *project*: they describe one server on this machine, and
- * making the user pick llama.cpp again for every new chat in the same folder
- * would be tedious for no gain.
+ * Both halves are scoped to the conversation, not the project. A chat is
+ * obviously its own: three chats in a folder are three transcripts. The
+ * settings are less obviously so, and it matters more — one chat on a big
+ * local model for reasoning and another on a small fast one for edits, in the
+ * same folder at the same time, is a normal way to work and was impossible
+ * while a project had a single engine.
  *
- * `projectOfPane` maps one to the other, and returns the id unchanged for the
- * first conversation — whose pane id IS the project id.
+ * What a new conversation starts with is the question that answers the
+ * objection. It inherits — see {@link inherited} — so choosing an engine once
+ * still holds for every chat you open afterwards, and changing one chat's
+ * engine no longer changes every other chat's.
+ *
+ * `projectOfPane` is still used for the things that really are the project's:
+ * the directory a turn runs in, and which projects' settings to forget.
  */
 const projectOf = (id: string): string => projectOfPane(id) || id;
+
+/**
+ * The settings a brand-new conversation opens with.
+ *
+ * The project's other chats, newest first, then the record under the project's
+ * own id — which is where every config lived before conversations had their
+ * own, and which is still the first chat's key. So an upgrade keeps its
+ * engine, and a second chat opened afterwards inherits it rather than arriving
+ * blank and asking to be configured again.
+ */
+function inherited(s: LocalState, id: string): LocalConfig {
+  const pid = projectOf(id);
+  const siblings = panesOf(pid)
+    .filter((p) => p.kind === "session" && p.id !== id)
+    .map((p) => s.configs[p.id])
+    .filter((c): c is LocalConfig => c !== undefined);
+  const from = siblings[siblings.length - 1] ?? s.configs[pid];
+  // A copy, not a reference: two conversations sharing one settings object is
+  // the very thing this is here to end.
+  return from ? { ...from } : blankConfig();
+}
+
 const cfgAt = (s: LocalState, id: string): LocalConfig =>
-  s.configs[projectOf(id)] ??= blankConfig();
+  s.configs[id] ??= inherited(s, id);
 const chatAt = (s: LocalState, id: string): LocalChat =>
   s.chats[id] ??= blankChat();
 
@@ -332,7 +364,7 @@ export const local = cell("local", {
      * draft across the await.
      */
     async refreshModels(_s: LocalState, key: string) {
-      const cfg = local.configs[projectOf(key)];
+      const cfg = local.configs[key];
       if (!cfg || cfg.engine === "claude" || !cfg.baseUrl) return;
       const baseUrl = cfg.baseUrl;
       try {
@@ -392,7 +424,7 @@ export const local = cell("local", {
       s: LocalState & Partial<MethodDraftMeta>,
       key: string,
     ) {
-      const cfg = local.configs[projectOf(key)];
+      const cfg = local.configs[key];
       if (!cfg || cfg.engine === "claude" || !cfg.baseUrl) return;
       const engine = cfg.engine as LocalEngine;
       const { baseUrl } = cfg;
@@ -415,7 +447,7 @@ export const local = cell("local", {
       baseUrl: string,
       ok: boolean | null,
     ) {
-      const cfg = s.configs[projectOf(key)];
+      const cfg = s.configs[key];
       if (!cfg || cfg.engine !== engine || cfg.baseUrl !== baseUrl) return;
       chatAt(s, key).toolsOk = ok;
     },
@@ -432,7 +464,7 @@ export const local = cell("local", {
       // yet, and a re-read would see the old `ctxManual: true` and bail out of
       // the very detection this call exists to restart.
       const cfg = keepManual
-        ? local.configs[projectOf(key)]
+        ? local.configs[key]
         : await local.clearManualCtx(key);
       if (!cfg || cfg.engine === "claude" || cfg.ctxManual || !cfg.baseUrl) {
         return;
@@ -467,7 +499,7 @@ export const local = cell("local", {
       model: string,
       ctx: number,
     ) {
-      const cfg = s.configs[projectOf(key)];
+      const cfg = s.configs[key];
       if (
         !cfg || cfg.engine !== engine || cfg.model !== model || cfg.ctxManual
       ) return;
@@ -494,6 +526,7 @@ export const local = cell("local", {
       await local.dropProjects(keys); // aiol-ok: orchestration, see `detect`
     },
 
+    /** Forget every conversation's settings and transcript under these keys. */
     dropProjects(s: LocalState, keys: string[]) {
       for (const key of keys) {
         delete s.configs[key];
@@ -502,7 +535,7 @@ export const local = cell("local", {
     },
 
     /**
-     * Drop stored configuration for anything that is not a known project.
+     * Drop stored settings and transcripts that nothing can reach any more.
      *
      * The garbage collector for the persisted half. Removals go through
      * `forgetProjects`, but state written before that existed — or under a key
@@ -510,7 +543,7 @@ export const local = cell("local", {
      * is what this does, once, when the workspace is settled.
      *
      * The project list is read HERE, not passed in. A caller that snapshots the
-     * ids and dispatches this deletes the configuration of any project added
+     * ids and dispatches this deletes the settings of any project added
      * between the two — which is not hypothetical: boot adds the folder named
      * on the command line while its own sweep is queued behind it.
      */
@@ -521,24 +554,29 @@ export const local = cell("local", {
       // and model on the machine. Nothing to compare against is a reason to do
       // nothing, and the next boot with a real list collects the same garbage.
       if (workspace.projects.length === 0) return;
-      const known = new Set(workspace.projects.map((p) => p.id));
-      const stale = Object.keys(s.configs).filter((id) => !known.has(id));
-      // Conversations are keyed by pane, so they are swept against the panes
-      // — but only when the pane resolves to *some* project. An id that
-      // resolves to nothing is not proof of garbage: `panes` is filled in
-      // lazily, and a chat deleted here would be a conversation deleted from
-      // under someone who is reading it. Configuration is persisted and can
-      // afford to be strict; a chat is not, and cannot.
-      const orphans = Object.keys(s.chats).filter((key) => {
-        const owner = projectOfPane(key);
-        return owner !== "" && !known.has(owner);
-      });
-      if (stale.length === 0 && orphans.length === 0) return;
-      for (const id of stale) delete s.configs[id];
-      for (const key of [...stale, ...orphans]) delete s.chats[key];
-      log.info("local", "dropped config for unknown projects", {
-        count: stale.length,
-        chats: orphans.length,
+
+      // Reachable: a project's own id — which is also its first conversation's
+      // key, and where every config lived before conversations had their own —
+      // or the id of a pane that still exists.
+      const reachable = new Set<string>(workspace.projects.map((p) => p.id));
+      for (const list of Object.values(workspace.panes)) {
+        for (const pane of list) reachable.add(pane.id);
+      }
+      // Only sweep a key that resolves to NOTHING. A key belonging to some
+      // project we simply have not materialised panes for yet is not garbage,
+      // and deleting it would take a conversation out from under whoever is
+      // reading it — `panes` is filled in lazily, so absence proves nothing.
+      const gone = (key: string) =>
+        !reachable.has(key) && projectOfPane(key) === "";
+
+      const staleConfigs = Object.keys(s.configs).filter(gone);
+      const staleChats = Object.keys(s.chats).filter(gone);
+      if (staleConfigs.length === 0 && staleChats.length === 0) return;
+      for (const id of staleConfigs) delete s.configs[id];
+      for (const id of staleChats) delete s.chats[id];
+      log.info("local", "dropped settings nothing could reach", {
+        configs: staleConfigs.length,
+        chats: staleChats.length,
       });
     },
 
@@ -1059,7 +1097,7 @@ const EMPTY_CONFIG = blankConfig();
 const EMPTY_CHAT = blankChat();
 
 export const localConfig = (key: string): LocalConfig =>
-  local.configs[projectOf(key)] ?? EMPTY_CONFIG;
+  local.configs[key] ?? EMPTY_CONFIG;
 
 export const localChat = (key: string): LocalChat =>
   local.chats[key] ?? EMPTY_CHAT;
@@ -1083,8 +1121,11 @@ export const localChatsOf = (projectId: string): LocalChat[] => {
 export const engineOf = (key: string): Engine => localConfig(key).engine;
 
 /** Is the *active* project on a local engine? The routing question. */
+/** Is the conversation on screen answered by a local engine? A project can
+ *  hold a Claude chat and a local one at once, so this is a question about the
+ *  chat, never about the project. */
 export const activeIsLocal = (): boolean =>
-  engineOf(workspace.activeId) !== "claude";
+  engineOf(activeSessionKey()) !== "claude";
 
 /**
  * Stored engine settings whose project is not in the list any more.
