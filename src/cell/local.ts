@@ -182,7 +182,33 @@ const msg = (
 });
 
 export const local = cell("local", {
-  persist: { include: ["configs"] },
+  /**
+   * The conversations are kept too, for the same reason the Claude ones are:
+   * losing a chat to a restart loses the only copy of it on this machine.
+   *
+   * `cleared` is deliberately NOT here. It is the undo for the moment right
+   * after pressing Clear; across a restart it is a week-old transcript waiting
+   * to be merged into a live one, which is not what the button offered.
+   */
+  persist: { include: ["configs", "chats"] },
+
+  /** Nothing here was mid-turn since the app closed, whatever it last wrote. */
+  onRestore(s: LocalState) {
+    for (const key of Object.keys(s.chats)) {
+      const chat = s.chats[key];
+      chat.status = "idle";
+      // Half a sentence from a model that stopped generating.
+      chat.streaming = "";
+      // Nobody can answer this now, and an unanswered command blocks the turn
+      // — and with it the composer — forever.
+      chat.pending = null;
+      chat.startedAt = 0;
+      chat.error = null;
+      // A fact about a running server, not about this conversation. The fix
+      // for it is to restart that server, so re-asking is the honest default.
+      chat.toolsOk = null;
+    }
+  },
 
   // The loop streams: every await inside `send` is followed by writes the
   // window must see as they happen, not at commit.
@@ -246,6 +272,8 @@ export const local = cell("local", {
         // engine is picked, not one round trip later.
         chatAt(s, key).toolsOk = found?.reachable ? found.tools ?? null : null;
       }
+      // Whoever was answering is not the one being asked any more.
+      s.$do?.(schedule.next(`local-switch:${key}`, local.switched.action(key)));
       log.info("local", "engine set", { project: projectOf(key), engine });
       // …and then go and look, rather than trusting a scan that may be stale
       // or may never have run. Picking an engine is exactly the moment the
@@ -302,7 +330,11 @@ export const local = cell("local", {
       chat.error = null;
     },
 
-    setBaseUrl(s: LocalState, key: string, url: string) {
+    setBaseUrl(
+      s: LocalState & Partial<MethodDraftMeta>,
+      key: string,
+      url: string,
+    ) {
       if (url && !/^https?:\/\//.test(url)) {
         // Refusing silently would look like a saved value that "does not
         // work" — say why nothing changed.
@@ -315,6 +347,9 @@ export const local = cell("local", {
       // the field hands it back: an empty address is not a choice.
       cfgAt(s, key).urlManual = url.trim() !== "";
       chatAt(s, key).error = null;
+      // Pointing at a different server is the same act as picking a different
+      // engine: the reply coming from the old address is not the one wanted.
+      s.$do?.(schedule.next(`local-switch:${key}`, local.switched.action(key)));
     },
 
     /**
@@ -330,6 +365,10 @@ export const local = cell("local", {
       model: string,
     ) {
       cfgAt(s, key).model = model;
+      // A reply already coming from the previous model is not the one that was
+      // asked for. Dispatched rather than awaited, because this method must
+      // stay synchronous — see above.
+      s.$do?.(schedule.next(`local-switch:${key}`, local.switched.action(key)));
       // Each model in a server can be loaded at a different window, so the
       // number to budget against is a property of the *pair*. Re-read on the
       // next tick, keyed by project so two of them cannot cancel each other.
@@ -952,6 +991,27 @@ export const local = cell("local", {
     },
 
     /** Abort the in-flight turn. The loop's own catch writes the outcome. */
+    /**
+     * Changing who answers ends the answer already coming.
+     *
+     * Switching engine or model mid-turn used to leave the old turn running
+     * against the old server, holding `status: "working"` — which disables the
+     * composer — while the strip above it claimed a different engine was
+     * selected. It cleared itself eventually, when the abandoned request timed
+     * out about two minutes later. Two minutes of an app that refuses to be
+     * typed into, having just been told to change, is indistinguishable from a
+     * broken one; the reasonable response is to restart it, which is what
+     * happened.
+     *
+     * A reply from the engine you just switched away from is not wanted, so it
+     * is not waited for.
+     */
+    async switched(s: LocalState, key: string) {
+      if (chatAt(s, key).status !== "working") return;
+      const io = await import("./local.server.ts");
+      io.stopRun(key);
+    },
+
     async stop(s: LocalState, key?: string) {
       const id = key ?? workspace.activeId;
       if (chatAt(s, id).status !== "working") return;
@@ -976,7 +1036,15 @@ export const local = cell("local", {
         const io = await import("./local.server.ts");
         io.stopRun(id);
       }
-      const before = chatAt(s, id).messages;
+      // Snapshotted, not referenced — and copied element by element.
+      //
+      // The line below REPLACES `s.chats[id]`, and a draft reference taken
+      // before that points into an object the runtime has since retired. It
+      // refuses the read rather than let it quietly resolve (cell-impl.ts
+      // `throwStaleCapture`), so Clear failed outright and the undo it was
+      // saving never arrived. `workspace.forget` documents the same trap for
+      // the same reason.
+      const before = chatAt(s, id).messages.map((m) => ({ ...m }));
       s.chats[id] = blankChat();
       if (before.length > 0) s.cleared[id] = before;
     },

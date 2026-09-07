@@ -306,6 +306,87 @@ body {
 .pane__tag--running { --tag: var(--ok); }
 .pane.selected .pane__tag { background: color-mix(in srgb, var(--tag) 22%, transparent); }
 
+/* ── the microphone ─────────────────────────────────────────────────────────
+   Mostly an indicator. The ring behind the icon scales with what the mic is
+   hearing, which is the fastest way to discover a muted input: a meter that
+   never moves says more than any label could. */
+.mic {
+  position: relative; flex: none;
+  width: 26px; height: 26px; display: grid; place-items: center;
+  border-radius: 99px; color: var(--ink-dim);
+  transition: color .16s var(--ease);
+}
+.mic__icon { position: relative; z-index: 1; display: grid; place-items: center; }
+.mic__level {
+  position: absolute; inset: 0; border-radius: 99px;
+  background: color-mix(in srgb, var(--ok) 26%, transparent);
+  opacity: 0; transform: scale(.25);
+  /* Transform and opacity only: both are composited, and this changes many
+     times a second while the page may also be streaming a reply. */
+  transition: opacity .12s linear;
+  pointer-events: none;
+}
+.mic--recording { color: var(--ok); }
+.mic--recording .mic__level { opacity: 1; }
+.mic--transcribing { color: var(--info); }
+.mic--transcribing .mic__level {
+  opacity: .6; transform: scale(.7) !important;
+  animation: pulse 1.1s var(--ease) infinite;
+}
+/* Waiting its turn: the words are written down and will go when the reply
+   running now is done. Amber, like everything else in this app that is stopped
+   rather than working. */
+.mic--queued { color: var(--warn); }
+.mic--queued .mic__level {
+  opacity: .5; transform: scale(.6) !important;
+  background: color-mix(in srgb, var(--warn) 30%, transparent);
+}
+.mic--error { color: var(--danger); }
+
+/* The speaker, next to the microphone and deliberately wearing its clothes:
+   same 26px ring, same colour vocabulary. It differs in being a real button --
+   reading aloud has no held key, it has to be switched on, and switched off
+   again in one jab while it is mid-sentence. */
+.speaker { background: none; border: 0; padding: 0; cursor: pointer; }
+.speaker:hover { color: var(--ink); }
+.speaker:focus-visible { outline: 2px solid var(--info); outline-offset: 2px; }
+.speaker--idle { color: var(--info); }
+.speaker--speaking { color: var(--ok); }
+.speaker--speaking .mic__level {
+  opacity: .55; transform: scale(.75) !important;
+  animation: pulse 1.1s var(--ease) infinite;
+}
+.speaker--error { color: var(--danger); }
+
+/* Clear, beside the other two. Wearing the same 26px ring so the row reads as
+   one set of controls, and going red only on hover -- a permanently red button
+   next to the message box is a thing you learn to stop seeing. */
+.clear { background: none; border: 0; padding: 0; cursor: pointer; }
+.clear:hover:not(:disabled) { color: var(--danger); }
+.clear:disabled { opacity: .3; cursor: default; }
+.clear:focus-visible { outline: 2px solid var(--info); outline-offset: 2px; }
+
+/* A row of small on/off tags, for picking several things out of a list of
+   many. A multi-select is the other way to do this and nobody has ever
+   enjoyed one. */
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip {
+  font: inherit; font-size: 12px; line-height: 1;
+  padding: 5px 9px; border-radius: 99px; cursor: pointer;
+  color: var(--ink-dim);
+  background: color-mix(in srgb, var(--ink) 5%, transparent);
+  border: 1px solid color-mix(in srgb, var(--ink) 12%, transparent);
+  transition: color .14s var(--ease), background .14s var(--ease),
+              border-color .14s var(--ease);
+}
+.chip:hover { color: var(--ink); }
+.chip--on {
+  color: var(--bg);
+  background: var(--info);
+  border-color: var(--info);
+}
+.chip:focus-visible { outline: 2px solid var(--info); outline-offset: 2px; }
+
 /* ── status lights ──────────────────────────────────────────────────────────
    One vocabulary, everywhere (see ui/pulse.ts):
      idle       grey   nothing is there

@@ -16,6 +16,8 @@ import "./cell/tree.ts";
 import "./cell/catalog.ts";
 import "./cell/storage.ts";
 import "./cell/local.ts";
+import "./cell/voice.ts";
+import "./cell/speech.ts";
 import { aio } from "aio";
 import { REDACTED_ACTIONS } from "./cell/redact.ts";
 

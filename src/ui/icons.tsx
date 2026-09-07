@@ -433,3 +433,36 @@ export const IconPencil = (p?: Props) =>
     </>,
     p,
   );
+
+/** A microphone — push to talk. */
+export const IconMic = (p?: Props) =>
+  svg(
+    <>
+      <rect x="9" y="2.6" width="6" height="11" rx="3" />
+      <path d="M5.4 11.2a6.6 6.6 0 0 0 13.2 0" />
+      <path d="M12 17.8v3.6" />
+    </>,
+    p,
+  );
+
+/** A speaker with sound coming out — reading the conversation aloud. */
+export const IconSpeaker = (p?: Props) =>
+  svg(
+    <>
+      <path d="M11 4.6 6.4 8.4H3v7.2h3.4L11 19.4Z" />
+      <path d="M14.8 9.2a4 4 0 0 1 0 5.6" />
+      <path d="M17.6 6.4a8 8 0 0 1 0 11.2" />
+    </>,
+    p,
+  );
+
+/** The same speaker, crossed out — switched off. */
+export const IconSpeakerOff = (p?: Props) =>
+  svg(
+    <>
+      <path d="M11 4.6 6.4 8.4H3v7.2h3.4L11 19.4Z" />
+      <path d="m15.4 9.6 5 4.8" />
+      <path d="m20.4 9.6-5 4.8" />
+    </>,
+    p,
+  );

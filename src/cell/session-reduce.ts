@@ -891,3 +891,39 @@ const obj = (v: unknown): Record<string, unknown> =>
 const arr = (v: unknown): unknown[] => (Array.isArray(v) ? v : []);
 const strings = (v: unknown): string[] =>
   arr(v).filter((x): x is string => typeof x === "string");
+
+/**
+ * Make a restored conversation honest about the fact that it is not running.
+ *
+ * The transcript survives a restart; the process does not. Everything below is
+ * a claim about a program that no longer exists — a pid, a turn in flight, an
+ * approval prompt waiting for an answer nobody can give — and restoring any of
+ * it would be the app lying about its own state: a spinner for a turn that
+ * ended when the app closed, an Allow button wired to a dead process.
+ *
+ * One function, applied to the record on screen and to every parked one, so
+ * "what does not survive a restart" is defined once.
+ */
+export function offlineAgain(p: ProjectSession): void {
+  p.status = "offline";
+  p.pid = null;
+  p.startedAt = null;
+  // A half-written sentence from a process that has stopped writing.
+  p.streaming = null;
+  // Nobody can answer these now, and a prompt that cannot be answered blocks
+  // the composer forever.
+  p.permissions = [];
+  p.interrupting = false;
+  p.turnStartedAt = null;
+  p.queuedTurns = 0;
+  p.thinkingTokens = 0;
+  // A tool call cannot still be running, whatever it said last. Given an end
+  // so it stops spinning, but NOT given an outcome: `ok` stays null, which is
+  // "nobody knows how that finished" — because nobody does.
+  for (const t of p.tools) if (t.endedAt === null) t.endedAt = t.startedAt;
+  // The undo for a clear is for the moment right after pressing the button.
+  // Across a restart it is a week-old transcript waiting to be merged into a
+  // live one, which is not what the button promised.
+  p.cleared = [];
+  p.error = null;
+}

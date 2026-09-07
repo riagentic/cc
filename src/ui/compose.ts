@@ -48,38 +48,55 @@ export function appendToComposer(text: string): boolean {
 }
 
 /**
- * Per-project drafts.
+ * Unsent drafts, one per conversation.
  *
- * The composer is one textarea that outlives a project switch — same route,
- * same component — so a half-written message for one codebase was still
- * sitting there, aimed at another one, after switching. Which is worse than
- * losing it: the words look like they belong where they now are.
+ * Per CONVERSATION, not per project, and that distinction is the bug this
+ * fixes: a project can hold several chats, they share one composer, and keying
+ * by project meant switching between two chats in the same project swapped
+ * nothing — the half-written message stayed on screen, now aimed at the other
+ * conversation. Which is worse than losing it, because the words look like
+ * they belong where they are.
  *
- * Drafts are held here rather than in a cell for the same reason `fillComposer`
- * writes to the DOM: the box is uncontrolled, and routing every keystroke
- * through state would take the caret and the undo stack with it. They are
- * per-window and per-run, which is the right lifetime for something somebody
- * has not sent yet.
+ * Held here rather than in a cell for the same reason `fillComposer` writes to
+ * the DOM: the box is uncontrolled, and routing every keystroke through state
+ * would take the caret and the undo stack with it. Nothing here runs per
+ * keystroke — a draft is saved when you leave it and read back when you
+ * return.
  */
 const drafts = new Map<string, string>();
 
 /**
+ * Keep what is in the box, under the conversation it was written for.
+ *
+ * An empty draft is deleted rather than stored: "nothing" is the default, and
+ * a map of empty strings is a leak that also makes `loadDraft` answer with
+ * something it never needed to.
+ */
+export function saveDraft(key: string, text: string): void {
+  if (key === "") return;
+  if (text.trim() === "") drafts.delete(key);
+  else drafts.set(key, text);
+}
+
+/** What was left in this conversation's box, or "". */
+export function loadDraft(key: string): string {
+  return drafts.get(key) ?? "";
+}
+
+/**
  * Move the draft aside and bring the other one back.
  *
- * Called when the project changes: `from` is the project whose words are in
- * the box now, `to` is the one about to be shown. Returns what the box should
- * hold.
+ * Called when the conversation on screen changes while the composer stays
+ * mounted: `from` is whose words are in the box now, `to` is the one about to
+ * be shown. Returns what the box should hold.
  */
 export function swapDraft(from: string, to: string, current: string): string {
   if (from === to) return current;
-  if (from !== "") {
-    if (current.trim() === "") drafts.delete(from);
-    else drafts.set(from, current);
-  }
-  return drafts.get(to) ?? "";
+  saveDraft(from, current);
+  return loadDraft(to);
 }
 
-/** Forget a project's draft — it was sent, or the project is gone. */
-export function dropDraft(id: string): void {
-  drafts.delete(id);
+/** Forget a draft — it was sent, or the conversation is gone. */
+export function dropDraft(key: string): void {
+  drafts.delete(key);
 }

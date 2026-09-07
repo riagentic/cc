@@ -261,7 +261,7 @@ export function blocksOf(message: unknown): Block[] {
         kind: "result",
         id: str(b.tool_use_id) ?? "",
         ok: b.is_error !== true,
-        text: resultText(b.content),
+        text: resultText(b.content).slice(0, MAX_RESULT),
       });
     }
   }
@@ -272,6 +272,18 @@ export function blocksOf(message: unknown): Block[] {
  *  some MCP servers, an array of bare strings. Flatten all three: reading only
  *  the block shape turned `["hello", "world"]` into an empty result, which is a
  *  tool whose output silently vanished. */
+/**
+ * The most of a tool's output to keep on the message.
+ *
+ * It used to be unbounded, so reading a five-thousand-line file put five
+ * thousand lines into the transcript — held for the life of the session and
+ * rendered by nothing: the chip a reader actually opens is built from
+ * `ToolRun.output`, which has always been capped at this same figure. So the
+ * cap costs no pixel anybody could have seen, and it is what makes the
+ * transcript small enough to write to disk.
+ */
+const MAX_RESULT = 4_000;
+
 export function resultText(content: unknown): string {
   if (typeof content === "string") return content;
   return arr(content)

@@ -66,6 +66,7 @@ import {
   failPermission,
   MAX_MESSAGES,
   note,
+  offlineAgain,
   type ProjectSession,
   rateLimit,
   reset,
@@ -203,7 +204,30 @@ const currentKey = (s: SessionState): string =>
   activeSessionKey() || s.activeKey;
 
 export const session = cell("session", {
-  persist: "none",
+  /**
+   * The conversations are kept; the process is not.
+   *
+   * This was `"none"` on the reasoning that a transcript is a record of a live
+   * process. Half right, and the wrong half is the half a person cares about:
+   * the process is indeed gone at the next launch, but the CONVERSATION is
+   * work — decisions, explanations, the reason a file looks the way it does —
+   * and losing it to a restart is losing the only copy on this machine.
+   *
+   * So everything is persisted and `onRestore` puts back the truth about the
+   * process, once, at boot. The transcript is bounded already: 400 messages a
+   * conversation, and a tool's output capped where it is read (`MAX_RESULT` in
+   * lib/stream.ts), which is what keeps this a few megabytes rather than a few
+   * hundred.
+   */
+  persist: "all",
+
+  /** Nothing here ran a program since the app closed. {@link offlineAgain}
+   *  says what that costs, and is applied to the conversation on screen and to
+   *  every parked one alike. */
+  onRestore(s: SessionState) {
+    offlineAgain(s);
+    for (const key of Object.keys(s.parked)) offlineAgain(s.parked[key]);
+  },
 
   // `activeKey` ends in "Key" and is not a secret — it is a project id the
   // client already has. Declared rather than excluded, because the UI reads it,

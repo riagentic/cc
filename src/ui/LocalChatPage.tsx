@@ -7,12 +7,22 @@
  * The strip above the thread carries what a small-context model lives and
  * dies by: which model, which mode, and how full the window is.
  */
-import { afterRender, onMount, useLocal, useRef, type VNode } from "aio/air";
+import {
+  afterRender,
+  onCleanup,
+  onMount,
+  useLocal,
+  useRef,
+  type VNode,
+} from "aio/air";
+import { Mic } from "./Mic.tsx";
+import { Speaker } from "./Speaker.tsx";
+import { ClearChat } from "./ClearChat.tsx";
 import { Markdown } from "./Markdown.tsx";
 import { JumpToLatest, MsgMeta, useStickToBottom } from "./thread.tsx";
 import { FindBar, findIndex, findQuery } from "./find.tsx";
 import { hits } from "../lib/transcript.ts";
-import { dropDraft, swapDraft } from "./compose.ts";
+import { dropDraft, loadDraft, saveDraft, swapDraft } from "./compose.ts";
 import { BranchStat, ContextStat, EngineStat, ProjectStat } from "./strip.tsx";
 import {
   DEFAULT_URLS,
@@ -125,23 +135,32 @@ export function LocalChatPage(): VNode {
       <div class="chatwrap">
         <div class="chat" ref={scroll.ref} onScroll={scroll.onScroll}>
           <div class="thread">
-            <NoToolsBanner />
-            {chat.error && (
-              <Banner tone="warn">
-                {chat.error}
-                {
-                  /* An error a reader can act on, from the page they are already
+            {
+              /* Every direct child keyed, the absent ones included. A falsy
+                `{cond && …}` still contributes a child — an UNKEYED one — and
+                a list holding both kinds reconciles by position, which is how
+                a message ends up wearing its neighbour's body. */
+            }
+            <NoToolsBanner key="notools" />
+            {chat.error
+              ? (
+                <Banner key="err" tone="warn">
+                  {chat.error}
+                  {
+                    /* An error a reader can act on, from the page they are already
                   on. A saved address that has gone dead is the commonest local
                   failure there is, and the scan usually already knows where the
                   server actually is — so the fix is a button, not a trip to
                   Settings to retype a port. */
-                }
-                <UnreachableFix />
-              </Banner>
-            )}
+                  }
+                  <UnreachableFix />
+                </Banner>
+              )
+              : <span key="err" hidden />}
             {chat.messages.length === 0 && !chat.streaming
               ? (
                 <Empty
+                  key="empty"
                   icon={IconLogo({ size: 20 })}
                   title={`${ENGINE_NAMES[cfg.engine] ?? cfg.engine} · ${
                     modelLabel(cfg.model) || "no model"
@@ -165,21 +184,23 @@ export function LocalChatPage(): VNode {
                     : ""}
                 />
               ))}
-            {chat.streaming && (
-              <article class="msg">
-                <div class="msg__avatar msg__avatar--assistant">
-                  {IconLogo({ size: 15 })}
-                </div>
-                <div class="msg__body">
-                  <div class="msg__who" title={cfg.model}>
-                    {modelLabel(cfg.model) || "model"}
+            {chat.streaming
+              ? (
+                <article key="streaming" class="msg">
+                  <div class="msg__avatar msg__avatar--assistant">
+                    {IconLogo({ size: 15 })}
                   </div>
-                  <div class="bubble">
-                    <Markdown source={chat.streaming} />
+                  <div class="msg__body">
+                    <div class="msg__who" title={cfg.model}>
+                      {modelLabel(cfg.model) || "model"}
+                    </div>
+                    <div class="bubble">
+                      <Markdown source={chat.streaming} />
+                    </div>
                   </div>
-                </div>
-              </article>
-            )}
+                </article>
+              )
+              : <span key="streaming" hidden />}
           </div>
         </div>
         <FindBar total={found.length} />
@@ -636,9 +657,23 @@ function LocalComposer(): VNode {
     void local.send(text, id);
   };
 
-  // Same contract as the Claude composer: a draft belongs to the project it
-  // was written for, and this textarea outlives a project switch.
+  // Same contract as the Claude composer, from the same store: a draft belongs
+  // to the CONVERSATION it was written for, it comes back when you return to
+  // that conversation, and it survives looking at another page — this textarea
+  // is unmounted every time you do.
   const shownFor = useRef(id);
+
+  onMount(() => {
+    const el = ref.current;
+    if (!el) return;
+    const kept = loadDraft(id);
+    if (kept === "") return;
+    el.value = kept;
+    setHasText(kept.trim().length > 0);
+  });
+
+  onCleanup(() => saveDraft(shownFor.current, ref.current?.value ?? ""));
+
   afterRender(() => {
     const el = ref.current;
     if (!el || shownFor.current === id) return;
@@ -670,6 +705,9 @@ function LocalComposer(): VNode {
           }}
         />
         <div class="composer__bar">
+          <Mic key="mic" />
+          <Speaker key="speaker" />
+          <ClearChat key="clear" />
           {
             /* The same two states as the Claude composer: a clock while a turn
               runs, and what the last one cost in time when it is over. A local
@@ -719,7 +757,11 @@ function LocalComposer(): VNode {
           <button
             key="send"
             type="button"
-            class="btn btn--primary btn--sm"
+            // A stable hook, not styling: push-to-talk sends by clicking this
+            // button rather than by repeating what it does. The page keeps one
+            // definition of "send", and a disabled button correctly refuses —
+            // speaking while a turn is already running should queue nothing.
+            class="btn btn--primary btn--sm composer__send"
             disabled={!hasText || busy}
             onClick={submit}
           >

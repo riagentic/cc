@@ -55,6 +55,8 @@ import {
   Tags,
   useNow,
 } from "./parts.tsx";
+import { VoicePanel } from "./VoicePanel.tsx";
+import { SpeechPanel } from "./SpeechPanel.tsx";
 import { PageHead, type PageScope, ScopeTag } from "./RunViews.tsx";
 import {
   IconAlert,
@@ -79,6 +81,8 @@ import {
 const SECTION_KEYS: Record<string, string> = {
   "Engine":
     "local llm lm studio ollama llama.cpp model server provider context window offline detect scan",
+  "Voice":
+    "speech dictation microphone mic whisper push to talk say speak transcribe stt voice2text language",
   "Projects":
     "folder directory add remove gone missing branch dirty switch repository tab forget undo restore",
   "Model": "opus sonnet haiku fable claude reasoning switch",
@@ -278,6 +282,14 @@ export function SettingsPage(): VNode {
           scope="project"
         >
           <EnginePanel />
+        </Section>
+
+        <Section query={q} title="Voice" scope="machine">
+          <VoicePanel />
+        </Section>
+
+        <Section query={q} title="Reading aloud" scope="machine">
+          <SpeechPanel />
         </Section>
 
         <Section

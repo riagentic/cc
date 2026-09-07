@@ -7,11 +7,21 @@
  * stays readable while nothing is hidden.
  */
 import { go } from "./go.ts";
-import { afterRender, onMount, useLocal, useRef, type VNode } from "aio/air";
+import { Mic } from "./Mic.tsx";
+import { Speaker } from "./Speaker.tsx";
+import { ClearChat } from "./ClearChat.tsx";
+import {
+  afterRender,
+  onCleanup,
+  onMount,
+  useLocal,
+  useRef,
+  type VNode,
+} from "aio/air";
 import { Markdown } from "./Markdown.tsx";
 import { highlight, langOfFile } from "../lib/highlight.ts";
 import { session, view } from "../cell/session.ts";
-import { workspace } from "../cell/workspace.ts";
+import { activeSessionKey, workspace } from "../cell/workspace.ts";
 import { tree } from "../cell/tree.ts";
 import type { Block, Message, TurnCost } from "../type/claude.ts";
 import {
@@ -31,7 +41,13 @@ import { hits } from "../lib/transcript.ts";
 import { DiffView, isEdit } from "./Diff.tsx";
 import { BrowseButton } from "./AddProject.tsx";
 import { slashHits, SlashMenu, slashToken } from "./SlashMenu.tsx";
-import { dropDraft, fillComposer, swapDraft } from "./compose.ts";
+import {
+  dropDraft,
+  fillComposer,
+  loadDraft,
+  saveDraft,
+  swapDraft,
+} from "./compose.ts";
 import {
   IconChevron,
   IconLogo,
@@ -512,18 +528,39 @@ function Composer(): VNode {
     )
     .filter((t) => t.trim() !== "");
 
-  onMount(() => ref.current?.focus());
+  // Which conversation this box belongs to. The PANE, not the project: a
+  // project can hold several chats, they share this one textarea, and keying
+  // by project meant switching between two of them swapped nothing — the
+  // half-written message stayed on screen, now aimed at the other one.
+  const where = activeSessionKey();
+  const shownFor = useRef(where);
 
-  // A draft belongs to the project it was written for. The composer is one
-  // textarea that survives a project switch, so without this a half-written
-  // message stayed in the box aimed at a different codebase — which is worse
-  // than losing it, because the words look like they belong where they are.
-  const shownFor = useRef(workspace.activeId);
+  onMount(() => {
+    const el = ref.current;
+    if (!el) return;
+    // Whatever was left here last time. The composer is unmounted every time
+    // you look at Settings or the tree, so "still in the box" is only true
+    // while you stay on this page — without this, walking away lost it.
+    const kept = loadDraft(where);
+    if (kept !== "") {
+      el.value = kept;
+      setHasText(kept.trim().length > 0);
+      resize();
+    }
+    el.focus();
+  });
+
+  // Leaving the page at all: keep it. Read from the element rather than from
+  // state, because the element is the only thing that has the current text —
+  // that is the whole reason this box is uncontrolled.
+  onCleanup(() => saveDraft(shownFor.current, ref.current?.value ?? ""));
+
+  // Switching conversation while the composer stays on screen.
   afterRender(() => {
     const el = ref.current;
-    if (!el || shownFor.current === workspace.activeId) return;
-    el.value = swapDraft(shownFor.current, workspace.activeId, el.value);
-    shownFor.current = workspace.activeId;
+    if (!el || shownFor.current === where) return;
+    el.value = swapDraft(shownFor.current, where, el.value);
+    shownFor.current = where;
     setHasText(el.value.trim().length > 0);
     setRecall(-1);
     resize();
@@ -542,7 +579,7 @@ function Composer(): VNode {
     const text = el.value;
     if (!text.trim()) return;
     el.value = "";
-    dropDraft(workspace.activeId);
+    dropDraft(where);
     setHasText(false);
     setRecall(-1);
     resize();
@@ -657,6 +694,9 @@ function Composer(): VNode {
           onKeyDown={onKeyDown}
         />
         <div class="composer__bar">
+          <Mic key="mic" />
+          <Speaker key="speaker" />
+          <ClearChat key="clear" />
           {
             /* A turn in flight gets the clock, not just the word "working".
               The CLI goes silent while the API makes it retry — a 529 costs
@@ -739,7 +779,11 @@ function Composer(): VNode {
           <button
             key="send"
             type="button"
-            class="btn btn--primary btn--sm"
+            // A stable hook, not styling: push-to-talk sends by clicking this
+            // button rather than by repeating what it does. The page keeps one
+            // definition of "send", and a disabled button correctly refuses —
+            // speaking while a turn is already running should queue nothing.
+            class="btn btn--primary btn--sm composer__send"
             disabled={!hasText}
             onClick={submit}
           >

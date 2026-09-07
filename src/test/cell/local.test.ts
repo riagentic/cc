@@ -1478,3 +1478,49 @@ Deno.test("local — a speed needs both halves, and is never invented", () => {
   assertEquals(speedOf({ lastMs: 120, lastTokens: 8 }), null);
   assertEquals(speedOf({ lastMs: 4_000, lastTokens: 200 }), 50);
 });
+
+Deno.test("switching away aborts the turn in flight", async () => {
+  // Why this matters: a turn in flight holds `status: "working"`, and a
+  // working chat disables the composer. Left running against the server you
+  // have just switched AWAY from, it holds it until that abandoned request
+  // gives up — about two minutes in the real app — while the strip above
+  // claims a different engine is selected. An app that refuses to be typed
+  // into right after being told to change reads as broken.
+  //
+  // Tested at the mechanism, because that is where it is decidable in
+  // milliseconds: the run's signal must actually fire.
+  const io = await import("../../cell/local.server.ts");
+  const signal = io.beginRun("chat-1");
+  assertEquals(signal.aborted, false);
+
+  io.stopRun("chat-1");
+  assertEquals(signal.aborted, true, "the abandoned turn should be aborted");
+
+  // And one conversation's switch must not touch another's.
+  const other = io.beginRun("chat-2");
+  io.stopRun("chat-1");
+  assertEquals(other.aborted, false);
+  io.stopRun("chat-2");
+});
+
+Deno.test("clear keeps what it took, so undo has something to give back", async () => {
+  // Clear used to fail outright. It held a draft reference to the messages and
+  // then replaced the object those messages live in, which the runtime refuses
+  // to read back rather than let resolve to the wrong thing — so the
+  // conversation stayed on screen, an error was logged, and the undo it was
+  // supposed to be saving never existed.
+  await withEngine([{ text: "hello back" }], async (id) => {
+    await local.send("something worth not losing", id);
+    assertEquals(localChat(id).messages.length > 0, true);
+
+    await local.clear(id);
+    assertEquals(localChat(id).messages.length, 0, "cleared");
+
+    await local.undoClear(id);
+    assertEquals(
+      localChat(id).messages[0]?.text,
+      "something worth not losing",
+      "and given back",
+    );
+  });
+});

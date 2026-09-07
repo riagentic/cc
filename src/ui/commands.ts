@@ -21,6 +21,8 @@ import { consoleCell } from "../cell/console.ts";
 import { session, view } from "../cell/session.ts";
 import { activeIsLocal, local, localChat } from "../cell/local.ts";
 import { prefs, ZOOM_STEP } from "../cell/prefs.ts";
+import { speech, speechOn, speechReady } from "../cell/speech.ts";
+import { startReading, stopReading } from "./spoken.ts";
 import { showToast } from "./toast.tsx";
 import { overlayOpen } from "./overlays.tsx";
 import { openFind } from "./find.tsx";
@@ -504,6 +506,35 @@ export function commands(): Command[] {
     alias: "new folder open directory",
     run: () => go("/settings"),
   });
+
+  /* ── reading aloud ──────────────────────────────────────────────────── */
+  // Only once there is something to read with. The speaker on the message bar
+  // is the everyday control; these are here because the palette is where
+  // people look for a thing they cannot see, and "make it stop" is the most
+  // urgent request this feature can receive.
+  if (speechReady()) {
+    const talking = speech.status === "speaking";
+    out.push({
+      id: "speech:toggle",
+      group: "Appearance",
+      label: speechOn() ? "Stop reading replies aloud" : "Read replies aloud",
+      hint: speechOn()
+        ? "Back to silence"
+        : "What you send and what comes back, in two voices",
+      alias: "speak voice tts speaker say out loud",
+      run: () => (speechOn() ? stopReading() : startReading()),
+    });
+    if (talking) {
+      out.push({
+        id: "speech:hush",
+        group: "Appearance",
+        label: "Skip this one",
+        hint: "Stop the sentence being read, and keep reading the next",
+        alias: "shut up quiet silence stop skip",
+        run: () => void speech.hush(),
+      });
+    }
+  }
 
   /* ── appearance ─────────────────────────────────────────────────────── */
   out.push(

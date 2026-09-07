@@ -53,6 +53,10 @@ import { LocalChatPage } from "./ui/LocalChatPage.tsx";
 import { workspace } from "./cell/workspace.ts";
 import { IconChat } from "./ui/icons.tsx";
 import { CommandPalette, ShortcutHelp } from "./ui/Palette.tsx";
+import { usePushToTalk } from "./ui/pushToTalk.ts";
+import { useHeardText } from "./ui/heard.ts";
+import { useSpokenText } from "./ui/spoken.ts";
+import { speech } from "./cell/speech.ts";
 import { globalBindings } from "./ui/commands.ts";
 import { closeOverlay, OverlayHost, showOverlay } from "./ui/overlays.tsx";
 import { ToastHost } from "./ui/toast.tsx";
@@ -95,6 +99,18 @@ export default function App(): VNode {
   const { path } = useRoute();
   const shell = useRef<HTMLDivElement | null>(null);
   useWheelZoom(shell);
+  // Hold a key, say a sentence. Installed at the root because the key is held
+  // wherever you happen to be — including inside a shell, where a bare
+  // modifier is the one thing that costs the terminal nothing.
+  usePushToTalk();
+  useHeardText();
+  // The other direction: finished messages get read back out. Off unless the
+  // speaker is switched on, and while it is off this subscribes to nothing but
+  // its own switch — a silent app must not re-render on every token.
+  useSpokenText();
+  // Whether the speaker starts on is persisted config, and config is not
+  // loaded when the cell declares its state. Asked once, here.
+  onMount(() => void speech.wake());
   // The window title follows the turn, and a chime marks one that finished
   // while you were elsewhere. Both engines, one hook — the shell already knows
   // which is running.
