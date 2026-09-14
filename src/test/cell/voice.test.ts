@@ -2,19 +2,57 @@
  * Push to talk.
  *
  * The rules worth pinning are the ones about NOT acting: a brushed key must
- * not put words in your mouth, and a held key must not restart the recording
- * on every repeat.
+ * not put words in your mouth, a held key must not restart the recording on
+ * every repeat, and — before any of that — a feature that is switched off
+ * must not quietly be half-on.
  */
 import { assertEquals } from "@std/assert";
 import { testCell } from "aio/testing";
-import { voice } from "../../cell/voice.ts";
+import { voice, voiceReady } from "../../cell/voice.ts";
 import { mostConfident } from "../../cell/voice.server.ts";
+
+testCell(voice, "off by default, and off means nothing happens", (t) => {
+  // The GPU whisper would hold is VRAM taken from the model this app exists
+  // to run, so the feature starts switched off — and a dispatch that reaches
+  // the cell anyway meets the same answer as the held key: silence.
+  t.init();
+  t.expect.state((s) => s.config.enabled === false);
+  t.expect.state((s) => voiceReady() === false);
+  t.send.start();
+  t.expect.state((s) => s.status === "off" && s.error === null);
+  // A config without the field — saved before the switch existed — is off
+  // too: "not set" must mean the default, never the feature.
+  t.send.setEnabled("yes" as unknown as boolean);
+  t.expect.state((s) => s.config.enabled === false);
+});
+
+testCell(voice, "enabling is what makes the key mean anything", (t) => {
+  t.init();
+  t.send.setEnabled(true);
+  t.expect.state((s) => s.config.enabled === true);
+  // …but an enabled feature with no server is still not ready — the address
+  // is the other half of ready, and the panel says which half is missing.
+  // (Asserted on the config itself, not on `voiceReady()`: the harness runs
+  // these predicates against a draft view, and a live-cell read here would
+  // be testing the harness's commit timing instead of the rule.)
+  t.expect.state((s) => s.config.baseUrl === "");
+  t.send.setBaseUrl("http://127.0.0.1:8910");
+  t.expect.state(
+    (s) => s.config.enabled === true && s.config.baseUrl !== "",
+  );
+  // And switching it off again parks everything: a recording in flight is
+  // stopped, not "finishes this one last sentence".
+  t.send.setEnabled(false);
+  t.expect.state((s) => s.config.enabled === false);
+  t.expect.state((s) => voiceReady() === false);
+});
 
 testCell(
   voice,
   "without a server it says so rather than pretending",
   async (t) => {
     t.init();
+    t.send.setEnabled(true);
     await t.send.start();
     t.expect.state((s) => s.status === "error");
     t.expect.state((s) => (s.error ?? "").includes("Settings"));

@@ -32,23 +32,28 @@ import {
   localConfig,
   localSpeed,
 } from "../cell/local.ts";
-import { LOCAL_PERMISSIONS, permissionOf } from "../lib/agent.ts";
+import {
+  isCloudModel,
+  LOCAL_PERMISSIONS,
+  permissionOf,
+  programsToAllow,
+} from "../lib/agent.ts";
 import { activeSessionKey, workspace } from "../cell/workspace.ts";
-import type { LocalMode, LocalMsg } from "../type/local.ts";
-import { clock, modelLabel, tailPath, tokens } from "../lib/format.ts";
+import { modelLabel, tailPath, tokens } from "../lib/format.ts";
 import {
   Banner,
   Choice,
   Elapsed,
   Empty,
   Menu,
-  Meter,
   Pill,
   Segmented,
   Stat,
+  Toggle,
 } from "./parts.tsx";
 import {
   IconAlert,
+  IconCheck,
   IconChevron,
   IconLogo,
   IconModel,
@@ -59,6 +64,7 @@ import {
   IconUser,
   toolIcon,
 } from "./icons.tsx";
+import type { LocalMode, LocalMsg, LocalTodo } from "../type/local.ts";
 
 export const ENGINE_NAMES: Record<string, string> = {
   claude: "Claude",
@@ -121,6 +127,12 @@ export function LocalChatPage(): VNode {
     ? found[Math.min(findIndex(), found.length - 1)]
     : "";
 
+  // A conversation parked on disk (idle, not on screen) comes back the moment
+  // it is looked at. Safe to ask on every render: it is a no-op once back.
+  afterRender(() => {
+    if (chat.parked) void local.unpark(id);
+  });
+
   afterRender(() => {
     if (current === "") return;
     const el = scroll.ref.current?.querySelector<HTMLElement>(
@@ -157,7 +169,24 @@ export function LocalChatPage(): VNode {
                 </Banner>
               )
               : <span key="err" hidden />}
-            {chat.messages.length === 0 && !chat.streaming
+            {chat.parked
+              ? (
+                <div key="parked" class="thread__note" aria-live="polite">
+                  Opening this conversation…
+                </div>
+              )
+              : <span key="parked" hidden />}
+            {(chat.archived ?? 0) > 0 && !chat.parked
+              ? (
+                <div key="archived" class="thread__note">
+                  {chat.archived} earlier{" "}
+                  {chat.archived === 1 ? "message is" : "messages are"}{" "}
+                  saved outside this view. Ask the agent about them — it can
+                  search them.
+                </div>
+              )
+              : <span key="archived" hidden />}
+            {chat.messages.length === 0 && !chat.streaming && !chat.parked
               ? (
                 <Empty
                   key="empty"
@@ -167,6 +196,12 @@ export function LocalChatPage(): VNode {
                   }`}
                   hint={!cfg.model
                     ? "Refresh the model list above, or check the server address in Settings."
+                    : isCloudModel(cfg.model)
+                    ? "This model runs in Ollama's cloud — the conversation, and every file the agent reads, leave this machine."
+                    : cfg.mode !== "chat" && cfg.ctx < 16_000
+                    ? `The model is loaded with a ${
+                      tokens(cfg.ctx)
+                    }-token window: the agent works, but has to forget quickly. Load it with more for better results — Ollama: OLLAMA_CONTEXT_LENGTH=32768; LM Studio: a larger Context Length; llama.cpp: -c 32768.`
                     : /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])([:/]|$)/
                         .test(cfg.baseUrl)
                     ? "Everything runs on your machine. Pick a mode above and say what you need."
@@ -184,19 +219,35 @@ export function LocalChatPage(): VNode {
                     : ""}
                 />
               ))}
-            {chat.streaming
+            {chat.streaming || chat.thinking
               ? (
                 <article key="streaming" class="msg">
                   <div class="msg__avatar msg__avatar--assistant">
                     {IconLogo({ size: 15 })}
                   </div>
                   <div class="msg__body">
-                    <div class="msg__who" title={cfg.model}>
+                    <div key="who" class="msg__who" title={cfg.model}>
                       {modelLabel(cfg.model) || "model"}
                     </div>
-                    <div class="bubble">
-                      <Markdown source={chat.streaming} />
-                    </div>
+                    {
+                      /* What a reasoning model is thinking, while it thinks —
+                        the tail only, dimmed. A minute of silence reads as a
+                        hung server; a minute of visible reasoning does not. */
+                    }
+                    {chat.thinking && !chat.streaming
+                      ? (
+                        <div key="thinking" class="thinking" aria-live="polite">
+                          {chat.thinking}
+                        </div>
+                      )
+                      : <span key="thinking" hidden />}
+                    {chat.streaming
+                      ? (
+                        <div key="bubble" class="bubble">
+                          <Markdown source={chat.streaming} />
+                        </div>
+                      )
+                      : <span key="bubble" hidden />}
                   </div>
                 </article>
               )
@@ -210,8 +261,81 @@ export function LocalChatPage(): VNode {
           onClick={scroll.toBottom}
         />
       </div>
+      <TodoPanel todos={chat.todos} busy={chat.status === "working"} />
+      <QueuedMessages />
       <CommandPrompt />
       <LocalComposer />
+    </div>
+  );
+}
+
+/** The agent's own task list, when it is keeping one. Compact on purpose: a
+ *  plan is a working document, not a page — it sits above the composer so it
+ *  reads as "what the agent is doing now" rather than as a message. The
+ *  in-progress row carries a spinner because it is the one row that moves. */
+function TodoPanel(
+  props: { todos?: LocalTodo[]; busy: boolean },
+): VNode | null {
+  // A chat saved before the task list existed has none at all.
+  const todos = props.todos ?? [];
+  if (todos.length === 0) return null;
+  const done = todos.filter((t) => t.status === "completed").length;
+  // A finished plan, once the turn is over, is history — the transcript
+  // already says what was done.
+  if (done === todos.length && !props.busy) return null;
+  return (
+    <div
+      class="todopanel"
+      aria-label={`Task list, ${done} of ${todos.length} done`}
+    >
+      {todos.map((t, i) => (
+        <div
+          // By position: two steps may share their wording.
+          key={`${i}`}
+          class="todopanel__row"
+          data-status={t.status}
+        >
+          {t.status === "completed"
+            ? IconCheck({ size: 13 })
+            : t.status === "in_progress"
+            ? <span class="spin">{IconRefresh({ size: 13 })}</span>
+            : <span class="todopanel__open" />}
+          <span class={t.status === "completed" ? "todopanel__done" : ""}>
+            {t.content}
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/**
+ * What the user wrote while the agent works, waiting for its next step.
+ *
+ * Shown so a message typed mid-task is visibly *somewhere* — not lost, not
+ * yet read — and can be taken back until it is delivered.
+ */
+function QueuedMessages(): VNode | null {
+  const id = activeSessionKey();
+  const queued = localChat(id).queued ?? [];
+  if (queued.length === 0) return null;
+  return (
+    <div class="queued" aria-label="Messages waiting for the next step">
+      {queued.map((q) => (
+        <div key={q.id} class="queued__row">
+          <span class="queued__tag">next step</span>
+          <span class="queued__text">{q.text}</span>
+          <button
+            type="button"
+            class="btn btn--ghost btn--sm btn--icon"
+            aria-label="Take back this message"
+            title="Take back — it has not been read yet"
+            onClick={() => void local.unqueue(id, q.id)}
+          >
+            ×
+          </button>
+        </div>
+      ))}
     </div>
   );
 }
@@ -254,9 +378,12 @@ function CommandPrompt(): VNode | null {
         <div class="perm__head">
           <span class="perm__icon">{IconShield({ size: 15 })}</span>
           <span class="perm__title">
-            Run a command in{" "}
+            {pending.outside
+              ? "Run a command outside the sandbox"
+              : "Run a command"} in{" "}
             {workspace.projects.find((p) => p.id === id)?.name ??
-              "this project"}?
+              "this project"}
+            {pending.background ? ", in the background?" : "?"}
           </span>
           <span style={{ flex: 1 }} />
           <span class="perm__wait">the turn is waiting</span>
@@ -270,31 +397,53 @@ function CommandPrompt(): VNode | null {
           <div class="perm__why">
             {IconAlert({ size: 13 })}
             <span>
-              It runs as you, with your own permissions. The project directory
-              is where it starts, not a wall around it — every other tool here
-              is confined to it, this one cannot be.
+              {pending.outside
+                ? "The model asked to leave the sandbox for this one command: it would run as you, with your network, your display and your files — nothing held back. Other commands stay sandboxed."
+                : "It runs as you, with your own permissions. The project directory is where it starts, not a wall around it — every other tool here is confined to it, this one cannot be."}
+              {pending.background &&
+                " It keeps running after the command returns, until it is stopped or this conversation is cleared."}
             </span>
           </div>
           <div class="perm__actions">
             <button
               type="button"
               class="btn btn--sm btn--primary"
-              onClick={() => void local.answer(id, true)}
+              onClick={() => void local.answer(id, true, false, pending.id)}
             >
               Run it
             </button>
-            <button
-              type="button"
-              class="btn btn--sm"
-              title="Stop asking for this project — destructive commands are still refused. The strip above and Settings both put it back."
-              onClick={() => void local.answer(id, true, true)}
-            >
-              Run it, and stop asking
-            </button>
+            {(() => {
+              // Outside the sandbox in "Don't ask", "stop asking" means stop
+              // asking about these programs in this chat — not a mode change.
+              const progs = pending.outside ? programsToAllow(pending.cmd) : [];
+              return pending.outside
+                ? progs.length > 0 && (
+                  <button
+                    type="button"
+                    class="btn btn--sm"
+                    title="Later commands in this conversation that run only these programs leave the sandbox without asking. Destructive ones are still refused. Changing the permission mode forgets it."
+                    onClick={() =>
+                      void local.answer(id, true, true, pending.id)}
+                  >
+                    Run it, and allow {progs.join(", ")} outside
+                  </button>
+                )
+                : (
+                  <button
+                    type="button"
+                    class="btn btn--sm"
+                    title="Stop asking in this conversation — commands then run in a sandbox where one is available, and destructive ones are still refused. The strip above and Settings both put it back."
+                    onClick={() =>
+                      void local.answer(id, true, true, pending.id)}
+                  >
+                    Run it, and stop asking
+                  </button>
+                );
+            })()}
             <button
               type="button"
               class="btn btn--sm btn--danger"
-              onClick={() => void local.answer(id, false)}
+              onClick={() => void local.answer(id, false, false, pending.id)}
             >
               Refuse
             </button>
@@ -317,10 +466,6 @@ function LocalStrip(): VNode {
   const id = activeSessionKey();
   const cfg = localConfig(id);
   const chat = localChat(id);
-  // Agent mode arms and asks, like Allow-all on the Claude side: it lets the
-  // model run arbitrary commands as you, and that grant persists with the
-  // project — one accidental click must not be how it happens.
-  const [armAgent, setArmAgent] = useLocal(false);
 
   return (
     <div class="strip">
@@ -362,9 +507,14 @@ function LocalStrip(): VNode {
         >
           {IconRefresh({ size: 13 })}
         </button>
-        {chat.toolsOk === false && (
-          <span title="This server refuses tool calls — only Chat can work until it is restarted with Jinja templating on">
-            <Pill tone="danger">{IconAlert({ size: 11 })} no tools</Pill>
+        {chat.toolsOk === false && cfg.mode !== "chat" && (
+          <span title="This model takes no native tool calls — the agent describes its tools in words instead, which works but is less reliable">
+            <Pill tone="warn">{IconAlert({ size: 11 })} tools as text</Pill>
+          </span>
+        )}
+        {isCloudModel(cfg.model) && (
+          <span title="Runs in Ollama's cloud: the conversation and every file the agent reads leave this machine">
+            <Pill tone="warn">cloud</Pill>
           </span>
         )}
       </Stat>
@@ -378,20 +528,19 @@ function LocalStrip(): VNode {
         <Segmented
           value={cfg.mode}
           options={MODES}
-          onChange={(v) => {
-            if (v === "agent" && cfg.mode !== "agent") {
-              setArmAgent(true);
-              return;
-            }
-            setArmAgent(false);
-            local.setMode(id, v);
-          }}
+          onChange={(v) => local.setMode(id, v)}
         />
       </Stat>
 
+      {
+        /* Agent mode is one click: what it may do without asking is the
+          checkbox beside it, not a second confirmation of the first click. */
+      }
       {cfg.mode === "agent" && (
         <Stat label="Permissions">
+          <AutoApprove id={id} />
           <PermissionBadge id={id} />
+          <AccountBadge id={id} />
         </Stat>
       )}
 
@@ -403,26 +552,34 @@ function LocalStrip(): VNode {
           tokens(cfg.ctx)
         }-token window set in Settings`}
       />
-
-      {armAgent && (
-        <Stat label="Confirm" grow>
-          <span class="field__hint">
-            Agent mode lets the model write files in this project, and ask to
-            run commands. Every command is shown in full before it runs.
-          </span>
-          <button
-            type="button"
-            class="btn btn--sm btn--danger"
-            onClick={() => {
-              setArmAgent(false);
-              local.setMode(id, "agent");
-            }}
-          >
-            Enable agent mode
-          </button>
-        </Stat>
-      )}
     </div>
+  );
+}
+
+/**
+ * "Auto-approve": the agent runs every command without asking — no approval
+ * cards, no sandbox, no refusals. Off, it goes back to the mode it was on.
+ */
+function AutoApprove(props: { id: string }): VNode {
+  const on = permissionOf(localConfig(props.id)) === "bypass";
+  return (
+    <label
+      class={"check" + (on ? " check--on" : "")}
+      title={on
+        ? "Every command runs as you, with no approval and no checks. Untick to be asked again."
+        : "Run every command without asking — no approvals, no sandbox, no checks"}
+    >
+      <input
+        type="checkbox"
+        checked={on}
+        onChange={(e: Event) =>
+          local.autoApprove(
+            props.id,
+            (e.currentTarget as HTMLInputElement).checked,
+          )}
+      />
+      Auto-approve
+    </label>
   );
 }
 
@@ -432,7 +589,7 @@ function LocalStrip(): VNode {
  * The point of a badge that names what is switched off is that the switch is
  * where you read about it — so both unasked modes are a button, not a label.
  */
-function PermissionBadge(props: { id: string }): VNode {
+function PermissionBadge(props: { id: string }): VNode | null {
   const perm = permissionOf(localConfig(props.id));
   if (perm === "ask") {
     return (
@@ -441,20 +598,42 @@ function PermissionBadge(props: { id: string }): VNode {
       </span>
     );
   }
+  // Bypass is said by the ticked Auto-approve box beside this.
+  if (perm === "bypass") return null;
   return (
     <button
       type="button"
       class="btn btn--ghost btn--sm"
-      title={perm === "bypass"
-        ? "Every command runs, with no checks at all. Click to be asked again."
-        : "Commands run without asking; destructive ones are refused. Click to be asked again."}
+      title={local.sandbox === false
+        ? "Commands run without asking; destructive ones are refused (no sandbox on this machine). Click to be asked again."
+        : "Commands run without asking, in a sandbox; destructive ones are refused. Click to be asked again."}
       onClick={() => local.setPermission(props.id, "ask")}
     >
-      <Pill tone={perm === "bypass" ? "danger" : "warn"}>
-        {IconAlert({ size: 11 })}{" "}
-        {perm === "bypass" ? "no checks" : "runs commands unasked"}
+      <Pill tone="warn">
+        {IconAlert({ size: 11 })} runs commands unasked
       </Pill>
     </button>
+  );
+}
+
+/** Conversations whose account has been asked about — module-local, so a
+ *  render never asks twice. */
+const ACCOUNT_ASKED = new Set<string>();
+
+/** Which Linux user the commands run as, when it is not you. */
+function AccountBadge(props: { id: string }): VNode | null {
+  if (!ACCOUNT_ASKED.has(props.id)) {
+    ACCOUNT_ASKED.add(props.id);
+    void local.checkAccount(props.id);
+  }
+  const user = local.accounts[props.id];
+  if (!user) return null;
+  return (
+    <span
+      title={`Commands run as the Linux user ${user}, not as you — in its own home, with its own apps. This project is within its reach.`}
+    >
+      <Pill tone="ok">as {user}</Pill>
+    </span>
   );
 }
 
@@ -506,51 +685,58 @@ function UnreachableFix(): VNode | null {
 }
 
 /**
- * The server can chat but cannot run tools.
+ * The model takes no tool calls natively — and the agent works anyway.
  *
- * Only llama.cpp reaches this, and only when its Jinja templating is off: it
- * then serves models, answers chats, and refuses every request carrying tool
- * schemas. Left unexplained the app looks half-broken — the agent "does
- * nothing" — when the fix is one launch flag. So it is named, in full, with
- * the command to copy.
+ * A llama.cpp with Jinja templating off, or a model LM Studio or Ollama
+ * reports as not trained for tools, refuses (or silently drops) the tools in a
+ * request. The agent then describes them in words and reads the calls back
+ * from the reply: every model can do it, none do it as reliably as a native
+ * call. So this says what is happening and what would make it better — and
+ * for llama.cpp, where the fix is one launch flag, names the flag.
  *
- * Which flag depends on the build: templating is ON by default now (and
- * `--no-jinja` is what turns it off), while an older `llama-server` needed
- * `--jinja` to turn it on. Both are named, because the app cannot tell from
- * here which one the user is running.
+ * Only in the modes that use tools: in Chat it would be a warning about
+ * something that is not happening.
  */
 function NoToolsBanner(): VNode | null {
   const id = activeSessionKey();
   const chat = localChat(id);
   const cfg = localConfig(id);
-  if (chat.toolsOk !== false) return null;
+  if (chat.toolsOk !== false || cfg.mode === "chat") return null;
   const cmd = "llama-server --jinja -m your-model.gguf";
   return (
-    <Banner tone="warn">
-      This llama.cpp server has the Jinja templating that tool calls need turned
-      off, so Read-only and Agent modes cannot work against it — only Chat.
-      Current builds have it on unless <code>--no-jinja</code>{" "}
-      was passed; an older one needs <code>--jinja</code>:{" "}
-      <code class="perm__cmd" style={{ display: "inline", padding: "1px 5px" }}>
-        {cmd}
-      </code>{" "}
-      <button
-        type="button"
-        class="btn btn--ghost btn--sm"
-        title="Copy the command"
-        onClick={() => void navigator.clipboard?.writeText(cmd)}
-      >
-        Copy
-      </button>{" "}
+    <Banner>
+      This model does not take tool calls natively, so the agent describes its
+      tools in words and reads the calls back from the reply. It works, but a
+      model trained for tool use is faster and more reliable.
+      {cfg.engine === "llamacpp" && (
+        <>
+          {" "}On llama.cpp this usually means Jinja templating is off — current
+          builds have it on unless <code>--no-jinja</code>{" "}
+          was passed; older ones need{" "}
+          <code
+            class="perm__cmd"
+            style={{ display: "inline", padding: "1px 5px" }}
+          >
+            {cmd}
+          </code>{" "}
+          <button
+            type="button"
+            class="btn btn--ghost btn--sm"
+            title="Copy the command"
+            onClick={() => void navigator.clipboard?.writeText(cmd)}
+          >
+            Copy
+          </button>
+        </>
+      )}{" "}
       <button
         type="button"
         class="btn btn--sm"
-        title="Ask the server again — after restarting it"
+        title="Ask the server again"
         onClick={() => void local.autoTools(id)}
       >
         Check again
       </button>
-      {cfg.mode !== "chat" && " Until then, switch the mode to Chat."}
     </Banner>
   );
 }
@@ -582,22 +768,46 @@ function Row(props: { m: LocalMsg; hit?: string }): VNode {
           {user ? "You" : "Model"}
           <MsgMeta at={m.at} text={m.text} editable={user} />
         </div>
-        {m.text.trim() !== "" && (
-          <div class="bubble">
-            {user ? m.text : <Markdown source={m.text} />}
-          </div>
-        )}
-        {m.toolCalls?.map((c) => (
-          <div key={c.id || c.name} class="toolchip" style={{ cursor: "auto" }}>
-            <span class="toolchip__icon">{toolIcon(c.name, 14)}</span>
-            <span class="truncate">
-              <span class="toolchip__name">{c.name}</span>{" "}
-              <span class="toolchip__title">
-                {c.args.length > 120 ? c.args.slice(0, 120) + "…" : c.args}
-              </span>
-            </span>
-          </div>
-        ))}
+        {
+          /* Keyed like its siblings, the absent case included — a bare
+            `cond && …` child is unkeyed, and mixed keys reconcile by position. */
+        }
+        {m.text.trim() !== ""
+          ? (
+            <div key="bubble" class="bubble">
+              {user ? m.text : <Markdown source={m.text} />}
+            </div>
+          )
+          : <span key="bubble" hidden />}
+        {
+          /* One keyed child for the calls, present or not: a bare
+            `toolCalls?.map` is an unkeyed `undefined` on every message
+            without calls — the "mixed keyed and unkeyed children" warning on
+            every user row. `display: contents` keeps the chips' layout. */
+        }
+        {m.toolCalls?.length
+          ? (
+            <div key="calls" style={{ display: "contents" }}>
+              {m.toolCalls.map((c) => (
+                <div
+                  key={c.id || c.name}
+                  class="toolchip"
+                  style={{ cursor: "auto" }}
+                >
+                  <span class="toolchip__icon">{toolIcon(c.name, 14)}</span>
+                  <span class="truncate">
+                    <span class="toolchip__name">{c.name}</span>{" "}
+                    <span class="toolchip__title">
+                      {c.args.length > 120
+                        ? c.args.slice(0, 120) + "…"
+                        : c.args}
+                    </span>
+                  </span>
+                </div>
+              ))}
+            </div>
+          )
+          : <span key="calls" hidden />}
       </div>
     </article>
   );
@@ -646,15 +856,28 @@ function LocalComposer(): VNode {
   const busy = chat.status === "working";
   const speed = localSpeed(id);
 
+  // While a turn runs, sending does not wait: the message is queued and
+  // delivered into the running task at its next step — a correction, a
+  // question, or "stop" (which cuts the step short at once).
   const submit = () => {
     const el = ref.current;
-    if (!el || busy) return;
+    if (!el) return;
     const text = el.value;
     if (!text.trim()) return;
     el.value = "";
     dropDraft(id);
     setHasText(false);
-    void local.send(text, id);
+    void local.send(text, id).then((taken) => {
+      // Refused before it started — no model chosen, the wrong engine. What
+      // somebody typed is theirs: it goes back in the box, not nowhere.
+      if (taken !== false) return;
+      saveDraft(id, text);
+      const box = ref.current;
+      if (box && box.value === "") {
+        box.value = text;
+        setHasText(true);
+      }
+    });
   };
 
   // Same contract as the Claude composer, from the same store: a draft belongs
@@ -689,7 +912,7 @@ function LocalComposer(): VNode {
           ref={ref}
           rows={1}
           placeholder={busy
-            ? "The model is working…"
+            ? "Add to the running task — a correction, a question, or “stop”…"
             : "Message the local model…"}
           aria-label="Message the local model"
           onInput={() =>
@@ -708,6 +931,37 @@ function LocalComposer(): VNode {
           <Mic key="mic" />
           <Speaker key="speaker" />
           <ClearChat key="clear" />
+          {
+            /* The agent's file changes are the user's to keep. After a turn
+              that edited or wrote files, one click puts every one of them
+              back — the originals were kept as the turn made them. */
+          }
+          {!busy && (chat.changed ?? 0) > 0
+            ? (
+              <button
+                key="undo"
+                type="button"
+                class="btn btn--ghost btn--sm"
+                title="Put back every file the last turn changed with edit or write (changes made by shell commands are not undone)"
+                onClick={() => void local.undoChanges(id)}
+              >
+                Undo {chat.changed} file change{chat.changed === 1 ? "" : "s"}
+              </button>
+            )
+            : <span key="undo" hidden />}
+          {(chat.jobs ?? 0) > 0
+            ? (
+              <button
+                key="jobs"
+                type="button"
+                class="btn btn--ghost btn--sm"
+                title="Programs the agent left running in the background (a server, the app under test). Stop them all."
+                onClick={() => void local.stopBackground(id)}
+              >
+                {IconStop({ size: 12 })} {chat.jobs} running
+              </button>
+            )
+            : <span key="jobs" hidden />}
           {
             /* The same two states as the Claude composer: a clock while a turn
               runs, and what the last one cost in time when it is over. A local
@@ -748,7 +1002,7 @@ function LocalComposer(): VNode {
                 type="button"
                 class="btn btn--sm btn--danger"
                 onClick={() => void local.stop(id)}
-                title="Abort the current turn"
+                title="Stop now: the reply, the command, everything. Nothing more is sent — what you typed meanwhile stays in the chat."
               >
                 {IconStop({ size: 13 })} Stop
               </button>
@@ -762,7 +1016,7 @@ function LocalComposer(): VNode {
             // definition of "send", and a disabled button correctly refuses —
             // speaking while a turn is already running should queue nothing.
             class="btn btn--primary btn--sm composer__send"
-            disabled={!hasText || busy}
+            disabled={!hasText}
             onClick={submit}
           >
             {IconSend({ size: 14 })} Send
@@ -793,6 +1047,9 @@ export function EnginePanel(): VNode {
     // The scan only knows the three default ports; a server moved to another
     // one is still this project's server, and the same question applies.
     if (cfg.engine !== "claude") void local.autoTools(id);
+    // Whether "Don't ask" gets a sandbox here — asked once, answered in the
+    // permission hint below.
+    void local.checkSandbox();
   });
 
   return (
@@ -990,19 +1247,40 @@ export function EnginePanel(): VNode {
                 }))}
                 onChange={(v) => local.setPermission(id, v)}
               />
+              {permissionOf(cfg) === "dontAsk" && local.sandbox === true && (
+                <Toggle
+                  label="Sandboxed commands may use the network"
+                  hint="Off: no downloads, no internet — and no access to your screen. On: downloads work, but the X display becomes reachable too. Either way the model can ask to run one command outside the sandbox."
+                  checked={cfg.sandboxNet === true}
+                  onChange={(on) => local.setSandboxNet(id, on)}
+                />
+              )}
               <span class="field__hint">
                 The file tools are confined to the project — every path they
-                resolve, symlinks included, has to be inside it. A shell command
-                cannot be bounded that way, so it is bounded by you instead.
-                <b>Ask</b> shows the exact command before it runs.{" "}
-                <b>Don't ask</b>{" "}
-                runs ordinary commands and refuses the ones that cannot be
-                undone — deleting, publishing,{" "}
-                <code>sudo</code>, piping a download into a shell. That is a
-                list of known-dangerous words, not a sandbox: it stops an
-                accident, not a determined model. <b>Bypass</b>{" "}
-                turns the list off. Every command is still capped at 60 seconds
-                and killed with its whole process tree when the turn ends.
+                resolve, symlinks included, has to be inside it — and every file
+                a turn changes can be put back with one click. A shell command
+                is bounded differently. <b>Ask</b>{" "}
+                shows the exact command before it runs. <b>Don't ask</b>{" "}
+                runs commands unasked but refuses the ones that cannot be undone
+                — deleting, publishing,{" "}
+                <code>sudo</code>, piping a download into a shell — and takes
+                credentials out of their environment.
+                {local.sandbox === true
+                  ? " It also runs them in a sandbox: the disk is read-only except this project, the conversation's own /tmp (kept in ~/.claude-control/tmp) and download caches; credential stores are hidden; there is no display, and no network unless you allow it below. The model can ask you to run one command outside the sandbox."
+                  : local.sandbox === false
+                  ? " No sandbox is available on this machine (bubblewrap is missing or blocked), so that list of dangerous words is the only guard: it stops an accident, not a determined model."
+                  : ""} <b>Bypass</b>{" "}
+                turns every check off. Commands time out after 2 minutes unless
+                the model asks for longer (10 at most). A program a command
+                leaves running is kept as a background job, which runs until
+                stopped or the conversation is cleared (in the sandbox, it ends
+                with the command). <b>Agent account:</b>{" "}
+                when the machine has one — the Linux user{" "}
+                <code>cc-agent</code>, or the one <code>CC_AGENT_USER</code>
+                {" "}
+                names — and it can write the project, commands run as that user
+                in every mode — no sandbox, no refused words; the account's own
+                rights are the wall.
               </span>
             </>
           )}
@@ -1010,7 +1288,7 @@ export function EnginePanel(): VNode {
           <span class="field__hint" style={{ marginTop: "10px" }}>
             {cfg.ctxManual
               ? "Set by hand — packing, eviction and the meter all budget against this number."
-              : "Read from the server, and re-read whenever the model changes. Type a value to override it."}
+              : "Read from the server — re-read whenever the model changes and at the start of every turn. Type a value to override it."}
             {chat.models.length > 0 &&
               ` ${chat.models.length} model${
                 chat.models.length === 1 ? "" : "s"

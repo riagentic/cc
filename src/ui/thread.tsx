@@ -68,11 +68,16 @@ export function useStickToBottom(count = 0): {
     // height BEFORE the browser has laid out what was just added — a long
     // code block or a table finishes measuring after this callback, and
     // without the second pass the view stops a screenful short of the end.
-    requestAnimationFrame(() => {
-      if (stick.current && ref.current) {
-        ref.current.scrollTop = ref.current.scrollHeight;
-      }
-    });
+    // Guarded because this same effect runs under the test DOM, which has no
+    // frames to wait for: an afterRender that throws is an afterRender that
+    // stopped doing its job at the line above.
+    if (typeof requestAnimationFrame === "function") {
+      requestAnimationFrame(() => {
+        if (stick.current && ref.current) {
+          ref.current.scrollTop = ref.current.scrollHeight;
+        }
+      });
+    }
   });
 
   return {

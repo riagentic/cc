@@ -15,7 +15,7 @@ import "./cell/loops.ts";
 import "./cell/tree.ts";
 import "./cell/catalog.ts";
 import "./cell/storage.ts";
-import "./cell/local.ts";
+import { local } from "./cell/local.ts";
 import "./cell/voice.ts";
 import "./cell/speech.ts";
 import { aio } from "aio";
@@ -41,9 +41,9 @@ await aio.run({
   // (dep/aio/docs/clients/electron.md — "csp: strict").
   security: { csp: "strict" },
 
-  // The conversation is private, and it is only ever meant to live in memory
-  // (session never persists; local persists only its per-project config, never
-  // the transcript). But `deno task dev` runs from
+  // The conversation is private: it lives in the cells' own saved state (and,
+  // for a local chat that went idle, in ~/.claude-control/history), nowhere
+  // else. But `deno task dev` runs from
   // source, where aio's diagnostics default to on, and the action log +
   // checkpoint would otherwise write verbatim prompts and model output to
   // `~/.claude-control/logs/`. `redactActions` keeps those actions' type,
@@ -51,4 +51,23 @@ await aio.run({
   // the checkpoint holds state rather than actions, it withholds the whole
   // slice of every listed cell (dep/aio/docs/persistence/where-files-live.md).
   redactActions: REDACTED_ACTIONS,
+
+  // `local:send`'s first synchronous stretch opens a turn: status, the user's
+  // message pushed into a persisted conversation of up to 400 rows. aio's
+  // patch for that write scales with the conversation, and at 12-25 ms it
+  // logged an ERROR on every single turn — noise that buried real faults in
+  // error.log. The per-method budget is the narrow fix the diagnostic names
+  // (dep/aio/docs/debugging/performance.md); every other effect stays at 5 ms.
+  perfBudget: { methods: { "local:send": { effect: 60 } } },
+
+  // Local conversations nobody has opened for ten minutes leave the app's
+  // state for disk, and come back the moment they are opened. State is saved
+  // whole on every change; 3.6 MB of old chats made every save carry them.
+  // A minute after start (the workspace has settled on what is on screen by
+  // then), and every five minutes after.
+  schedules: [
+    { id: "local-park-boot", after: 60_000, action: local.parkIdle.action() },
+    { id: "local-park", every: 300_000, action: local.parkIdle.action() },
+    { id: "local-jobs", every: 300_000, action: local.sweepJobs.action() },
+  ],
 });

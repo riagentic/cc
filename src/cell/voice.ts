@@ -58,6 +58,10 @@ export const voice = cell("voice", {
     turn: 0,
     error: null as string | null,
     config: {
+      // Off until somebody switches it on: the GPU whisper holds is VRAM
+      // taken from the model this app exists to run, so the feature is
+      // something you opt into, never something you find running.
+      enabled: false,
       baseUrl: "",
       language: "",
       spoken: [],
@@ -84,6 +88,11 @@ export const voice = cell("voice", {
     /** Begin listening. Ignored when already listening, because a held key
      *  repeats and every repeat would otherwise restart the recording. */
     async start(s: VoiceState) {
+      // The master switch first, from the draft: this is also reached by
+      // dispatches that are not the key hook, and a switch only the shortcut
+      // obeys is half a switch. Unlike the hook, a switched-off press here is
+      // silent — the hook already said so, once.
+      if (s.config.enabled !== true) return;
       // Said out loud, because a refused press is invisible otherwise — and
       // "sometimes it listens, sometimes it does not" is precisely what a
       // silent refusal looks like from the outside.
@@ -243,6 +252,34 @@ export const voice = cell("voice", {
       s.config.baseUrl = url.trim().replace(/\/+$/, "");
     },
 
+    /**
+     * The master switch: whether speech-to-text exists at all.
+     *
+     * Turning it OFF also parks the state — a recording in flight is stopped,
+     * so the switch is immediate, not "from the next sentence". Turning it on
+     * does nothing else: the server address and the rest are configured
+     * separately, and an empty address still means not set up.
+     *
+     * Synchronous, like every other config setter, so the state reads back
+     * the moment it is set; the capture stop is dispatched rather than
+     * awaited — the server half is fire-and-forget cleanup, same as
+     * `onDestroy`.
+     */
+    setEnabled(s: VoiceState, on: boolean) {
+      s.config.enabled = on === true;
+      if (!s.config.enabled && s.status !== "off") {
+        s.status = "off";
+        s.level = 0;
+        s.text = "";
+        void import("./voice.server.ts").then((io) => io.stopCapture()).catch(
+          () => {},
+        );
+      }
+      log.info("voice", "speech-to-text switched", {
+        enabled: s.config.enabled,
+      });
+    },
+
     /** "" means let the model decide. Worth setting when you know: detection
      *  is itself a guess, and it is made on the first few words — which for a
      *  short instruction is all of them. */
@@ -346,6 +383,14 @@ async function openMic(s: VoiceState): Promise<void> {
 /** The key held to talk. */
 export const voiceKey = (): string => voice.config.key || DEFAULT_KEY;
 
-/** Is voice set up at all? Everything in the UI hides behind this — an app
- *  half-showing a feature nobody can use is worse than one not showing it. */
-export const voiceReady = (): boolean => voice.config.baseUrl !== "";
+/**
+ * Is voice set up at all? Everything in the UI hides behind this — an app
+ * half-showing a feature nobody can use is worse than one not showing it.
+ *
+ * The master switch is part of the answer, and deliberately first: a disabled
+ * feature with a configured server is still disabled — the VRAM whisper would
+ * hold belongs to whoever switched it off, and no amount of configuration
+ * makes the held key do anything.
+ */
+export const voiceReady = (): boolean =>
+  voice.config.enabled === true && voice.config.baseUrl !== "";

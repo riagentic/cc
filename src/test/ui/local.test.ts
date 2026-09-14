@@ -125,7 +125,7 @@ testUI(
 
 testUI(
   App,
-  "agent mode arms and asks before it is granted",
+  "agent mode is one click, and Auto-approve is a box beside it",
   async (ui) => {
     ui.ProjectLink.click();
     await ui.settle();
@@ -133,19 +133,33 @@ testUI(
       await local.setEngine(id, "llamacpp");
       await ui.settle();
 
-      ui.AgentButton.click(); // the segmented option arms, nothing more
-      await ui.settle();
-      assertEquals(localConfig(id).mode, "chat");
-      assertEquals(ui.html().includes("ask to run commands"), true);
-
-      ui.EnableAgentModeButton.click();
+      // No second confirmation of the first click.
+      ui.AgentButton.click();
       await ui.settle();
       assertEquals(localConfig(id).mode, "agent");
+      assertEquals(ui.html().includes("Enable agent mode"), false);
       // Agent mode writes files by itself and ASKS before a command — the
-      // strip says which of those two it is, because they are very different
-      // grants and only one of them can reach outside the project.
+      // strip says which of those two it is.
       assertEquals(ui.html().includes("can write files"), true);
-      assertEquals(ui.html().includes("commands run unasked"), false);
+      assertEquals(ui.AutoApproveCheckbox.checked, false);
+
+      // A command is waiting; ticking the box answers it and every later one.
+      await local.setPermission(id, "dontAsk");
+      await local.askCommand(id, "c1", "npm run build", true);
+      await ui.settle();
+      ui.AutoApproveCheckbox.click();
+      await ui.settle();
+      assertEquals(localConfig(id).permission, "bypass");
+      assertEquals(localChat(id).pending, null);
+      assertEquals(ui.AutoApproveCheckbox.checked, true);
+      assertEquals(ui.html().includes("runs commands unasked"), false);
+
+      // Unticked, the mode it was ticked over comes back.
+      ui.AutoApproveCheckbox.click();
+      await ui.settle();
+      assertEquals(localConfig(id).permission, "dontAsk");
+      assertEquals(localConfig(id).beforeAutoApprove, undefined);
+      assertEquals(ui.html().includes("runs commands unasked"), true);
     });
   },
 );
@@ -199,12 +213,13 @@ testUI(
 
 testUI(
   App,
-  "a server that cannot run tools says so, and says how to fix it",
+  "a server without native tools says the agent works in words, and how to fix it",
   async (ui) => {
     ui.ProjectLink.click();
     await ui.settle();
     await withProject(ui, async (id) => {
       await local.setEngine(id, "llamacpp");
+      await local.setMode(id, "read");
       await ui.settle();
       // Nothing is claimed before anybody asked.
       assertEquals(ui.html().includes("--jinja"), false);
@@ -213,10 +228,18 @@ testUI(
       await local.applyTools(id, "llamacpp", localConfig(id).baseUrl, false);
       await ui.settle();
 
-      // The launch flag is named — that is the whole point. A raw HTTP 500
-      // from the server is not something a reader can act on.
+      // Not a dead end any more: the agent describes its tools in words —
+      // and on llama.cpp the launch flag that restores native calls is named.
       assertEquals(ui.html().includes("--jinja"), true);
-      assertEquals(ui.html().includes("only Chat"), true);
+      assertEquals(ui.html().includes("tools in words"), true);
+      assertEquals(ui.html().includes("tools as text"), true);
+
+      // In Chat there are no tools to warn about.
+      await local.setMode(id, "chat");
+      await ui.settle();
+      assertEquals(ui.html().includes("--jinja"), false);
+      await local.setMode(id, "read");
+      await ui.settle();
 
       // …and it goes away the moment the server can, without a reload.
       await local.applyTools(id, "llamacpp", localConfig(id).baseUrl, true);

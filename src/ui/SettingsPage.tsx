@@ -46,7 +46,6 @@ import {
   Choice,
   Empty,
   matchesAll,
-  Menu,
   Meter,
   Panel,
   Pill,
@@ -308,12 +307,13 @@ export function SettingsPage(): VNode {
               type="button"
               class="btn btn--sm"
               onClick={() => {
-                void local.clear();
+                const key = activeSessionKey();
+                void local.clear(key);
                 showToast({
                   text: "Conversation cleared.",
                   action: {
                     label: "Undo",
-                    run: () => void local.undoClear(),
+                    run: () => void local.undoClear(key),
                   },
                 });
               }}

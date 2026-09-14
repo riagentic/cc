@@ -31,7 +31,12 @@ export function usePushToTalk(): void {
     const down = (e: KeyboardEvent) => {
       if (e.code !== voiceKey()) return;
       if (!voiceReady()) {
-        log.warn("voice", "key held, but no speech server is set up");
+        log.warn(
+          "voice",
+          voice.config.enabled === true
+            ? "key held, but no speech server is set up"
+            : "key held, but speech is switched off in Settings",
+        );
         return;
       }
       // A held key repeats. Only the first press is a press.

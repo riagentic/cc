@@ -394,7 +394,7 @@ function forget(s: WorkspaceState, ids: string[]): void {
 async function applyAddProject(
   s: Draft,
   path: string,
-): Promise<boolean> {
+): Promise<string | null> {
   const io = await import("./claude.server.ts");
   const typed = tidy(path);
   if (!typed) {
@@ -403,7 +403,7 @@ async function applyAddProject(
     now(s).error = "Enter a project directory.";
     now(s).absentPath = "";
     log.warn("workspace", "empty project path rejected", {});
-    return false;
+    return null;
   }
   const clean = io.resolvePath(typed);
 
@@ -438,7 +438,7 @@ async function applyAddProject(
     // that.
     live0.absentPath = clean;
     log.warn("workspace", "project path is not a directory", { path: clean });
-    return false;
+    return null;
   }
   live0.error = null;
   live0.absentPath = "";
@@ -462,7 +462,7 @@ async function applyAddProject(
     if (existing.dirty !== git.dirty) existing.dirty = git.dirty;
     if (existing.missing) existing.missing = false;
     live.activeId = existing.id;
-    return true;
+    return existing.id;
   }
   const id = crypto.randomUUID();
   live.projects.push({
@@ -481,7 +481,7 @@ async function applyAddProject(
     ...settingsFor(live.defaults, cli),
   });
   live.activeId = id;
-  return true;
+  return id;
 }
 
 /** Merge what the CLI says about a directory over the app's seed, taking only
@@ -549,6 +549,20 @@ function released(ids: string[]): void {
   void import("./loops.ts").then((m) => m.loops.forgetProjects(ids)).catch(
     () => {},
   );
+}
+
+/**
+ * One conversation has been closed — the same courtesy as {@link released}
+ * gives a removed project, for a single tab.
+ *
+ * Closing a tab used to leave everything the conversation held: its background
+ * programs still running, its undo history and its temp directory still there,
+ * its engine settings and its transcript waiting in persisted state for
+ * somebody to press the prune button on the Settings page. What was said is
+ * written to the saved history first — closing a tab is not deleting the past.
+ */
+function paneReleased(id: string): void {
+  void import("./local.ts").then((m) => m.local.closeChat(id)).catch(() => {});
 }
 
 /**
@@ -821,13 +835,20 @@ export const workspace = cell("workspace", {
       reprojected(usable.id);
     },
 
-    /** Add a project directory (idempotent — re-adding just selects it).
+    /** Add a project directory (idempotent — re-adding just selects it), and
+     *  answer with its id — `null` if the path was refused.
+     *
+     *  The id is returned rather than looked up afterwards because the caller
+     *  may be a browser: a reply crosses the bridge, a list read right after
+     *  the call may still be the list from before it.
      *
      *  `~/code/x` and `./sub` are resolved the same way the command-line
      *  argument is: a path typed into the field and a path passed on launch mean
      *  the same thing, and the field used to reject both outright. */
-    async addProject(s: WorkspaceState, path: string) {
-      if (await applyAddProject(s, path)) reprojected(s.activeId); // aiol-ok
+    async addProject(s: WorkspaceState, path: string): Promise<string | null> {
+      const id = await applyAddProject(s, path);
+      if (id !== null) reprojected(s.activeId); // aiol-ok
+      return id;
     },
 
     /**
@@ -868,7 +889,9 @@ export const workspace = cell("workspace", {
       // A caller in the browser reads state that the patch for this method may
       // not have reached yet, so it would be reading the previous answer; the
       // return value crosses the bridge with the call.
-      if (await applyAddProject(s, wanted)) reprojected(now(s).activeId); // aiol-ok
+      if (await applyAddProject(s, wanted) !== null) {
+        reprojected(now(s).activeId); // aiol-ok
+      }
       return null;
     },
 
@@ -1008,6 +1031,7 @@ export const workspace = cell("workspace", {
         if (s.activePane[pid] === id) {
           s.activePane[pid] = (list[at] ?? list[at - 1] ?? list[0])?.id ?? "";
         }
+        paneReleased(id);
         return;
       }
     },

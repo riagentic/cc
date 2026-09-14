@@ -67,10 +67,10 @@ export function CommandPalette(props: { onClose: () => void }): VNode {
   };
 
   const onKey = (e: KeyboardEvent) => {
-    if (e.key === "ArrowDown" || (e.key === "n" && e.ctrlKey)) {
+    if (e.key === "ArrowDown") {
       e.preventDefault();
       setSel(Math.min(index + 1, hits.length - 1));
-    } else if (e.key === "ArrowUp" || (e.key === "p" && e.ctrlKey)) {
+    } else if (e.key === "ArrowUp") {
       e.preventDefault();
       setSel(Math.max(index - 1, 0));
     } else if (e.key === "Home") {

@@ -7,12 +7,11 @@
  * is needed, and three answers that are all one click away. Nothing here is
  * inferred — every line comes from the request the CLI sent.
  */
-import { onMount, useLocal, useRef, type VNode } from "aio/air";
+import { useLocal, type VNode } from "aio/air";
 import { session } from "../cell/session.ts";
 import type { PermissionRequest } from "../type/claude.ts";
-import { highlight } from "../lib/highlight.ts";
 import { clock, duration, oneLine } from "../lib/format.ts";
-import { Copy, useNow } from "./parts.tsx";
+import { codeTokens, Copy, useNow } from "./parts.tsx";
 import { DiffView, isEdit } from "./Diff.tsx";
 import { IconAlert, IconCheck, IconShield, IconX, toolIcon } from "./icons.tsx";
 
@@ -36,49 +35,16 @@ function PermissionCard(props: { request: PermissionRequest }): VNode {
   const [reason, setReason] = useLocal("");
   const now = useNow(true, 500);
   const suggestion = r.suggestions[0] ?? null;
-  const card = useRef<HTMLElement>(null!);
 
-  // Move focus to the prompt when it appears. A blocked turn that a keyboard
-  // user has to Tab across the whole page to reach is a blocked turn.
-  //
-  // The *card* takes focus, never a button: focusing "Allow once" would arm
-  // Enter to approve a tool call, and the one thing an approval dialog must
-  // never do is let a stray keystroke say yes.
-  onMount(() => card.current?.focus());
-
-  /**
-   * Digits, the way the CLI's own prompt takes them.
-   *
-   * Not letters, and emphatically not Enter: the one thing an approval dialog
-   * must never do is let a stray keystroke say yes, and Enter is the key most
-   * likely to arrive by accident from whatever the user was doing before this
-   * appeared. A digit is a deliberate press, and 1/2/3 is the muscle memory
-   * anybody arriving from `claude` in a terminal already has.
-   *
-   * Silent while the deny box is open — there, digits are text.
-   */
-  const onKey = (e: KeyboardEvent) => {
-    if (denying || e.ctrlKey || e.metaKey || e.altKey) return;
-    if (e.key === "1") {
-      e.preventDefault();
-      void session.allowPermission(r.id, false);
-    } else if (e.key === "2" && suggestion) {
-      e.preventDefault();
-      void session.allowPermission(r.id, true);
-    } else if (e.key === "3") {
-      e.preventDefault();
-      setDenying(true);
-    }
-  };
-
+  // No keys and no focus grab. Answering takes a click: a prompt that took
+  // digits, and took focus when it appeared, let a "1" typed into the message
+  // box at the wrong moment approve a command.
   return (
     <section
-      ref={card}
       class="perm"
       role="alertdialog"
       tabIndex={-1}
       aria-label={`Approve ${r.tool}`}
-      onKeyDown={onKey}
     >
       <header class="perm__head">
         <span class="perm__icon">{IconShield({ size: 16 })}</span>
@@ -142,11 +108,7 @@ function PermissionCard(props: { request: PermissionRequest }): VNode {
               />
             )}
             <div class="code">
-              {highlight(JSON.stringify(r.input, null, 2), "json").map((t, n) =>
-                t.kind === "plain"
-                  ? t.text
-                  : <span key={n} class={`tok tok--${t.kind}`}>{t.text}</span>
-              )}
+              {codeTokens(JSON.stringify(r.input, null, 2), "json")}
             </div>
           </>
         )}
@@ -208,7 +170,6 @@ function PermissionCard(props: { request: PermissionRequest }): VNode {
                   onClick={() => void session.allowPermission(r.id, true)}
                 >
                   Always allow
-                  <span class="kbd">2</span>
                 </button>
               )}
               <button
@@ -217,7 +178,6 @@ function PermissionCard(props: { request: PermissionRequest }): VNode {
                 onClick={() => void session.allowPermission(r.id, false)}
               >
                 {IconCheck({ size: 14 })} Allow once
-                <span class="kbd">1</span>
               </button>
             </div>
           )}

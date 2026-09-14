@@ -712,7 +712,15 @@ export const session = cell("session", {
      * callback supplies it — but it defaults to the project on screen so a test
      * driving a single session need not invent one.
      */
-    ingest(s: SessionState, evt: Evt, token?: number, key?: string) {
+    ingest(
+      s: SessionState,
+      evt: Evt,
+      // The defaults are spelled out rather than left as `?`: the runtime reads
+      // "this call is complete" from the signature's own defaults, and a `?`
+      // alone made every two-argument call look like a call missing its rest.
+      token: number | undefined = undefined,
+      key: string | undefined = undefined,
+    ) {
       const cur = at(s, key ?? currentKey(s));
       // A late line from a process we already replaced belongs to nobody.
       if (token !== undefined && token !== cur.startToken) return;

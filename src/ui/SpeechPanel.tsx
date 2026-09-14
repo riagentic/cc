@@ -202,147 +202,186 @@ export function SpeechPanel(): VNode {
 
   return (
     <div class="grid" style={{ gap: "12px" }}>
-      <div class="field__hint">
-        The speaker on the message bar reads the conversation back — what you
-        send in one voice, what comes back in another. It starts switched off
-        every time, and switching it on reads only what happens next, never the
-        backlog.
-      </div>
-
+      {
+        /* The master switch, first, because everything under it is a detail of
+          a thing that is off until you say otherwise. The rest of the panel is
+          not rendered while it is off: settings for a feature that is not
+          running read as if it were. */
+      }
       <div class="field">
-        <span class="field__label">Voice</span>
+        <span class="field__label">Voice output</span>
         <span class="field__hint">
-          {engine?.hint ??
-            "Two are set up here; the address below will drive anything else that answers the same route."}
+          Off by default. While it is off this app contacts no speech server at
+          all — so a voice model that would load the moment something asked it
+          to speak never loads, and the graphics memory it wants stays free.
+          Your server address and chosen voices are kept either way.
         </span>
         <Segmented
-          value={engine?.url ?? ""}
-          options={ENGINES.map((e) => ({ id: e.url, label: e.label }))}
-          onChange={(url: string) => {
-            speech.setBaseUrl(url);
-            // Straight away, because the voices are about to be different
-            // ones and the picker below is filled from the answer.
-            void speech.find();
-          }}
+          value={cfg.enabled ? "on" : "off"}
+          options={[
+            { id: "off", label: "Off" },
+            { id: "on", label: "On" },
+          ]}
+          onChange={(v: string) => void speech.setEnabled(v === "on")}
         />
       </div>
 
-      <div class="field">
-        <span class="field__label">Voice server</span>
-        <span class="field__hint">
-          Where it answers. Anything speaking OpenAI's{" "}
-          <code>/v1/audio/speech</code> will do.
-        </span>
-        <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
-          <input
-            class="input"
-            type="text"
-            value={cfg.baseUrl}
-            placeholder={DEFAULT_SPEECH_URL}
-            aria-label="Voice server address"
-            onChange={(e: Event) =>
-              speech.setBaseUrl((e.target as HTMLInputElement).value)}
-          />
-          <button
-            type="button"
-            class="btn btn--sm"
-            title="Look for a voice server"
-            onClick={() => void speech.find()}
-          >
-            {IconRefresh({ size: 13 })} Find
-          </button>
-          {on && (
-            <Pill tone={speech.reachable ? "ok" : "warn"}>
-              {speech.reachable ? "answering" : "no answer"}
-            </Pill>
-          )}
+      {!cfg.enabled && (
+        <div class="field__hint">
+          Switch it on to choose a voice server and a pair of voices. Nothing
+          below is contacted until you do.
         </div>
-      </div>
+      )}
 
-      <VoicePick
-        label="Claude's voice"
-        hint="The one you will hear most. Try a few — they are not interchangeable."
-        value={cfg.voiceOut}
-        onPick={(v) => speech.setVoiceOut(v)}
-      />
+      {cfg.enabled && (
+        <>
+          <div class="field__hint">
+            The speaker on the message bar reads the conversation back — what
+            you send in one voice, what comes back in another. It starts
+            switched off every time, and switching it on reads only what happens
+            next, never the backlog.
+          </div>
 
-      <VoicePick
-        label="Your voice"
-        hint="Your own messages, read back. Pick one that is obviously not Claude's — hearing which side is talking is the whole reason there are two."
-        value={cfg.voiceIn}
-        onPick={(v) => speech.setVoiceIn(v)}
-      />
+          <div class="field">
+            <span class="field__label">Voice</span>
+            <span class="field__hint">
+              {engine?.hint ??
+                "Two are set up here; the address below will drive anything else that answers the same route."}
+            </span>
+            <Segmented
+              value={engine?.url ?? ""}
+              options={ENGINES.map((e) => ({ id: e.url, label: e.label }))}
+              onChange={(url: string) => {
+                speech.setBaseUrl(url);
+                // Straight away, because the voices are about to be different
+                // ones and the picker below is filled from the answer.
+                void speech.find();
+              }}
+            />
+          </div>
 
-      <div class="field">
-        <span class="field__label">Language</span>
-        <span class="field__hint">
-          Leave it on Detect unless it gets one wrong. Not every voice speaks
-          every one of these: Piper answers by changing voice, Supertonic says
-          so plainly, and Kokoro reads it in the accent it has.
-        </span>
-        <select
-          class="input"
-          value={cfg.language}
-          aria-label="Reading language"
-          onChange={(e: Event) =>
-            speech.setLanguage((e.target as HTMLSelectElement).value)}
-        >
-          {LANGUAGES.map((l) => (
-            <option key={l.id || "auto"} value={l.id}>{l.label}</option>
-          ))}
-        </select>
-      </div>
+          <div class="field">
+            <span class="field__label">Voice server</span>
+            <span class="field__hint">
+              Where it answers. Anything speaking OpenAI's{" "}
+              <code>/v1/audio/speech</code> will do.
+            </span>
+            <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
+              <input
+                class="input"
+                type="text"
+                value={cfg.baseUrl}
+                placeholder={DEFAULT_SPEECH_URL}
+                aria-label="Voice server address"
+                onChange={(e: Event) =>
+                  speech.setBaseUrl((e.target as HTMLInputElement).value)}
+              />
+              <button
+                type="button"
+                class="btn btn--sm"
+                title="Look for a voice server"
+                onClick={() => void speech.find()}
+              >
+                {IconRefresh({ size: 13 })} Find
+              </button>
+              {on && (
+                <Pill tone={speech.reachable ? "ok" : "warn"}>
+                  {speech.reachable ? "answering" : "no answer"}
+                </Pill>
+              )}
+            </div>
+          </div>
 
-      <div class="field">
-        <span class="field__label">Read my messages back</span>
-        <span class="field__hint">
-          On is how you catch a misheard dictation before the answer to it
-          arrives. Off if you already know what you typed.
-        </span>
-        <Segmented
-          value={cfg.readMine ? "both" : "reply"}
-          options={[
-            { id: "both", label: "Both sides" },
-            { id: "reply", label: "Only the reply" },
-          ]}
-          onChange={(v: string) => speech.setReadMine(v === "both")}
-        />
-      </div>
+          <VoicePick
+            label="Claude's voice"
+            hint="The one you will hear most. Try a few — they are not interchangeable."
+            value={cfg.voiceOut}
+            onPick={(v) => speech.setVoiceOut(v)}
+          />
 
-      <div class="field">
-        <span class="field__label">Pace</span>
-        <span class="field__hint">
-          Faster than about 1.25 starts to slur; the voice does not re-phrase,
-          it just hurries.
-        </span>
-        <select
-          class="input"
-          value={String(cfg.speed)}
-          aria-label="Reading speed"
-          onChange={(e: Event) =>
-            speech.setSpeed(Number((e.target as HTMLSelectElement).value))}
-        >
-          {SPEEDS.map((n) => (
-            <option key={String(n)} value={String(n)}>{speedLabel(n)}</option>
-          ))}
-        </select>
-      </div>
+          <VoicePick
+            label="Your voice"
+            hint="Your own messages, read back. Pick one that is obviously not Claude's — hearing which side is talking is the whole reason there are two."
+            value={cfg.voiceIn}
+            onPick={(v) => speech.setVoiceIn(v)}
+          />
 
-      <div class="field">
-        <span class="field__label">When the app opens</span>
-        <span class="field__hint">
-          Silent by default, on purpose: an app that starts talking before you
-          have asked it anything is one you switch off and never switch back on.
-        </span>
-        <Segmented
-          value={cfg.onAtStart ? "on" : "off"}
-          options={[
-            { id: "off", label: "Stay quiet" },
-            { id: "on", label: "Start reading" },
-          ]}
-          onChange={(v: string) => speech.setOnAtStart(v === "on")}
-        />
-      </div>
+          <div class="field">
+            <span class="field__label">Language</span>
+            <span class="field__hint">
+              Leave it on Detect unless it gets one wrong. Not every voice
+              speaks every one of these: Piper answers by changing voice,
+              Supertonic says so plainly, and Kokoro reads it in the accent it
+              has.
+            </span>
+            <select
+              class="input"
+              value={cfg.language}
+              aria-label="Reading language"
+              onChange={(e: Event) =>
+                speech.setLanguage((e.target as HTMLSelectElement).value)}
+            >
+              {LANGUAGES.map((l) => (
+                <option key={l.id || "auto"} value={l.id}>{l.label}</option>
+              ))}
+            </select>
+          </div>
+
+          <div class="field">
+            <span class="field__label">Read my messages back</span>
+            <span class="field__hint">
+              On is how you catch a misheard dictation before the answer to it
+              arrives. Off if you already know what you typed.
+            </span>
+            <Segmented
+              value={cfg.readMine ? "both" : "reply"}
+              options={[
+                { id: "both", label: "Both sides" },
+                { id: "reply", label: "Only the reply" },
+              ]}
+              onChange={(v: string) => speech.setReadMine(v === "both")}
+            />
+          </div>
+
+          <div class="field">
+            <span class="field__label">Pace</span>
+            <span class="field__hint">
+              Faster than about 1.25 starts to slur; the voice does not
+              re-phrase, it just hurries.
+            </span>
+            <select
+              class="input"
+              value={String(cfg.speed)}
+              aria-label="Reading speed"
+              onChange={(e: Event) =>
+                speech.setSpeed(Number((e.target as HTMLSelectElement).value))}
+            >
+              {SPEEDS.map((n) => (
+                <option key={String(n)} value={String(n)}>
+                  {speedLabel(n)}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div class="field">
+            <span class="field__label">When the app opens</span>
+            <span class="field__hint">
+              Silent by default, on purpose: an app that starts talking before
+              you have asked it anything is one you switch off and never switch
+              back on.
+            </span>
+            <Segmented
+              value={cfg.onAtStart ? "on" : "off"}
+              options={[
+                { id: "off", label: "Stay quiet" },
+                { id: "on", label: "Start reading" },
+              ]}
+              onChange={(v: string) => speech.setOnAtStart(v === "on")}
+            />
+          </div>
+        </>
+      )}
     </div>
   );
 }

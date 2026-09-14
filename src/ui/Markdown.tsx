@@ -10,8 +10,7 @@ import {
   parseMarkdown,
   pathish,
 } from "../lib/markdown.ts";
-import { highlight } from "../lib/highlight.ts";
-import { Copy } from "./parts.tsx";
+import { codeTokens, Copy } from "./parts.tsx";
 import { workspace } from "../cell/workspace.ts";
 import { showToast } from "./toast.tsx";
 
@@ -216,11 +215,7 @@ function CodeBlock(props: { lang: string; code: string }): VNode {
         <Copy text={props.code} />
       </span>
       <code>
-        {highlight(shown, props.lang).map((t, n) =>
-          t.kind === "plain"
-            ? t.text
-            : <span key={n} class={`tok tok--${t.kind}`}>{t.text}</span>
-        )}
+        {codeTokens(shown, props.lang)}
       </code>
       {long && (
         <button

@@ -16,7 +16,7 @@ import { testUI } from "aio/testing";
 import App from "../../App.tsx";
 import { session, view } from "../../cell/session.ts";
 import type { ToolRun } from "../../type/claude.ts";
-import { workspace } from "../../cell/workspace.ts";
+import { panesOf, workspace } from "../../cell/workspace.ts";
 import { listKey } from "../../lib/format.ts";
 import { loops } from "../../cell/loops.ts";
 import { tree } from "../../cell/tree.ts";
@@ -1151,7 +1151,7 @@ testUI(
 
 testUI(
   App,
-  "Mod+1..9 switches project, and stops at the end of the list",
+  "Ctrl+1..9 no longer switches project — no chord is on Ctrl",
   async (ui) => {
     await open(ui);
     const a = await Deno.makeTempDir();
@@ -1160,9 +1160,7 @@ testUI(
       await workspace.addProject(a);
       await workspace.addProject(b);
       await ui.settle();
-      const first = workspace.projects[0].id;
-      const second = workspace.projects[1].id;
-
+      const before = workspace.activeId;
       ui.window.document.dispatchEvent(
         new ui.window.KeyboardEvent("keydown", {
           key: "1",
@@ -1170,32 +1168,90 @@ testUI(
           bubbles: true,
         }),
       );
-      await ui.expectCell(workspace, (w) => w.activeId === first);
-
-      ui.window.document.dispatchEvent(
-        new ui.window.KeyboardEvent("keydown", {
-          key: "2",
-          ctrlKey: true,
-          bubbles: true,
-        }),
-      );
-      await ui.expectCell(workspace, (w) => w.activeId === second);
-
-      // Past the end of the list is a no-op, never a wrap-around: a shortcut
-      // that lands somewhere unexpected is worse than one that does nothing.
-      ui.window.document.dispatchEvent(
-        new ui.window.KeyboardEvent("keydown", {
-          key: "9",
-          ctrlKey: true,
-          bubbles: true,
-        }),
-      );
       await ui.settle();
-      assertEquals(workspace.activeId, second);
+      assertEquals(workspace.activeId, before);
     } finally {
       await Deno.remove(a, { recursive: true });
       await Deno.remove(b, { recursive: true });
     }
+  },
+);
+
+/** Press a key the way a person does: on the document, bubbling. */
+const press = (
+  ui: any,
+  key: string,
+  mods: { alt?: boolean; ctrl?: boolean } = {},
+) =>
+  ui.window.document.dispatchEvent(
+    new ui.window.KeyboardEvent("keydown", {
+      key,
+      altKey: mods.alt ?? false,
+      ctrlKey: mods.ctrl ?? false,
+      bubbles: true,
+    }),
+  );
+
+testUI(App, "Alt S opens Settings and Alt G goes back", async (ui) => {
+  await open(ui);
+  ui.TreeLink.click();
+  await ui.settle();
+  press(ui, "s", { alt: true });
+  await ui.waitFor(() => ui.html().includes("Permissions"));
+  press(ui, "g", { alt: true });
+  await ui.waitFor(() => ui.window.location.pathname === "/tree");
+  // Again: back is a toggle between the two.
+  press(ui, "g", { alt: true });
+  await ui.waitFor(() => ui.window.location.pathname === "/settings");
+});
+
+testUI(App, "Ctrl ↓ no longer walks the dock — Alt ↓ does", async (ui) => {
+  await open(ui);
+  await workspace.addPane(workspace.activeId, "session");
+  await ui.settle();
+  const on = () => workspace.activePane[workspace.activeId];
+  const before = on();
+  press(ui, "ArrowDown", { ctrl: true });
+  await ui.settle();
+  assertEquals(on(), before);
+  press(ui, "ArrowDown", { alt: true });
+  await ui.waitFor(() => on() !== before);
+});
+
+testUI(App, "Alt N opens a conversation and Alt W closes it", async (ui) => {
+  await open(ui);
+  const pid = workspace.activeId;
+  const count = () => panesOf(pid).length;
+  const before = count();
+  press(ui, "n", { alt: true });
+  await ui.waitFor(() => count() === before + 1);
+  const made = workspace.activePane[pid];
+  press(ui, "w", { alt: true });
+  await ui.waitFor(() => count() === before);
+  assertEquals(panesOf(pid).some((p) => p.id === made), false);
+  // The last conversation stays: a project needs one to show.
+  if (before === 1) {
+    press(ui, "w", { alt: true });
+    await ui.settle();
+    assertEquals(count(), 1);
+  }
+});
+
+testUI(
+  App,
+  "Escape on the chat stops the turn; elsewhere it only comes back",
+  async (ui) => {
+    await open(ui);
+    session.ingest(init);
+    await session.send("hi");
+    await ui.waitFor(() => view().status === "working");
+    ui.TreeLink.click();
+    await ui.settle();
+    press(ui, "Escape");
+    await ui.waitFor(() => ui.window.location.pathname === "/");
+    assertEquals(view().status, "working", "the first Escape only comes back");
+    press(ui, "Escape");
+    await ui.waitFor(() => view().interrupting || view().error !== null);
   },
 );
 
@@ -1528,7 +1584,7 @@ testUI(App, "a menu can be driven entirely from the keyboard", async (ui) => {
 
 testUI(
   App,
-  "an approval can be answered with the digits the CLI uses",
+  "an approval takes a click — no digit, and no stolen focus",
   async (ui) => {
     await open(ui);
     session.ingest(init);
@@ -1540,18 +1596,13 @@ testUI(
     );
     session.ingest(canUseTool);
     await ui.waitFor(() => ui.html().includes("needs your approval"));
-
-    // The digits are on the buttons, so nobody has to be told they exist.
-    const html = ui.html();
-    assertEquals(html.includes("kbd"), true);
-
-    // 3 opens the deny box rather than denying outright — the reason is worth
-    // asking for, and the model reads it as the tool's error. The key is
-    // pressed on a control inside the card and handled by the card, which is
-    // where focus actually is while somebody decides.
-    ui.DenyButton.press("3");
-    await ui.waitFor(() => ui.html().includes("Tell Claude why"));
+    // A "1" typed while the card is up approves nothing.
+    ui.DenyButton.press("1");
+    await ui.settle();
     await ui.expectCell(session, (s) => s.permissions[0].status === "pending");
+    // Deny still opens the box that asks why.
+    ui.DenyButton.click();
+    await ui.waitFor(() => ui.html().includes("Tell Claude why"));
   },
 );
 

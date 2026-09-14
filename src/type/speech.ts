@@ -14,6 +14,21 @@ export type SpeechStatus =
   | "error";
 
 export type SpeechConfig = {
+  /**
+   * Is reading aloud part of this app at all.
+   *
+   * **Off by default, and it is the master switch**: with it off nothing here
+   * contacts a speech server — not a probe, not a voice list, not a preview —
+   * so a server that loads its voice model when something first asks it to
+   * speak never loads one, and the memory it would have taken stays free. The
+   * speaker button and its palette commands are not offered either.
+   *
+   * Separate from `baseUrl` on purpose. "Which server" and "do I want this"
+   * are different questions, and answering the second by deleting the answer
+   * to the first means setting the address up again every time you change your
+   * mind.
+   */
+  enabled: boolean;
   /** Where the speech server answers. Empty means "not set up". */
   baseUrl: string;
   /** The voice for Claude's replies. */

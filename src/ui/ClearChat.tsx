@@ -5,7 +5,7 @@
 import { type VNode } from "aio/air";
 import { session, view } from "../cell/session.ts";
 import { activeIsLocal, local, localChat } from "../cell/local.ts";
-import { workspace } from "../cell/workspace.ts";
+import { activeSessionKey } from "../cell/workspace.ts";
 import { showToast } from "./toast.tsx";
 import { IconTrash } from "./icons.tsx";
 
@@ -27,8 +27,11 @@ import { IconTrash } from "./icons.tsx";
  */
 export function ClearChat(_props: { key?: string } = {}): VNode {
   const isLocal = activeIsLocal();
+  // The open chat, not the project: a project holds several conversations,
+  // and the project id names only the first of them.
+  const key = activeSessionKey();
   const empty = isLocal
-    ? localChat(workspace.activeId).messages.length === 0
+    ? localChat(key).messages.length === 0
     : view().messages.length === 0;
 
   const hint = empty
@@ -46,10 +49,10 @@ export function ClearChat(_props: { key?: string } = {}): VNode {
       disabled={empty}
       onClick={() => {
         if (isLocal) {
-          void local.clear();
+          void local.clear(key);
           showToast({
             text: "Conversation cleared.",
-            action: { label: "Undo", run: () => void local.undoClear() },
+            action: { label: "Undo", run: () => void local.undoClear(key) },
           });
           return;
         }

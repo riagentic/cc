@@ -12,7 +12,7 @@
  * are *about*: the live turn, work that outlives it, the code on disk, and the
  * configuration that decides what any of it can do.
  */
-import { Link, type VNode } from "aio/air";
+import { type VNode } from "aio/air";
 import {
   pendingPermissions,
   runningAgents,
@@ -28,12 +28,7 @@ import {
   activeSettings,
   workspace,
 } from "../cell/workspace.ts";
-import {
-  activeIsLocal,
-  engineOf,
-  localChat,
-  localConfig,
-} from "../cell/local.ts";
+import { activeIsLocal, localChat, localConfig } from "../cell/local.ts";
 import { ENGINE_NAMES } from "./LocalChatPage.tsx";
 import { blockedJobs, jobs } from "../cell/jobs.ts";
 import { activeLoops, projectLoops } from "../cell/loops.ts";
@@ -200,7 +195,7 @@ export function Rail(): VNode {
           type="button"
           class="brand"
           aria-label="Command palette"
-          title="Every action, by name — Ctrl K"
+          title="Every action, by name"
           onClick={() =>
             showOverlay(() => <CommandPalette onClose={closeOverlay} />)}
         >
@@ -212,10 +207,6 @@ export function Rail(): VNode {
                 ? `CLI ${workspace.cliVersion}`
                 : "CLI not found"}
             </div>
-          </span>
-          <span class="brand__key wide">
-            <kbd class="kbd">Ctrl</kbd>
-            <kbd class="kbd">K</kbd>
           </span>
         </button>
       </div>

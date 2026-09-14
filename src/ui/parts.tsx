@@ -3,6 +3,7 @@
  * Shared UI primitives. Small, unopinionated, and styled entirely by the
  * tokens in `theme.tsx` — no component here owns a colour.
  */
+import { highlight } from "../lib/highlight.ts";
 import {
   afterRender,
   onCleanup,
@@ -607,6 +608,22 @@ export function Toggle(
  * transcript is megabytes of string, and a component prop is evaluated on
  * every render whether or not anybody ever presses the button.
  */
+/**
+ * Highlighted code, as children a reconciler can follow.
+ *
+ * Every token is its own keyed `<span>`, plain ones included. A list that mixes
+ * keyed elements with bare strings lets the diff pair a kept `<span>` with
+ * another token's text — the block then shows the right words in the wrong
+ * colour, or the wrong words altogether, and aio says so out loud ("the child
+ * reconciler desynced"). Three pages had their own copy of the mixed version.
+ */
+export const codeTokens = (text: string, lang: string): VNode[] =>
+  highlight(text, lang).map((t, n) => (
+    <span key={n} class={t.kind === "plain" ? undefined : `tok tok--${t.kind}`}>
+      {t.text}
+    </span>
+  ));
+
 export function Copy(
   props: { text: string | (() => string); label?: string },
 ): VNode {

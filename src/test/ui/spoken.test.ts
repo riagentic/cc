@@ -66,11 +66,17 @@ async function open(ui: any) {
 
 testUI(App, "the speaker is not offered until there is one", async (ui) => {
   await open(ui);
-  // No voice server configured: a control nobody can use is worse than no
-  // control, because it reads as a broken feature rather than an absent one.
+  // Two gates, and the button waits for both. Voice output is off as shipped,
+  // and a control nobody can use is worse than no control: it reads as a
+  // broken feature rather than an absent one.
   assertEquals(ui.present("ReadAloudButton"), false);
 
   speech.setBaseUrl(NOWHERE);
+  await ui.settle();
+  // A server, but the feature is still switched off — still nothing offered.
+  assertEquals(ui.present("ReadAloudButton"), false);
+
+  await speech.setEnabled(true);
   await ui.settle();
   assertEquals(ui.present("ReadAloudButton"), true);
   // Offered, and still off. Nothing about having a server means "start
@@ -81,6 +87,7 @@ testUI(App, "the speaker is not offered until there is one", async (ui) => {
 testUI(App, "switching on does not recite the backlog", async (ui) => {
   await open(ui);
   speech.setBaseUrl(NOWHERE);
+  await speech.setEnabled(true);
   session.ingest(init);
   session.ingest(reply("msg_old", "This was said before you switched me on."));
   await ui.settle();
@@ -96,6 +103,7 @@ testUI(App, "switching on does not recite the backlog", async (ui) => {
 testUI(App, "a reply that arrives after that IS read out", async (ui) => {
   await open(ui);
   speech.setBaseUrl(NOWHERE);
+  await speech.setEnabled(true);
   session.ingest(init);
   await ui.settle();
   ui.ReadAloudButton.click();
@@ -115,6 +123,7 @@ testUI(App, "a reply that arrives after that IS read out", async (ui) => {
 testUI(App, "a reply with nothing to say is not spoken at all", async (ui) => {
   await open(ui);
   speech.setBaseUrl(NOWHERE);
+  await speech.setEnabled(true);
   session.ingest(init);
   await ui.settle();
   ui.ReadAloudButton.click();
@@ -135,6 +144,7 @@ testUI(App, "a reply with nothing to say is not spoken at all", async (ui) => {
 testUI(App, "switching off stops it and offers to start again", async (ui) => {
   await open(ui);
   speech.setBaseUrl(NOWHERE);
+  await speech.setEnabled(true);
   session.ingest(init);
   await ui.settle();
   ui.ReadAloudButton.click();

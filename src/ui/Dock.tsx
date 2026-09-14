@@ -17,7 +17,7 @@
  * and would wait forever — would be to click through every project in the list.
  */
 import { go } from "./go.ts";
-import { focusComposerSoon } from "./commands.ts";
+import { focusComposerSoon, newChat, openConsole } from "./commands.ts";
 import { useLocal, type VNode } from "aio/air";
 import {
   activePane,
@@ -79,34 +79,6 @@ function PaneList(props: { project: Project; active: boolean }): VNode {
   const showing = props.active ? activePane(p.id)?.id ?? "" : "";
   const sessions = panes.filter((x) => x.kind === "session").length;
 
-  /**
-   * Make a shell, with an optional command to run in it.
-   *
-   * Order matters, and it took a wrong one to see why: the shell is made
-   * FIRST, and only then does a pane point at it. Adding the pane is what
-   * makes it the active one, and a Console page that is already open reacts to
-   * that at once by starting a shell for it — a plain shell, with no command,
-   * because the launcher had not got that far yet. The dock's own start then
-   * killed that one and began again, so `deno task start` never ran and the
-   * tab read "exited 0".
-   *
-   * The id is minted here so the terminal can exist before anything points at
-   * it. Two calls rather than one cross-cell method: the dock owns the pane,
-   * the console cell owns the terminal, and the id is what joins them.
-   */
-  const openConsole = async (title = "", command = "") => {
-    const id = crypto.randomUUID();
-    // Empty strings, not `undefined`. These arguments cross a JSON wire, where
-    // `undefined` silently becomes "absent" or `null` — the server then
-    // receives something other than what was passed, which the runtime warns
-    // about and which is a real difference the moment anything reads it back.
-    await consoleCell.open(id, p.id, { title, command });
-    const pane = await workspace.addPane(p.id, "console", id, command);
-    if (!pane) return;
-    if (title !== "") await workspace.renamePane(id, title);
-    go("/console");
-  };
-
   return (
     <div class="panes">
       {panes.map((pane) => {
@@ -131,7 +103,7 @@ function PaneList(props: { project: Project; active: boolean }): VNode {
                 }
                 go("/", true);
                 // Clicking a conversation is asking to talk to it, whether the
-                // click came from the mouse or from Ctrl+arrow.
+                // click came from the mouse or from Alt+arrow.
                 focusComposerSoon();
               }}
             >
@@ -211,10 +183,7 @@ function PaneList(props: { project: Project; active: boolean }): VNode {
           class="pane__add"
           aria-label="New conversation"
           title="Another conversation in this project — its own session, its own context"
-          onClick={() => {
-            void workspace.addPane(p.id, "session");
-            go("/", true);
-          }}
+          onClick={() => void newChat(p.id)}
         >
           {IconChat({ size: 11 })}
           <span class="pane__plus">+</span>
@@ -224,7 +193,7 @@ function PaneList(props: { project: Project; active: boolean }): VNode {
           class="pane__add"
           aria-label="New console"
           title="Another shell in this project's directory"
-          onClick={() => openConsole()}
+          onClick={() => void openConsole(p.id)}
         >
           {IconTerminal({ size: 11 })}
           <span class="pane__plus">+</span>
@@ -241,7 +210,8 @@ function PaneList(props: { project: Project; active: boolean }): VNode {
             class="pane__add pane__add--run"
             aria-label="Start in developer mode"
             title={`Run ${p.launch.dev.command} in a new console (from ${p.launch.dev.from})`}
-            onClick={() => openConsole("dev", p.launch.dev?.command ?? "")}
+            onClick={() =>
+              void openConsole(p.id, "dev", p.launch.dev?.command ?? "")}
           >
             {IconPlay({ size: 11 })}
             <span class="pane__runlabel">dev</span>
@@ -254,7 +224,11 @@ function PaneList(props: { project: Project; active: boolean }): VNode {
             aria-label="Start in production mode"
             title={`Run ${p.launch.prod.command} in a new console (from ${p.launch.prod.from})`}
             onClick={() =>
-              openConsole("production", p.launch.prod?.command ?? "")}
+              void openConsole(
+                p.id,
+                "production",
+                p.launch.prod?.command ?? "",
+              )}
           >
             {IconPlay({ size: 11 })}
             <span class="pane__runlabel">prod</span>
@@ -418,25 +392,6 @@ function ProjectTab(
           type="button"
           class="ptab__main"
           aria-pressed={props.active}
-          // Ctrl+Shift+Up and Ctrl+Shift+Down reorder from the keyboard. Drag
-          // is the obvious gesture and the one nobody can perform without a
-          // pointer.
-          //
-          // Ctrl because this is the left panel, and Shift because plain
-          // Ctrl+arrows already walk it: reordering is the same gesture as
-          // moving, with the row brought along.
-          onKeyDown={(e: KeyboardEvent) => {
-            const chord = (e.ctrlKey || e.metaKey) && e.shiftKey;
-            if (!chord || (e.key !== "ArrowUp" && e.key !== "ArrowDown")) {
-              return;
-            }
-            e.preventDefault();
-            e.stopPropagation();
-            workspace.moveProject(
-              p.id,
-              props.index + (e.key === "ArrowDown" ? 1 : -1),
-            );
-          }}
           // The name alone, plus the one qualifier that changes what the tab
           // *means*. Announcing the branch and path here would make every tab a
           // sentence to listen through, and both are already in the title.

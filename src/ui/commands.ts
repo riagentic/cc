@@ -14,9 +14,15 @@
  * tells the reader something is possible somewhere; leaving it out tells them
  * what they can do now.
  */
-import { go } from "./go.ts";
+import { atRoute, go } from "./go.ts";
+import type { Pane } from "../type/claude.ts";
 import { type VNode } from "aio/air";
-import { activePane, panesOf, workspace } from "../cell/workspace.ts";
+import {
+  activePane,
+  activeSessionKey,
+  panesOf,
+  workspace,
+} from "../cell/workspace.ts";
 import { consoleCell } from "../cell/console.ts";
 import { session, view } from "../cell/session.ts";
 import { activeIsLocal, local, localChat } from "../cell/local.ts";
@@ -25,7 +31,6 @@ import { speech, speechOn, speechReady } from "../cell/speech.ts";
 import { startReading, stopReading } from "./spoken.ts";
 import { showToast } from "./toast.tsx";
 import { overlayOpen } from "./overlays.tsx";
-import { openFind } from "./find.tsx";
 import {
   IconActivity,
   IconAgents,
@@ -41,12 +46,14 @@ import {
   IconPlus,
   IconPower,
   IconRefresh,
+  IconSearch,
   IconSettings,
   IconSpark,
   IconTasks,
   IconTrash,
   IconTree,
 } from "./icons.tsx";
+import { openFind } from "./find.tsx";
 
 /** One thing the app can be asked to do. */
 export type Command = {
@@ -221,13 +228,58 @@ export function stepPane(by: number): void {
   const next = from(rows, rows.findIndex((pane) => pane.id === showing), by);
   if (!next) return;
   workspace.selectPane(next.id);
-  if (next.kind === "console") {
+  showPane(next);
+}
+
+/** Put a pane on screen. A shell is arrived at to watch; a conversation is
+ *  arrived at to talk to, so it gets the cursor. */
+function showPane(pane: Pane): void {
+  if (pane.kind === "console") {
     go("/console");
     return;
   }
   go("/", true);
-  // A shell is arrived at to watch; a conversation is arrived at to talk to.
   focusComposerSoon();
+}
+
+/** Alt N: another conversation in the project you are in, cursor in its box. */
+export async function newChat(projectId = workspace.activeId): Promise<void> {
+  if (!await workspace.addPane(projectId, "session")) return;
+  go("/", true);
+  focusComposerSoon();
+}
+
+/**
+ * Alt C: make a shell, with an optional command to run in it.
+ *
+ * Order matters, and it took a wrong one to see why: the shell is made
+ * FIRST, and only then does a pane point at it. Adding the pane is what
+ * makes it the active one, and a Console page that is already open reacts to
+ * that at once by starting a shell for it — a plain shell, with no command,
+ * because the launcher had not got that far yet. The dock's own start then
+ * killed that one and began again, so `deno task start` never ran and the
+ * tab read "exited 0".
+ *
+ * The id is minted here so the terminal can exist before anything points at
+ * it. Two calls rather than one cross-cell method: the dock owns the pane,
+ * the console cell owns the terminal, and the id is what joins them.
+ */
+export async function openConsole(
+  projectId = workspace.activeId,
+  title = "",
+  command = "",
+): Promise<void> {
+  if (!workspace.projects.some((p) => p.id === projectId)) return;
+  const id = crypto.randomUUID();
+  // Empty strings, not `undefined`. These arguments cross a JSON wire, where
+  // `undefined` silently becomes "absent" or `null` — the server then
+  // receives something other than what was passed, which the runtime warns
+  // about and which is a real difference the moment anything reads it back.
+  await consoleCell.open(id, projectId, { title, command });
+  const pane = await workspace.addPane(projectId, "console", id, command);
+  if (!pane) return;
+  if (title !== "") await workspace.renamePane(id, title);
+  go("/console");
 }
 
 /**
@@ -237,30 +289,84 @@ export function stepPane(by: number): void {
  * is let go. The last conversation in a project stays — `removePane` refuses
  * it, because a Chat page with nothing to show has no way back.
  */
-export function closePane(): void {
-  const pane = activePane(workspace.activeId);
+export async function closePane(): Promise<void> {
+  const pid = workspace.activeId;
+  const pane = activePane(pid);
   if (!pane) return;
+  // Asked before the close: afterwards the route says nothing about the pane.
+  const onProject = atRoute(pane.kind === "console" ? "/console" : "/", true);
   if (pane.kind === "console") void consoleCell.remove(pane.id);
-  workspace.removePane(pane.id);
+  // Awaited: a cell write lands a dispatch later, and reading the active pane
+  // before it does would find the one just closed.
+  await workspace.removePane(pane.id);
+  // On the Project tab, show whatever took its place — a Console page left
+  // over a conversation lights no card at all. Anywhere else, stay put.
+  const next = activePane(pid);
+  if (onProject && next && next.id !== pane.id) showPane(next);
 }
 
 /**
- * Move to the next page in the RIGHT panel — the rail.
+ * Which rail card a route lights up.
  *
- * Read off the DOM rather than from a list of routes, and deliberately: the
- * rail hides cards that do not apply — a local project has no sub-agents, a
- * Claude one has no engine settings — so a list written here would drift from
- * what is on screen, and stepping would land on a page that is not offered.
- * The cards themselves are the list.
+ * The first card is Chat or Console — whichever the dock is showing — so the
+ * two paths are one tab. Counting them apart would make "back" from Settings
+ * land on a shell the dock has since moved away from.
  */
-export function stepRail(by: number): void {
-  if (typeof document === "undefined") return;
-  const cards = [...document.querySelectorAll<HTMLAnchorElement>(
-    ".rail .navcard",
-  )];
-  const at = cards.findIndex((c) => c.classList.contains("active"));
-  const to = from(cards, at, by)?.getAttribute("href");
-  if (to) go(to);
+export const railTab = (path: string): string => {
+  const clean = path.replace(/(.)\/$/, "$1");
+  return clean === "/console" ? "/" : clean;
+};
+
+/** The tab on screen, and the one before it. */
+export type TabTrail = { current: string; previous: string };
+
+/**
+ * The trail after arriving at `path`.
+ *
+ * Staying on the same tab changes nothing — a re-render, or the dock moving
+ * between two chats, is not a new tab, and counting it would make "back" go
+ * nowhere.
+ */
+export const arrive = (trail: TabTrail, path: string): TabTrail => {
+  const tab = railTab(path);
+  return tab === trail.current
+    ? trail
+    : { current: tab, previous: trail.current };
+};
+
+/* Module-local and written during render, not a cell: a cell write lands a
+   dispatch later, and Alt G pressed right after a navigation would read the
+   stale trail. */
+let trail: TabTrail = { current: "", previous: "" };
+
+/** Tell the trail where the router is. Called by the shell on every render. */
+export function noteRoute(path: string): void {
+  trail = arrive(trail, path);
+}
+
+/**
+ * Alt G: back to the tab you were on before this one. Pressed twice, it comes
+ * back again — the same toggle as switching between two windows.
+ */
+export function backToTab(): void {
+  const to = trail.previous;
+  if (to === "") return;
+  // A Claude-only page after a switch to a local engine: its card is gone,
+  // and the router would show the local chat under the wrong name.
+  if (activeIsLocal() && PAGES.some((p) => p.to === to && p.claudeOnly)) {
+    return;
+  }
+  if (to !== "/") {
+    go(to);
+    return;
+  }
+  // The Project tab: whichever pane the dock is showing now.
+  if (activePane(workspace.activeId)?.kind === "console") {
+    go("/console");
+    return;
+  }
+  go("/", true);
+  focusComposerSoon();
 }
 
 /**
@@ -344,7 +450,6 @@ export function commands(): Command[] {
         id: "project:next",
         group: "Switch to",
         label: "Next project",
-        keys: "Ctrl ]",
         icon: IconFolder({ size: 15 }),
         run: () => stepProject(1),
       },
@@ -352,14 +457,13 @@ export function commands(): Command[] {
         id: "project:prev",
         group: "Switch to",
         label: "Previous project",
-        keys: "Ctrl [",
         icon: IconFolder({ size: 15 }),
         run: () => stepProject(-1),
       },
     );
   }
 
-  workspace.projects.forEach((p, i) => {
+  workspace.projects.forEach((p) => {
     if (p.id === active) return;
     out.push({
       id: `project:${p.id}`,
@@ -367,7 +471,6 @@ export function commands(): Command[] {
       label: p.name,
       hint: p.missing ? "Folder is gone" : p.path,
       icon: IconFolder({ size: 15 }),
-      keys: i < 9 ? `Ctrl ${i + 1}` : undefined,
       alias: p.path,
       run: () => workspace.select(p.id),
     });
@@ -422,7 +525,6 @@ export function commands(): Command[] {
         group: "Session",
         label: "Interrupt the turn",
         hint: "Stops what it is doing now",
-        keys: "Esc",
         icon: IconPower({ size: 15 }),
         run: () => void session.interrupt(),
       });
@@ -465,10 +567,11 @@ export function commands(): Command[] {
       danger: true,
       alias: "empty wipe reset",
       run: () => {
-        void local.clear();
+        const key = activeSessionKey();
+        void local.clear(key);
         showToast({
           text: "Conversation cleared.",
-          action: { label: "Undo", run: () => void local.undoClear() },
+          action: { label: "Undo", run: () => void local.undoClear(key) },
         });
       },
     });
@@ -536,6 +639,17 @@ export function commands(): Command[] {
     }
   }
 
+  /* ── this page ─────────────────────────────────────────────────────── */
+  out.push({
+    id: "view:find",
+    group: "Appearance",
+    label: "Find in this conversation",
+    hint: "Matches highlighted, Enter walks them",
+    icon: IconSearch({ size: 15 }),
+    alias: "search find text",
+    run: () => openFind(),
+  });
+
   /* ── appearance ─────────────────────────────────────────────────────── */
   out.push(
     {
@@ -543,7 +657,6 @@ export function commands(): Command[] {
       group: "Appearance",
       label: `Theme: ${workspace.theme}`,
       hint: `Switch to ${NEXT_THEME[workspace.theme]}`,
-      keys: "Ctrl Shift L",
       alias: "dark light colour scheme",
       run: () => workspace.setTheme(NEXT_THEME[workspace.theme]),
     },
@@ -552,7 +665,6 @@ export function commands(): Command[] {
       group: "Appearance",
       label: "Zoom in",
       hint: `Now ${Math.round(prefs.zoom * 100)}%`,
-      keys: "Ctrl +",
       alias: "bigger font size larger text",
       run: () => prefs.zoomBy(ZOOM_STEP),
     },
@@ -561,7 +673,6 @@ export function commands(): Command[] {
       group: "Appearance",
       label: "Zoom out",
       hint: `Now ${Math.round(prefs.zoom * 100)}%`,
-      keys: "Ctrl -",
       alias: "smaller font size",
       run: () => prefs.zoomBy(-ZOOM_STEP),
     },
@@ -569,7 +680,6 @@ export function commands(): Command[] {
       id: "view:zoom-reset",
       group: "Appearance",
       label: "Reset zoom to 100%",
-      keys: "Ctrl 0",
       alias: "actual size",
       run: () => prefs.resetZoom(),
     },
@@ -587,7 +697,6 @@ export function commands(): Command[] {
       group: "Appearance",
       label: prefs.dockCollapsed ? "Show project names" : "Collapse projects",
       hint: "The left panel",
-      keys: "Ctrl B",
       alias: "sidebar hide dock",
       run: () => prefs.toggleDock(),
     },
@@ -596,7 +705,6 @@ export function commands(): Command[] {
       group: "Appearance",
       label: prefs.railCollapsed ? "Show section names" : "Collapse sections",
       hint: "The right panel",
-      keys: "Ctrl Shift B",
       alias: "sidebar hide rail",
       run: () => prefs.toggleRail(),
     },
@@ -656,7 +764,7 @@ export type Binding = {
     alt?: boolean;
     ignoreInInput?: boolean;
   };
-  /** How the chord is written in help, e.g. "Ctrl K". */
+  /** How the chord is written in help, e.g. "Alt S". */
   keys: string;
   /** What it does, in the imperative. Shown in the shortcuts panel. */
   label: string;
@@ -668,7 +776,7 @@ export type Binding = {
    * A focused terminal eats every keystroke — that is what a terminal is for,
    * and `vim` needs `Escape` far more than this app does. But moving around
    * the app is not typing into a shell, and having to click away before
-   * `Ctrl ↓` works is a worse trade than losing one chord inside the shell.
+   * `Alt ↓` works is a worse trade than losing one chord inside the shell.
    *
    * So each binding says which side of that line it is on, and the console
    * declines exactly the ones marked here — see `worksInTerminal`. The rule
@@ -687,159 +795,27 @@ export type Binding = {
  * something the shell owns rather than something in a cell.
  */
 export function globalBindings(
-  ui: { openPalette: () => void; openHelp: () => void },
+  _ui: { openPalette: () => void; openHelp: () => void } = {
+    openPalette: () => {},
+    openHelp: () => {},
+  },
 ): Binding[] {
-  const list: Binding[] = [
+  // This list and no more, by request — none of them on Ctrl, which belongs
+  // to the page and the shell. Alt ↑/↓ walk the conversations and shells,
+  // Alt PgUp/PgDn the projects, and Alt N / C / W make and close panes. The
+  // right panel gets two jumps instead of a walk: Alt S to Settings and Alt G
+  // back to the tab before. Escape brings you back to the conversation, and a
+  // second one stops its turn. Push to talk is its own listener, in `pushToTalk.ts`, because it
+  // acts on key UP as well.
+  //
+  // `mod: false` on each Alt chord: without it Ctrl Alt — which is AltGr on
+  // many layouts, and how people type characters — would fire them too.
+  return [
     {
-      key: "k",
-      chord: { mod: true, ignoreInInput: false },
-      keys: "Ctrl K",
-      group: "App",
-      everywhere: true,
-      label: "Command palette — every action, by name",
-      run: (e) => {
-        e.preventDefault();
-        ui.openPalette();
-      },
-    },
-    {
-      key: "?",
-      chord: {},
-      keys: "?",
-      group: "App",
-      label: "Keyboard shortcuts",
-      run: (e) => {
-        e.preventDefault();
-        ui.openHelp();
-      },
-    },
-    {
-      key: "/",
-      chord: {},
-      keys: "/",
-      group: "App",
-      label: "Jump to the filter box on this page",
-      run: (e) => {
-        // The filter belonging to the PAGE, not the one in the project dock —
-        // which comes first in the DOM and would otherwise win every time.
-        const box =
-          document.querySelector<HTMLInputElement>(".main .input--search") ??
-            document.querySelector<HTMLInputElement>(".input--search");
-        if (!box) return;
-        e.preventDefault();
-        box.focus();
-        box.select();
-      },
-    },
-    {
-      key: "Escape",
-      chord: { ignoreInInput: false },
-      keys: "Esc",
-      group: "Session",
-      label: "Interrupt the turn that is running",
-      run: (e) => {
-        // Three things already own Escape: an overlay closes with it, the
-        // composer uses it to abandon a recalled turn, and a menu closes with
-        // it. Each of those calls preventDefault, so this fires only when
-        // nothing nearer to the user wanted it.
-        if (e.defaultPrevented || overlayOpen()) return;
-        if (activeIsLocal()) {
-          if (localChat(workspace.activeId).status !== "working") return;
-          void local.stop();
-        } else {
-          if (view().status !== "working") return;
-          void session.interrupt();
-        }
-      },
-    },
-    {
-      key: "f",
-      chord: { mod: true, ignoreInInput: false },
-      keys: "Ctrl F",
-      group: "App",
-      label: "Find in this conversation",
-      run: (e) => {
-        e.preventDefault();
-        openFind();
-      },
-    },
-    {
-      key: "i",
-      chord: { mod: true, ignoreInInput: false },
-      keys: "Ctrl I",
-      group: "App",
-      label: "Put the cursor in the message box",
-      run: (e) => {
-        if (focusComposer()) e.preventDefault();
-      },
-    },
-    {
-      key: "b",
-      chord: { mod: true, shift: false, ignoreInInput: false },
-      keys: "Ctrl B",
-      group: "View",
-      label: "Collapse or show the project panel",
-      run: (e) => {
-        e.preventDefault();
-        prefs.toggleDock();
-      },
-    },
-    {
-      key: "b",
-      chord: { mod: true, shift: true, ignoreInInput: false },
-      keys: "Ctrl Shift B",
-      group: "View",
-      label: "Collapse or show the section panel",
-      run: (e) => {
-        e.preventDefault();
-        prefs.toggleRail();
-      },
-    },
-    {
-      key: "l",
-      chord: { mod: true, shift: true, ignoreInInput: false },
-      keys: "Ctrl Shift L",
-      group: "View",
-      label: "Cycle theme: system, dark, light",
-      run: (e) => {
-        e.preventDefault();
-        workspace.setTheme(NEXT_THEME[workspace.theme]);
-      },
-    },
-    {
-      // Deliberately NOT `everywhere`. `Ctrl [` IS `Escape` — the same byte,
-      // 0x1b — so taking it from a focused terminal would take Escape from
-      // `vim`, and `Ctrl ]` is how `telnet` and `gdb` are interrupted. The
-      // arrow versions of these two do the same job and cost the shell
-      // nothing it needs as badly.
-      key: "]",
-      chord: { mod: true, ignoreInInput: false },
-      keys: "Ctrl ]",
-      group: "Projects",
-      label: "Next project",
-      run: (e) => {
-        e.preventDefault();
-        stepProject(1);
-      },
-    },
-    {
-      key: "[",
-      chord: { mod: true, ignoreInInput: false },
-      keys: "Ctrl [",
-      group: "Projects",
-      label: "Previous project",
-      run: (e) => {
-        e.preventDefault();
-        stepProject(-1);
-      },
-    },
-    {
-      // Ctrl for the left panel, Alt for the right. One rule, so a chord you
-      // have not learned is still guessable from where you are looking.
       key: "ArrowDown",
-      chord: { mod: true, ignoreInInput: false },
-      keys: "Ctrl ↓",
-      group: "Projects",
+      chord: { alt: true, mod: false, ignoreInInput: false },
+      keys: "Alt ↓",
+      group: "Move",
       everywhere: true,
       label: "Next conversation or shell (left panel)",
       run: (e) => {
@@ -849,9 +825,9 @@ export function globalBindings(
     },
     {
       key: "ArrowUp",
-      chord: { mod: true, ignoreInInput: false },
-      keys: "Ctrl ↑",
-      group: "Projects",
+      chord: { alt: true, mod: false, ignoreInInput: false },
+      keys: "Alt ↑",
+      group: "Move",
       everywhere: true,
       label: "Previous conversation or shell (left panel)",
       run: (e) => {
@@ -860,135 +836,134 @@ export function globalBindings(
       },
     },
     {
-      // Deliberately NOT `everywhere`. `Ctrl W` is readline's delete-the-last-
-      // word, used constantly in a shell, and a terminal you are typing in has
-      // its own way out that this app has no business overriding: `exit`, or
-      // `Ctrl D`, which now closes the tab too.
-      key: "w",
-      chord: { mod: true, ignoreInInput: false },
-      keys: "Ctrl W",
-      group: "Projects",
-      label: "Close this conversation or shell",
+      key: "s",
+      chord: { alt: true, mod: false, ignoreInInput: false },
+      keys: "Alt S",
+      group: "Move",
+      everywhere: true,
+      label: "Go to Settings (right panel)",
       run: (e) => {
-        // Electron would close the WINDOW otherwise, which is a considerably
-        // larger thing than the tab that was asked for.
         e.preventDefault();
-        closePane();
+        go("/settings");
       },
     },
     {
-      // Down and up walk every row; left and right skip a whole project. Both
-      // rotate, so the end of the list is never a dead end.
-      key: "ArrowRight",
-      chord: { mod: true, ignoreInInput: false },
-      keys: "Ctrl →",
-      group: "Projects",
+      key: "g",
+      chord: { alt: true, mod: false, ignoreInInput: false },
+      keys: "Alt G",
+      group: "Move",
       everywhere: true,
-      label: "Next project (left panel)",
+      label: "Back to the tab before (right panel)",
+      run: (e) => {
+        e.preventDefault();
+        backToTab();
+      },
+    },
+    {
+      key: "PageDown",
+      chord: { alt: true, mod: false, ignoreInInput: false },
+      keys: "Alt PgDn",
+      group: "Move",
+      everywhere: true,
+      label: "Next project tab (left panel)",
       run: (e) => {
         e.preventDefault();
         stepProject(1);
       },
     },
     {
-      key: "ArrowLeft",
-      chord: { mod: true, ignoreInInput: false },
-      keys: "Ctrl ←",
-      group: "Projects",
+      key: "PageUp",
+      chord: { alt: true, mod: false, ignoreInInput: false },
+      keys: "Alt PgUp",
+      group: "Move",
       everywhere: true,
-      label: "Previous project (left panel)",
+      label: "Previous project tab (left panel)",
       run: (e) => {
         e.preventDefault();
         stepProject(-1);
       },
     },
     {
-      key: "ArrowDown",
-      chord: { alt: true, ignoreInInput: false },
-      keys: "Alt ↓",
-      group: "App",
+      key: "n",
+      chord: { alt: true, mod: false, ignoreInInput: false },
+      keys: "Alt N",
+      group: "Panes",
       everywhere: true,
-      label: "Next page (right panel)",
+      label: "New conversation in this project",
       run: (e) => {
         e.preventDefault();
-        stepRail(1);
+        void newChat();
       },
     },
     {
-      key: "ArrowUp",
-      chord: { alt: true, ignoreInInput: false },
-      keys: "Alt ↑",
-      group: "App",
+      key: "c",
+      chord: { alt: true, mod: false, ignoreInInput: false },
+      keys: "Alt C",
+      group: "Panes",
       everywhere: true,
-      label: "Previous page (right panel)",
+      label: "New console in this project",
       run: (e) => {
         e.preventDefault();
-        stepRail(-1);
+        void openConsole();
       },
     },
     {
-      key: "0",
-      chord: { mod: true, ignoreInInput: false },
-      keys: "Ctrl 0",
-      group: "View",
-      label: "Reset zoom to 100%",
+      key: "w",
+      chord: { alt: true, mod: false, ignoreInInput: false },
+      keys: "Alt W",
+      group: "Panes",
+      everywhere: true,
+      label: "Close this conversation or console",
       run: (e) => {
         e.preventDefault();
-        prefs.resetZoom();
+        void closePane();
+      },
+    },
+    {
+      // Deliberately NOT `everywhere`: in a terminal, Escape belongs to the
+      // program running there (`vim` cannot live without it).
+      key: "Escape",
+      chord: { ignoreInInput: false },
+      keys: "Esc",
+      group: "Move",
+      label: "Back to the conversation — pressed again, stop its turn",
+      run: (e) => {
+        // An open menu, dialog or overlay closes with Escape first — each of
+        // those calls preventDefault — and only a second press comes here.
+        if (e.defaultPrevented || overlayOpen()) return;
+        backToChat();
       },
     },
   ];
+}
 
-  // Zoom. Four keys, not two: the plus on the main row arrives as "=" without
-  // shift and "+" with it, and the numeric keypad sends its own. A shortcut
-  // that works on one keyboard and not another is the kind of detail people
-  // give up on rather than report.
-  for (const key of ["=", "+"]) {
-    list.push({
-      key,
-      chord: { mod: true, ignoreInInput: false },
-      keys: "Ctrl +",
-      group: "View",
-      label: "Zoom in",
-      run: (e) => {
-        e.preventDefault();
-        prefs.zoomBy(ZOOM_STEP);
-      },
-    });
+/**
+ * Escape: back to the conversation you were in, with the cursor in its box.
+ *
+ * From a shell tab, the project's conversation it sits beside; from another
+ * page, the chat page. Already there, it stops the turn that is running — the
+ * same as the Stop button, so the session and the transcript stay — and puts
+ * the cursor back. So one Escape is "let me keep typing", and the next is
+ * "stop, I want to say something else".
+ */
+export function backToChat(): void {
+  const pid = workspace.activeId;
+  const panes = panesOf(pid);
+  // `activePane`, not a lookup of `workspace.activePane[pid]`: a project whose
+  // panes were never written has a conversation that no id points at.
+  const current = activePane(pid);
+  if (current?.kind === "session" && atRoute("/", true)) {
+    if (activeIsLocal()) void local.stop(activeSessionKey());
+    else void session.interrupt();
+    focusComposer();
+    return;
   }
-  for (const key of ["-", "_"]) {
-    list.push({
-      key,
-      chord: { mod: true, ignoreInInput: false },
-      keys: "Ctrl -",
-      group: "View",
-      label: "Zoom out",
-      run: (e) => {
-        e.preventDefault();
-        prefs.zoomBy(-ZOOM_STEP);
-      },
-    });
+  if (current && current.kind !== "session") {
+    const chat = panes.filter((p) => p.kind === "session").pop();
+    if (chat) workspace.selectPane(chat.id);
   }
-
-  // Project switching. Nine, because the tenth would need two keys and the
-  // list is a click away.
-  for (let n = 1; n <= 9; n++) {
-    list.push({
-      key: String(n),
-      chord: { mod: true, ignoreInInput: false },
-      keys: "Ctrl " + n,
-      group: "Projects",
-      label: n === 1 ? "Switch to project 1 … 9" : "",
-      run: () => {
-        const project = workspace.projects[n - 1];
-        // Nothing at that position is a no-op, not a wrap-around: a shortcut
-        // that lands somewhere unexpected is worse than one that does nothing.
-        if (project) workspace.select(project.id);
-      },
-    });
-  }
-
-  return list;
+  go("/", true);
+  focusComposerSoon();
 }
 
 /**

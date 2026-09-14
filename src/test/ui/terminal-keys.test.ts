@@ -21,13 +21,39 @@ const press = (
   }) as KeyboardEvent;
 
 Deno.test("moving around the app works from inside a shell", () => {
-  assertEquals(worksInTerminal(press("ArrowDown", { ctrl: true })), true);
-  assertEquals(worksInTerminal(press("ArrowUp", { ctrl: true })), true);
-  assertEquals(worksInTerminal(press("ArrowRight", { ctrl: true })), true);
-  assertEquals(worksInTerminal(press("ArrowLeft", { ctrl: true })), true);
-  assertEquals(worksInTerminal(press("ArrowDown", { alt: true })), true);
-  assertEquals(worksInTerminal(press("ArrowUp", { alt: true })), true);
-  assertEquals(worksInTerminal(press("k", { ctrl: true })), true);
+  for (
+    const key of [
+      "ArrowDown",
+      "ArrowUp",
+      "PageDown",
+      "PageUp",
+      "s",
+      "g",
+      "n",
+      "c",
+      "w",
+    ]
+  ) assertEquals(worksInTerminal(press(key, { alt: true })), true, key);
+});
+
+Deno.test("no shortcut is on Ctrl any more", () => {
+  // Removed by request: the palette, find, zoom, project numbers, Ctrl W,
+  // Ctrl ←/→, and Ctrl ↑/↓ — the left panel moved to Alt. Alt ←/→ were never
+  // taken. None of them may be claimed from a shell either.
+  for (
+    const [key, mods] of [
+      ["ArrowDown", { ctrl: true }],
+      ["ArrowUp", { ctrl: true }],
+      ["ArrowRight", { ctrl: true }],
+      ["ArrowLeft", { ctrl: true }],
+      ["k", { ctrl: true }],
+      ["w", { ctrl: true }],
+      ["f", { ctrl: true }],
+      ["s", { ctrl: true }],
+      ["ArrowLeft", { alt: true }],
+      ["ArrowRight", { alt: true }],
+    ] as const
+  ) assertEquals(worksInTerminal(press(key, mods)), false, key);
 });
 
 Deno.test("the shell keeps what the shell needs", () => {
@@ -54,4 +80,9 @@ Deno.test("the modifiers have to match exactly", () => {
     false,
   );
   assertEquals(worksInTerminal(press("k")), false);
+  // Ctrl Alt is AltGr on many layouts — how people type characters.
+  assertEquals(
+    worksInTerminal(press("s", { ctrl: true, alt: true })),
+    false,
+  );
 });

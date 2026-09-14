@@ -6,6 +6,12 @@
  * comes back in another, so a conversation you are not looking at still has
  * two sides to it. Off until you switch it on, every session — an app that
  * starts talking on its own is one nobody switches on twice.
+ *
+ * Two switches, and they are different questions. `config.enabled` is whether
+ * this app does speech AT ALL — off by default, and while it is off nothing
+ * here opens a connection to anything, so a voice model that would be loaded
+ * on first use is never loaded and the memory stays yours. `status` is whether
+ * the speaker is running right now, which is a per-session answer.
  */
 import { cell, log } from "aio";
 import type { Speaker, SpeechConfig, SpeechStatus } from "../type/speech.ts";
@@ -131,6 +137,7 @@ export const speech = cell("speech", {
     busy: 0,
     error: null as string | null,
     config: {
+      enabled: false,
       baseUrl: "",
       voiceOut: DEFAULT_OUT,
       voiceIn: DEFAULT_IN,
@@ -160,7 +167,10 @@ export const speech = cell("speech", {
      * Called once from the shell.
      */
     wake(s: SpeechState) {
-      s.status = s.config.onAtStart && s.config.baseUrl !== "" ? "idle" : "off";
+      s.status = s.config.enabled && s.config.onAtStart &&
+          s.config.baseUrl !== ""
+        ? "idle"
+        : "off";
       s.busy = 0;
       s.error = null;
     },
@@ -176,6 +186,10 @@ export const speech = cell("speech", {
      * watching", and everything on screen at that moment is backlog.
      */
     on(s: SpeechState) {
+      if (!s.config.enabled) {
+        s.status = "off";
+        return;
+      }
       if (s.config.baseUrl === "") {
         s.status = "error";
         s.error = "No speech server set up yet — see Settings.";
@@ -223,7 +237,7 @@ export const speech = cell("speech", {
      */
     async say(s: SpeechState, text: string, who: Speaker, id = "") {
       // Read BEFORE the first await, like every other orchestrator here.
-      if (s.status === "off") return;
+      if (s.status === "off" || !s.config.enabled) return;
       const cfg = { ...s.config };
       const clean = typeof text === "string" ? text.trim() : "";
       if (clean === "" || cfg.baseUrl === "") return;
@@ -317,6 +331,36 @@ export const speech = cell("speech", {
     },
 
     /**
+     * Turn the whole feature on or off.
+     *
+     * Switching it off stops the speakers mid-word and forgets what the server
+     * said it could do: the voice list belongs to a server this app is no
+     * longer talking to, and showing yesterday's list beside a switch that is
+     * off is a claim about a machine nobody is asking any more. The addresses
+     * and the chosen voices stay, so switching it back on costs one click.
+     */
+    async setEnabled(s: SpeechState, on: boolean) {
+      const want = on === true;
+      if (s.config.enabled === want) return;
+      s.config.enabled = want;
+      if (want) {
+        s.error = null;
+        log.info("speech", "voice output enabled");
+        return;
+      }
+      s.status = "off";
+      s.saying = "";
+      s.busy = 0;
+      s.error = null;
+      s.voices = [];
+      s.reachable = false;
+      s.said = [];
+      log.info("speech", "voice output disabled — nothing will be contacted");
+      const io = await import("./speech.server.ts");
+      io.silence();
+    },
+
+    /**
      * Say one line in a voice, whether or not the speaker is on.
      *
      * Choosing a voice you cannot hear is choosing from a list of names, and
@@ -325,6 +369,7 @@ export const speech = cell("speech", {
      */
     async preview(s: SpeechState, id: string) {
       const cfg = { ...s.config };
+      if (!cfg.enabled) return;
       if (cfg.baseUrl === "" || typeof id !== "string" || id === "") return;
       const io = await import("./speech.server.ts");
       io.silence();
@@ -344,6 +389,11 @@ export const speech = cell("speech", {
     /** Look for a speech server, adopt it if one answers, and learn its
      *  voices while we are there. */
     async find(s: SpeechState) {
+      // The whole point of the switch: with it off, nothing here knocks on a
+      // speech server. A server that loads its model when first asked keeps
+      // that memory free, and one that is not running is not started by a
+      // panel somebody happened to open.
+      if (!s.config.enabled) return;
       const url = s.config.baseUrl || DEFAULT_SPEECH_URL;
       const io = await import("./speech.server.ts");
       const ok = await io.probe(url);
@@ -386,8 +436,10 @@ export const speech = cell("speech", {
   },
 });
 
-/** Is reading aloud set up at all? Everything in the UI hides behind this. */
-export const speechReady = (): boolean => speech.config.baseUrl !== "";
+/** Is reading aloud switched on AND set up? Everything in the UI hides behind
+ *  this — the speaker button, its palette commands, the whole of it. */
+export const speechReady = (): boolean =>
+  speech.config.enabled && speech.config.baseUrl !== "";
 
 /** Is the speaker switched on right now? */
 export const speechOn = (): boolean => speech.status !== "off";

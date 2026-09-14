@@ -136,14 +136,19 @@ function ConfigPage(
 
 /** Skills and commands share a shape exactly, so they share a renderer. */
 function DefinitionList(
-  props: { entries: Entry[]; icon: VNode; use?: (name: string) => void },
+  props: { entries: Entry[]; icon: () => VNode; use?: (name: string) => void },
 ): VNode {
   return (
     <Panel flush title={`${props.entries.length} shown`}>
       <div class="rowlist">
         {props.entries.map((e) => (
           <div key={listKey(`${e.scope}:${e.name}`)} class="rowitem">
-            <span class="rowitem__icon">{props.icon}</span>
+            {
+              /* Built per row, never shared. One element object placed in many
+                rows is the same node in several slots at once, and the diff
+                then writes a row's icon into its neighbour. */
+            }
+            <span class="rowitem__icon">{props.icon()}</span>
             <span class="truncate">
               <span class="rowitem__title">{e.name}</span>
               <br />
@@ -221,7 +226,7 @@ export function SkillsPage(): VNode {
       query={query}
       onQuery={setQuery}
     >
-      <DefinitionList entries={shown} icon={IconSpark({ size: 15 })} />
+      <DefinitionList entries={shown} icon={() => IconSpark({ size: 15 })} />
     </ConfigPage>
   );
 }
@@ -244,7 +249,7 @@ export function CommandsPage(): VNode {
     >
       <DefinitionList
         entries={shown}
-        icon={IconCommand({ size: 15 })}
+        icon={() => IconCommand({ size: 15 })}
         // Only for a command the running session actually loaded: putting one
         // in the box that the CLI will refuse is a worse outcome than making
         // somebody type it.

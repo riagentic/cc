@@ -59,18 +59,24 @@ export const clampZoom = (z: number): number =>
 
 /** The accents, in the order the picker offers them. `dark` is the shade used
  *  on the dark palette (bright, on near-black); `light` the shade used on the
- *  light one (deeper, so white text on it still passes). */
+ *  light one (deeper, so white text on it still passes).
+ *
+ *  Every value here is measured, not chosen by eye: an accent is a background
+ *  under white text AND a text colour on the page, and three of these shades
+ *  were between 3.6:1 and 4.4:1 — readable as a heading, not as a line of
+ *  text. `src/test/ui/contrast.test.ts` holds the whole grid to 4.5:1, so a
+ *  prettier shade cannot quietly cost somebody the words. */
 export const ACCENTS: {
   id: Accent;
   label: string;
   dark: string;
   light: string;
 }[] = [
-  { id: "ember", label: "Ember", dark: "#e07a58", light: "#c65f3c" },
+  { id: "ember", label: "Ember", dark: "#e07a58", light: "#ae5233" },
   { id: "ocean", label: "Ocean", dark: "#4ea3f0", light: "#1c6fc4" },
-  { id: "forest", label: "Forest", dark: "#4fc07a", light: "#1c8449" },
+  { id: "forest", label: "Forest", dark: "#4fc07a", light: "#1a7c45" },
   { id: "grape", label: "Grape", dark: "#a982f5", light: "#6f45cc" },
-  { id: "rose", label: "Rose", dark: "#f0709c", light: "#c93a69" },
+  { id: "rose", label: "Rose", dark: "#f0709c", light: "#c43665" },
   { id: "steel", label: "Steel", dark: "#8fa3c4", light: "#4a5b78" },
 ];
 

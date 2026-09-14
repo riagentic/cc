@@ -126,7 +126,53 @@ const event = () =>
     },
   ]) as Record<string, unknown>;
 
+/**
+ * The renderer's own complaints, collected while the walk runs.
+ *
+ * Two of them are never cosmetic. A desync means the diff wrote one row's node
+ * into another row's slot — how a shared element object (one icon built once
+ * and placed in every row) shows up. An afterRender that throws is an effect
+ * that stopped at the line before, which is how the transcript quietly stopped
+ * following its own tail. Both were live here and neither failed a test.
+ *
+ * Colour findings are deliberately NOT asserted on: the framework's walk reads
+ * computed values from the test DOM, whose custom-property cascade answers with
+ * the last declaration in the sheet regardless of selectors, so it reports
+ * pairs this app never paints. `contrast.test.ts` measures the real grid.
+ */
+const LOUD = [
+  "child reconciler desynced",
+  "afterRender callback error",
+  "onMount callback error",
+];
+
+const watchWarnings = (): { seen: string[]; stop: () => void } => {
+  const seen: string[] = [];
+  const real = console.warn;
+  const realError = console.error;
+  const look = (args: unknown[]) => {
+    const text = args.map(String).join(" ");
+    if (LOUD.some((l) => text.includes(l))) seen.push(text.split("\n")[0]);
+  };
+  console.warn = (...args: unknown[]) => {
+    look(args);
+    real(...args);
+  };
+  console.error = (...args: unknown[]) => {
+    look(args);
+    realError(...args);
+  };
+  return {
+    seen,
+    stop: () => {
+      console.warn = real;
+      console.error = realError;
+    },
+  };
+};
+
 testUI(App, "ui fuzz: the app never renders blank", async (ui: any) => {
+  const warnings = watchWarnings();
   // Every destination in the rail. A page added without being walked here is a
   // page whose first blank render nobody notices.
   const links = [
@@ -146,22 +192,32 @@ testUI(App, "ui fuzz: the app never renders blank", async (ui: any) => {
     "StorageLink",
     "SettingsLink",
   ];
-  ui.ProjectLink.click();
-  await ui.settle();
+  try {
+    ui.ProjectLink.click();
+    await ui.settle();
 
-  for (let step = 0; step < STEPS; step++) {
-    if (rnd() < 0.25) {
-      const name = pick(links);
-      ui[name].click();
-      await ui.settle();
-    } else {
-      session.ingest(event());
-      await ui.settle();
+    for (let step = 0; step < STEPS; step++) {
+      if (rnd() < 0.25) {
+        const name = pick(links);
+        ui[name].click();
+        await ui.settle();
+      } else {
+        session.ingest(event());
+        await ui.settle();
+      }
+      const html = ui.html();
+      // The shell is always there: rail, strip, and a page under them.
+      assert(html.includes("Claude Control"), `rail gone at step ${step}`);
+      assert(html.length > 2_000, `page collapsed at step ${step}`);
+      assert(!/undefined|NaN/.test(html), `rendered NaN/undefined at ${step}`);
+      assert(
+        warnings.seen.length === 0,
+        `the renderer complained at step ${step}:\n  ${
+          warnings.seen.join("\n  ")
+        }`,
+      );
     }
-    const html = ui.html();
-    // The shell is always there: rail, strip, and a page under them.
-    assert(html.includes("Claude Control"), `rail gone at step ${step}`);
-    assert(html.length > 2_000, `page collapsed at step ${step}`);
-    assert(!/undefined|NaN/.test(html), `rendered NaN/undefined at ${step}`);
+  } finally {
+    warnings.stop();
   }
 });

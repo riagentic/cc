@@ -16,6 +16,17 @@ export type VoiceStatus =
   | "error";
 
 export type VoiceConfig = {
+  /**
+   * Whether speech-to-text is on at all.
+   *
+   * Off by default, and that default is the point: whisper lives on the GPU,
+   * and VRAM it holds is VRAM taken away from the model this app exists to
+   * run. Enabling it is a deliberate act — the switch also stands in for
+   * "I do not want to talk to my computer", which is just as valid. While
+   * off, the held key does nothing and the microphone control is not shown;
+   * typing is the only way in.
+   */
+  enabled: boolean;
   /** Where whisper.cpp's server answers. Empty means "not set up". */
   baseUrl: string;
   /** The language to force, or "" to let the model detect it.

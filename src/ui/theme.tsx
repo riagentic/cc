@@ -32,14 +32,14 @@ const LIGHT = `
   --line-soft: #eaeef5;
   --ink: #131722;
   --ink-soft: #566076;
-  --ink-dim: #838da2;
-  --accent: #c65f3c;
+  --ink-dim: #626c81;
+  --accent: #ae5233;
   --accent-ink: #ffffff;
   --accent-soft: color-mix(in srgb, var(--accent) 12%, transparent);
-  --info: #2f6fd0;
-  --ok: #1f8f43;
-  --warn: #9a6a06;
-  --danger: #cf3b30;
+  --info: #2d6bc9;
+  --ok: #1b7d3b;
+  --warn: #926406;
+  --danger: #c8392e;
   --violet: #7a4fd0;
   --shadow: 0 1px 2px rgba(16,24,40,.06), 0 10px 28px -14px rgba(16,24,40,.28);
 `;
@@ -135,7 +135,7 @@ const CSS = `
   --line-soft: #1a1f2a;
   --ink: #e9edf6;
   --ink-soft: #99a3b8;
-  --ink-dim: #6b7589;
+  --ink-dim: #798397;
   --accent: #e07a58;
   --accent-ink: #1a0f0a;
   --accent-soft: color-mix(in srgb, var(--accent) 14%, transparent);
@@ -1018,6 +1018,61 @@ button.rowitem:hover { background: var(--panel-2); }
 
 /* ── composer ───────────────────────────────────────────────────────────── */
 
+/* The local agent's task list — its own working plan, not a chat message.
+   Compact rows above the composer: the in-progress one spins, the done ones
+   fade. It appears only while the agent is keeping a list. */
+.todopanel {
+  max-width: var(--measure); margin: 0 auto; padding: 0 0 6px;
+  display: grid; gap: 2px;
+  border: 1px solid var(--line); border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--accent) 4%, var(--panel));
+  padding: 8px 12px;
+}
+.todopanel__row {
+  display: flex; align-items: baseline; gap: 8px; font-size: 12px;
+  color: var(--ink-soft);
+}
+.todopanel__row[data-status="in_progress"] { color: var(--ink); font-weight: 560; }
+.todopanel__row[data-status="completed"] { color: var(--ink-dim); }
+.todopanel__done { text-decoration: line-through; text-decoration-color: var(--ink-dim); }
+.todopanel__open {
+  width: 13px; flex: none; display: inline-block; text-align: center;
+  border-radius: 50%;
+  border: 1px solid color-mix(in srgb, var(--ink-dim) 60%, transparent);
+  aspect-ratio: 1; align-self: center;
+}
+.spin { display: inline-flex; color: var(--accent); animation: todospin 1.6s linear infinite; }
+/* Messages typed while the agent works, waiting for its next step. */
+.queued {
+  max-width: var(--measure); margin: 0 auto 6px; display: grid; gap: 4px;
+}
+/* A quiet line in the thread: older messages saved to disk, a parked chat
+   coming back. Information, not a message. */
+.thread__note {
+  max-width: var(--measure); margin: 4px auto 10px; text-align: center;
+  font-size: 12px; color: var(--ink-dim);
+}
+.queued__row {
+  display: flex; align-items: center; gap: 8px; font-size: 12.5px;
+  padding: 5px 8px 5px 10px; border-radius: var(--radius-sm);
+  border: 1px dashed var(--line); color: var(--ink-soft);
+  background: color-mix(in srgb, var(--accent) 3%, var(--panel));
+}
+.queued__tag {
+  flex: none; font-size: 10.5px; text-transform: uppercase; letter-spacing: .04em;
+  color: var(--accent);
+}
+.queued__text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* A reasoning model's thinking while it streams: the tail only, dimmed and
+   small, so it reads as progress rather than as the answer. */
+.thinking {
+  font-size: 12px; line-height: 1.5; color: var(--ink-dim); font-style: italic;
+  white-space: pre-wrap; overflow-wrap: anywhere;
+  max-height: 7.5em; overflow: hidden;
+  border-left: 2px solid var(--line); padding: 2px 0 2px 10px; margin: 4px 0;
+}
+@keyframes todospin { to { transform: rotate(360deg); } }
+
 .composer { padding: 10px 22px 18px; }
 .composer__inner {
   max-width: var(--measure); margin: 0 auto;
@@ -1277,6 +1332,15 @@ button.rowitem:hover { background: var(--panel-2); }
 }
 .toggle.on .toggle__track { background: var(--accent-soft); border-color: color-mix(in srgb, var(--accent) 55%, transparent); }
 .toggle.on .toggle__knob { transform: translateX(14px); background: var(--accent); }
+
+/* A checkbox with its words, small enough for the strip. Ticked, it says in
+   the danger colour that something is switched off. */
+.check {
+  display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px;
+  color: var(--ink); cursor: pointer; white-space: nowrap; user-select: none;
+}
+.check input { margin: 0; width: 14px; height: 14px; accent-color: var(--danger); cursor: pointer; }
+.check--on { color: var(--danger); font-weight: 560; }
 
 /* The accent swatches. A colour picker whose options are colours — no names
    needed to choose, names kept for the screen reader. */

@@ -19,7 +19,7 @@ import {
   type VNode,
 } from "aio/air";
 import { Markdown } from "./Markdown.tsx";
-import { highlight, langOfFile } from "../lib/highlight.ts";
+import { langOfFile } from "../lib/highlight.ts";
 import { session, view } from "../cell/session.ts";
 import { activeSessionKey, workspace } from "../cell/workspace.ts";
 import { tree } from "../cell/tree.ts";
@@ -33,7 +33,7 @@ import {
   tokens,
   usd,
 } from "../lib/format.ts";
-import { Banner, Elapsed, Empty } from "./parts.tsx";
+import { Banner, codeTokens, Elapsed, Empty } from "./parts.tsx";
 import { lastSpeed } from "../cell/session.ts";
 import { JumpToLatest, MsgMeta, useStickToBottom } from "./thread.tsx";
 import { FindBar, findIndex, findQuery } from "./find.tsx";
@@ -840,11 +840,7 @@ function ToolInput(props: { input: Record<string, unknown> }): VNode {
 function Code(props: { text: string; lang: string }): VNode {
   return (
     <div class="code">
-      {highlight(props.text, props.lang).map((t, n) =>
-        t.kind === "plain"
-          ? t.text
-          : <span key={n} class={`tok tok--${t.kind}`}>{t.text}</span>
-      )}
+      {codeTokens(props.text, props.lang)}
     </div>
   );
 }

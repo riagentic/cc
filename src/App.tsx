@@ -50,18 +50,16 @@ import {
 } from "./cell/session.ts";
 import { activeIsLocal, engineOf, localChat } from "./cell/local.ts";
 import { LocalChatPage } from "./ui/LocalChatPage.tsx";
-import { workspace } from "./cell/workspace.ts";
+import { activeSessionKey, workspace } from "./cell/workspace.ts";
 import { IconChat } from "./ui/icons.tsx";
-import { CommandPalette, ShortcutHelp } from "./ui/Palette.tsx";
 import { usePushToTalk } from "./ui/pushToTalk.ts";
 import { useHeardText } from "./ui/heard.ts";
 import { useSpokenText } from "./ui/spoken.ts";
 import { speech } from "./cell/speech.ts";
-import { globalBindings } from "./ui/commands.ts";
-import { closeOverlay, OverlayHost, showOverlay } from "./ui/overlays.tsx";
+import { globalBindings, noteRoute } from "./ui/commands.ts";
+import { OverlayHost } from "./ui/overlays.tsx";
 import { ToastHost } from "./ui/toast.tsx";
 import { useAttention } from "./ui/attention.ts";
-import { prefs, ZOOM_STEP } from "./cell/prefs.ts";
 
 /**
  * One page per path, matched exactly.
@@ -97,8 +95,11 @@ const PAGES: Record<string, () => VNode> = {
 
 export default function App(): VNode {
   const { path } = useRoute();
+  // Alt G's memory of the tab before. Here, during render, so it is current
+  // the moment the route is — see `noteRoute`.
+  noteRoute(path);
   const shell = useRef<HTMLDivElement | null>(null);
-  useWheelZoom(shell);
+  useWheelVeto(shell);
   // Hold a key, say a sentence. Installed at the root because the key is held
   // wherever you happen to be — including inside a shell, where a bare
   // modifier is the one thing that costs the terminal nothing.
@@ -117,15 +118,11 @@ export default function App(): VNode {
   const project = workspace.projects.find((p) => p.id === workspace.activeId);
   useAttention(
     activeIsLocal()
-      ? localChat(workspace.activeId).status === "working"
+      ? localChat(activeSessionKey()).status === "working"
       : view().status === "working",
     project?.name ?? "",
   );
-  useShortcuts({
-    openPalette: () =>
-      showOverlay(() => <CommandPalette onClose={closeOverlay} />),
-    openHelp: () => showOverlay(() => <ShortcutHelp onClose={closeOverlay} />),
-  });
+  useShortcuts();
   const clean = path.replace(/(.)\/$/, "$1");
   // A project on a local engine gets the local conversation at `/` and none
   // of the Claude session chrome — the strip, the permission queue and the
@@ -202,26 +199,24 @@ export default function App(): VNode {
  * The loop is over a fixed-length list on purpose: `onGlobalKey` is a hook, so
  * the count and order must not change between renders. See `commands.ts`.
  */
-function useShortcuts(ui: {
-  openPalette: () => void;
-  openHelp: () => void;
-}): void {
-  const bindings = globalBindings(ui);
+function useShortcuts(): void {
+  const bindings = globalBindings();
   for (const b of bindings) onGlobalKey(b.key, b.run, b.chord);
 }
 
 /**
- * Ctrl+wheel zooms the app, and not the browser underneath it.
+ * Ctrl+wheel does nothing — neither the app's zoom nor Electron's.
  *
- * Electron answers a ctrl-wheel with its own page zoom, which scales the window
- * chrome, is not persisted, and drifts out of step with the app's own zoom
- * control until the two disagree about what 100% means. Vetoing the event and
- * doing the work ourselves keeps one number in charge.
+ * The app's keys are the Alt chords, Escape and push-to-talk, by request;
+ * zoom lives in Settings. Electron answers a ctrl-wheel with its own page
+ * zoom, which scales the window chrome, is not persisted, and disagrees with
+ * the app's zoom about what 100% means — so the event is still vetoed, just
+ * no longer turned into anything.
  *
  * `passive: false` is what makes `preventDefault` legal on a wheel listener at
  * all — without it Chromium ignores the veto and zooms anyway.
  */
-function useWheelZoom(anchor: { current: HTMLElement | null }): void {
+function useWheelVeto(anchor: { current: HTMLElement | null }): void {
   onMount(() => {
     // The window the app is actually rendered into, not the ambient global.
     // Under `testUI` those are two different objects, and a listener on the
@@ -229,12 +224,7 @@ function useWheelZoom(anchor: { current: HTMLElement | null }): void {
     // two happen to be the same thing.
     const win = anchor.current?.ownerDocument?.defaultView ?? globalThis;
     const onWheel = (e: WheelEvent) => {
-      if (!e.ctrlKey && !e.metaKey) return;
-      e.preventDefault();
-      // One notch per event, whichever way the platform reports it: a trackpad
-      // pinch arrives as many small deltas and a mouse wheel as one big one,
-      // so the sign is the signal and the magnitude is not.
-      prefs.zoomBy(e.deltaY < 0 ? ZOOM_STEP : -ZOOM_STEP);
+      if (e.ctrlKey || e.metaKey) e.preventDefault();
     };
     win.addEventListener("wheel", onWheel as EventListener, {
       passive: false,
