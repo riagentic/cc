@@ -59,7 +59,6 @@ import { SpeechPanel } from "./SpeechPanel.tsx";
 import { PageHead, type PageScope, ScopeTag } from "./RunViews.tsx";
 import {
   IconAlert,
-  IconCheck,
   IconFolder,
   IconPlay,
   IconPlus,
@@ -227,7 +226,7 @@ export function SettingsPage(): VNode {
                     <button
                       type="button"
                       class="btn btn--sm"
-                      title={`Resume CLI session ${sess.resumeId} — the model keeps its context; the transcript here starts empty`}
+                      title={`Resume CLI session ${sess.resumeId} — the model keeps its context and the transcript here stays`}
                       onClick={() => session.start(true)}
                     >
                       {IconRefresh({ size: 13 })} Resume
@@ -788,7 +787,12 @@ function Capability(
  * never be something you forgot you left enabled.
  */
 function AllowAll(): VNode {
-  const [armed, setArmed] = useLocal(false);
+  // Armed FOR a project. A plain flag outlived switching projects, and the
+  // confirm armed on one sat waiting on the next — one click from turning
+  // every check off somewhere nobody had asked for it.
+  const [armedFor, setArmedFor] = useLocal<string | null>(null);
+  const armed = armedFor !== null && armedFor === workspace.activeId;
+  const setArmed = (on: boolean) => setArmedFor(on ? workspace.activeId : null);
   const on = activeSettings().skipPermissions;
 
   if (on) {
@@ -1002,6 +1006,9 @@ function Projects(props: { query: string }): VNode | null {
                   add();
                 }
                 if (e.key === "Escape") {
+                  // Closes the field and stops there — not also the global
+                  // Escape, which would leave Settings.
+                  e.preventDefault();
                   setAdding(false);
                 }
               }}
@@ -1041,74 +1048,55 @@ function Projects(props: { query: string }): VNode | null {
         : (
           <div class="choices" key="list">
             {workspace.projects.map((p) => (
-              <Choice
-                key={p.id}
-                name={p.name}
-                label={
-                  <span
-                    style={{
-                      display: "inline-flex",
-                      gap: "8px",
-                      alignItems: "center",
-                    }}
-                  >
-                    {IconFolder({ size: 13 })}
-                    {p.name}
-                    {p.missing ? <Pill tone="danger">folder is gone</Pill> : (
-                      <>
-                        {p.branch && <Pill>{p.branch}</Pill>}
-                        {p.dirty && <Pill tone="warn">dirty</Pill>}
-                      </>
-                    )}
-                  </span>
-                }
-                // Trimmed from the left: a path is read from its tail, and the
-                // first 60 characters of one say only which machine it is on.
-                hint={tailPath(tildePath(p.path, workspace.home), 52)}
-                selected={active?.id === p.id}
-                onSelect={() => workspace.select(p.id)}
-                trailing={
-                  <span
-                    style={{
-                      display: "inline-flex",
-                      gap: "4px",
-                      alignItems: "center",
-                    }}
-                  >
-                    {active?.id === p.id && IconCheck({ size: 16 })}
-                    {
-                      /* Always removable. Gating this on "more than one
-                        project" was a dead end with no exit: a single project
-                        whose folder had been deleted could not be started and
-                        could not be removed either. */
-                    }
+              // The remove control is the row's SIBLING, laid over its right
+              // edge: the row is itself a button, and a button inside a button
+              // is invalid markup that no keyboard or screen reader can rely on.
+              <div class="choice-row" key={p.id}>
+                <Choice
+                  name={p.name}
+                  label={
                     <span
-                      role="button"
-                      tabIndex={0}
-                      class="btn btn--ghost btn--sm btn--icon"
-                      title={`Remove ${p.name}`}
-                      aria-label={`Remove ${p.name}`}
-                      onClick={(e: Event) => {
-                        e.stopPropagation();
-                        workspace.removeProject(p.id);
-                      }}
-                      // A `<span role="button">` gets no key handling for free,
-                      // and it cannot be a real `<button>` here — it sits inside
-                      // the row's own button, which nesting forbids. Enter and
-                      // Space are wired by hand so the row is operable from the
-                      // keyboard, not only the mouse.
-                      onKeyDown={(e: KeyboardEvent) => {
-                        if (e.key !== "Enter" && e.key !== " ") return;
-                        e.preventDefault();
-                        e.stopPropagation();
-                        workspace.removeProject(p.id);
+                      style={{
+                        display: "inline-flex",
+                        gap: "8px",
+                        alignItems: "center",
                       }}
                     >
-                      {IconTrash({ size: 13 })}
+                      {IconFolder({ size: 13 })}
+                      {p.name}
+                      {p.missing
+                        ? <Pill tone="danger">folder is gone</Pill>
+                        : (
+                          <>
+                            {p.branch && <Pill>{p.branch}</Pill>}
+                            {p.dirty && <Pill tone="warn">dirty</Pill>}
+                          </>
+                        )}
                     </span>
-                  </span>
+                  }
+                  // Trimmed from the left: a path is read from its tail, and
+                  // the first 60 characters of one say only which machine it
+                  // is on.
+                  hint={tailPath(tildePath(p.path, workspace.home), 52)}
+                  selected={active?.id === p.id}
+                  onSelect={() => workspace.select(p.id)}
+                />
+                {
+                  /* Always removable. Gating this on "more than one project"
+                    was a dead end with no exit: a single project whose folder
+                    had been deleted could not be started and could not be
+                    removed either. */
                 }
-              />
+                <button
+                  type="button"
+                  class="btn btn--ghost btn--sm btn--icon choice-row__x"
+                  title={`Remove ${p.name}`}
+                  aria-label={`Remove ${p.name}`}
+                  onClick={() => workspace.removeProject(p.id)}
+                >
+                  {IconTrash({ size: 13 })}
+                </button>
+              </div>
             ))}
           </div>
         )}

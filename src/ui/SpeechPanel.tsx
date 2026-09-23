@@ -6,6 +6,7 @@
 import { type VNode } from "aio/air";
 import { DEFAULT_SPEECH_URL, PREFERRED, speech } from "../cell/speech.ts";
 import { Pill, Segmented } from "./parts.tsx";
+import { LANGUAGES } from "./languageList.ts";
 import { IconRefresh, IconSpeaker } from "./icons.tsx";
 
 /**
@@ -67,52 +68,6 @@ const NAMES: Record<string, string> = {
   M4: "M4 — male",
   M5: "M5 — male",
 };
-
-/**
- * The languages worth naming, and "" is a real answer.
- *
- * A shortlist of a long list. Supertonic reads thirty-one and Kokoro eight;
- * offering all of either would be a scroll, and the ones missing here can
- * still be reached by choosing Detect and simply speaking them.
- */
-const LANGUAGES: { id: string; label: string }[] = [
-  { id: "", label: "Detect" },
-  { id: "en", label: "English" },
-  { id: "cs", label: "Czech" },
-  { id: "sk", label: "Slovak" },
-  { id: "pl", label: "Polish" },
-  { id: "de", label: "German" },
-  { id: "nl", label: "Dutch" },
-  { id: "da", label: "Danish" },
-  { id: "sv", label: "Swedish" },
-  { id: "no", label: "Norwegian" },
-  { id: "fi", label: "Finnish" },
-  { id: "es", label: "Spanish" },
-  { id: "pt", label: "Portuguese" },
-  { id: "fr", label: "French" },
-  { id: "it", label: "Italian" },
-  { id: "ro", label: "Romanian" },
-  { id: "el", label: "Greek" },
-  { id: "hu", label: "Hungarian" },
-  { id: "hr", label: "Croatian" },
-  { id: "sr", label: "Serbian" },
-  { id: "uk", label: "Ukrainian" },
-  { id: "ru", label: "Russian" },
-  { id: "tr", label: "Turkish" },
-  { id: "ar", label: "Arabic" },
-  { id: "fa", label: "Persian" },
-  { id: "he", label: "Hebrew" },
-  { id: "ka", label: "Georgian" },
-  { id: "hi", label: "Hindi" },
-  { id: "ne", label: "Nepali" },
-  { id: "bn", label: "Bengali" },
-  { id: "zh", label: "Chinese" },
-  { id: "ja", label: "Japanese" },
-  { id: "ko", label: "Korean" },
-  { id: "vi", label: "Vietnamese" },
-  { id: "id", label: "Indonesian" },
-  { id: "sw", label: "Swahili" },
-];
 
 const SPEEDS = [0.8, 0.9, 1, 1.1, 1.25, 1.5];
 
@@ -255,7 +210,7 @@ export function SpeechPanel(): VNode {
                 speech.setBaseUrl(url);
                 // Straight away, because the voices are about to be different
                 // ones and the picker below is filled from the answer.
-                void speech.find();
+                void speech.find(true);
               }}
             />
           </div>
@@ -280,7 +235,7 @@ export function SpeechPanel(): VNode {
                 type="button"
                 class="btn btn--sm"
                 title="Look for a voice server"
-                onClick={() => void speech.find()}
+                onClick={() => void speech.find(true)}
               >
                 {IconRefresh({ size: 13 })} Find
               </button>

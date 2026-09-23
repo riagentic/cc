@@ -155,6 +155,7 @@ Deno.test("lifecycle fuzz: one process, and offline means offline", async () => 
     await delay(150);
     assert(await liveStubs() <= 0, "a CLI outlived the session");
   } finally {
+    await booted.settle();
     booted.dispose();
     if (previous === undefined) Deno.env.delete("CLAUDE_BIN");
     else Deno.env.set("CLAUDE_BIN", previous);

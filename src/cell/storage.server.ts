@@ -16,12 +16,13 @@
  */
 import { log } from "aio";
 import { join } from "@std/path";
-import { homeDir } from "./claude.server.ts";
+import { homeDir, isDirectory } from "./claude.server.ts";
 
 /** One project's stored history, as it exists on disk. */
 export type StoredProject = {
-  /** The real working directory, read from inside a transcript. `""` when no
-   *  transcript would say — the one case this refuses to guess about. */
+  /** The real working directory, read from inside the newest transcript that
+   *  records one. `""` when none would say — the one case this refuses to
+   *  guess about. */
   path: string;
   /** The directory under `~/.claude/projects`. */
   dir: string;
@@ -29,8 +30,10 @@ export type StoredProject = {
   sessions: number;
   /** Newest transcript mtime, epoch ms. */
   usedAt: number;
-  /** Does the project folder still exist? `null` when `path` is unknown, which
-   *  is not the same as "gone" and must never be treated as such. */
+  /** Does the project folder still exist? `null` when no transcript names
+   *  one, which is not the same as "gone" and must never be treated as such.
+   *  `false` only when EVERY folder its transcripts name is gone — see
+   *  {@link verdict}. */
   exists: boolean | null;
 };
 
@@ -99,6 +102,68 @@ async function treeBytes(dir: string): Promise<number> {
   return total;
 }
 
+/**
+ * Does a history's project still exist? Pure, over what its transcripts say:
+ * `null` when none of them names a folder.
+ *
+ * One slug can hold transcripts recorded in more than one folder — the slug
+ * is lossy, so `/a/b-c` and `/a/b/c` share one — and the history is only
+ * stale when every one of them is gone. Deciding from a single transcript
+ * called a live project dead whenever the one it happened to read named the
+ * other folder.
+ */
+export function verdict(
+  found: { cwd: string; exists: boolean }[],
+): boolean | null {
+  if (found.length === 0) return null;
+  return found.some((f) => f.exists);
+}
+
+/** A history directory's transcripts, newest first by modification time. */
+async function transcriptsOf(
+  dir: string,
+): Promise<{ name: string; mtime: number }[]> {
+  let files: Deno.DirEntry[];
+  try {
+    files = await Array.fromAsync(Deno.readDir(dir));
+  } catch {
+    return [];
+  }
+  const out: { name: string; mtime: number }[] = [];
+  for (const f of files) {
+    if (!f.isFile || !f.name.endsWith(".jsonl")) continue;
+    const st = await Deno.stat(join(dir, f.name)).catch(() => null);
+    out.push({ name: f.name, mtime: st?.mtime?.getTime() ?? 0 });
+  }
+  return out.sort((a, b) => b.mtime - a.mtime);
+}
+
+/**
+ * Every folder a history's transcripts name, newest first, each with whether
+ * it is still there. Read from inside the files, never from the name.
+ */
+async function foldersOf(
+  dir: string,
+  transcripts: { name: string }[],
+): Promise<{ cwd: string; exists: boolean }[]> {
+  const seen = new Set<string>();
+  const out: { cwd: string; exists: boolean }[] = [];
+  for (const t of transcripts) {
+    const cwd = await cwdOf(join(dir, t.name));
+    if (!cwd || seen.has(cwd)) continue;
+    seen.add(cwd);
+    out.push({ cwd, exists: await isDirectory(cwd) });
+  }
+  return out;
+}
+
+/** `~/.claude/projects`, resolved — so a `~/.claude` that is itself a symlink
+ *  (dotfiles kept in a repository) still contains what it contains. */
+async function projectsRootOf(): Promise<string> {
+  const lexical = join(homeDir(), ".claude", "projects");
+  return await Deno.realPath(lexical).catch(() => lexical);
+}
+
 /** Everything Claude Code is storing, by project. */
 export async function scanStorage(): Promise<StorageReport> {
   const root = join(homeDir(), ".claude");
@@ -115,41 +180,17 @@ export async function scanStorage(): Promise<StorageReport> {
   for (const d of dirs) {
     if (!d.isDirectory) continue;
     const dir = join(projectsRoot, d.name);
-    let files: Deno.DirEntry[];
-    try {
-      files = await Array.fromAsync(Deno.readDir(dir));
-    } catch {
-      continue;
-    }
-    const transcripts = files.filter((f) =>
-      f.isFile && f.name.endsWith(".jsonl")
-    );
-
-    let usedAt = 0;
-    for (const f of transcripts) {
-      const st = await Deno.stat(join(dir, f.name)).catch(() => null);
-      const t = st?.mtime?.getTime() ?? 0;
-      if (t > usedAt) usedAt = t;
-    }
-
-    // The path comes from inside the newest transcript, never from the name.
-    const newest = transcripts
-      .map((f) => f.name)
-      .sort()
-      .reverse();
-    let path = "";
-    for (const name of newest) {
-      path = await cwdOf(join(dir, name));
-      if (path) break;
-    }
-
+    // Newest by modification time — a name is a session uuid, and sorting
+    // those found a random transcript rather than the latest one.
+    const transcripts = await transcriptsOf(dir);
+    const folders = await foldersOf(dir, transcripts);
     projects.push({
-      path,
+      path: folders[0]?.cwd ?? "",
       dir,
       bytes: await treeBytes(dir),
       sessions: transcripts.length,
-      usedAt,
-      exists: path ? await isDir(path) : null,
+      usedAt: transcripts[0]?.mtime ?? 0,
+      exists: verdict(folders),
     });
   }
 
@@ -169,9 +210,6 @@ export async function scanStorage(): Promise<StorageReport> {
   };
 }
 
-const isDir = async (path: string): Promise<boolean> =>
-  (await Deno.stat(path).catch(() => null))?.isDirectory === true;
-
 /**
  * Delete one project's stored history.
  *
@@ -180,27 +218,34 @@ const isDir = async (path: string): Promise<boolean> =>
  *
  *  - the directory is under `~/.claude/projects` (checked after resolving, so a
  *    `..` in a name cannot walk out),
- *  - the project's own folder is genuinely absent right now, and
- *  - we know what that folder *is* — a directory whose `cwd` could not be read
- *    is "unknown", which is not "gone".
+ *  - we know what its folders *are* — a history whose `cwd` could not be read
+ *    is "unknown", which is not "gone", and
+ *  - every folder its transcripts name is genuinely absent right now.
+ *
+ * All of it is re-derived HERE, from the disk, at the moment of deleting. The
+ * page's idea of which folder this belongs to is a snapshot from the last
+ * scan and is not trusted: the folder may have come back since, or another
+ * transcript may have arrived naming one that exists.
  *
  * Returns the reason it refused, or `null` on success.
  */
 export async function deleteProjectHistory(
   dir: string,
-  expectedPath: string,
 ): Promise<string | null> {
-  const projectsRoot = join(homeDir(), ".claude", "projects");
+  const projectsRoot = await projectsRootOf();
   const resolved = await Deno.realPath(dir).catch(() => "");
   if (!resolved || !resolved.startsWith(`${projectsRoot}/`)) {
     return "That directory is not part of Claude Code's project history.";
   }
-  if (!expectedPath) {
+  const folders = await foldersOf(resolved, await transcriptsOf(resolved));
+  const exists = verdict(folders);
+  if (exists === null) {
     return "This history does not say which folder it belongs to — refusing " +
       "to delete something that cannot be identified.";
   }
-  if (await isDir(expectedPath)) {
-    return `${expectedPath} exists — its history is not stale.`;
+  if (exists) {
+    const live = folders.find((f) => f.exists)?.cwd ?? "";
+    return `${live} exists — its history is not stale.`;
   }
 
   // The sessions this history holds, so their file-history goes with it rather
@@ -227,7 +272,7 @@ export async function deleteProjectHistory(
     await Deno.remove(join(history, id), { recursive: true }).catch(() => {});
   }
   log.info("storage", "deleted stale project history", {
-    path: expectedPath,
+    paths: folders.map((f) => f.cwd),
     sessions: sessions.length,
   });
   return null;

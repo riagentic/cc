@@ -13,7 +13,8 @@
  * that has already been handed to the browser.
  */
 import { log } from "aio";
-import { intoChunks, pcmFromWav } from "../lib/aloud.ts";
+import { intoChunks, type Pcm, pcmFromWav } from "../lib/aloud.ts";
+import { complaint, lastLine, refusal, serial } from "../lib/sound.ts";
 
 /** What to assume a server's raw samples are, when it does not say.
  *
@@ -72,7 +73,7 @@ const known = new Map<string, Server>();
  *  servers accept as aliases out of politeness. */
 const STOCK = ["tts-1", "tts-1-hd", "gpt-4o-mini-tts"];
 
-async function learn(base: string): Promise<Server> {
+async function learn(base: string, signal: AbortSignal): Promise<Server> {
   const had = known.get(base);
   if (had) return had;
   // Supertonic names the model it loaded right here. Kokoro's health says only
@@ -80,11 +81,44 @@ async function learn(base: string): Promise<Server> {
   // interesting one is whichever is not a stock alias.
   const health = await json<{ model?: string; sample_rate?: number }>(
     `${base}/v1/health`,
+    signal,
   );
-  const listed = health?.model
-    ? []
-    : (await json<{ data?: { id?: string }[] }>(`${base}/v1/models`))?.data
-      ?.map((m) => String(m.id ?? "")).filter((id) => id !== "") ?? [];
+  const models = health?.model
+    ? null
+    : await json<{ data?: { id?: string }[] }>(`${base}/v1/models`, signal);
+  const server = identify(health, models);
+  // Remembered only when something actually answered. Supertonic's health is
+  // a 503 for as long as its model is loading, and a guess cached then was a
+  // wrong model name for the rest of the run — every sentence a 400, and
+  // nothing but restarting the app would make it ask again.
+  if (health === null && models === null) {
+    log.info("speech", "voice server said nothing about itself — guessing", {
+      model: server.model,
+      url: base,
+    });
+    return server;
+  }
+  known.set(base, server);
+  log.info("speech", "voice server identified", {
+    model: server.model,
+    rate: server.rate,
+    url: base,
+  });
+  return server;
+}
+
+/**
+ * What a server is, from what its health and model routes said.
+ *
+ * Pure, and separate, so "which answer wins" is pinned by a test rather than
+ * rediscovered with a server that is half-loaded.
+ */
+export function identify(
+  health: { model?: string; sample_rate?: number } | null,
+  models: { data?: { id?: string }[] } | null,
+): Server {
+  const listed = models?.data
+    ?.map((m) => String(m.id ?? "")).filter((id) => id !== "") ?? [];
   const model = health?.model ??
     listed.find((id) => !STOCK.includes(id)) ??
     listed[0] ??
@@ -94,14 +128,34 @@ async function learn(base: string): Promise<Server> {
   const rate = typeof health?.sample_rate === "number" && health.sample_rate > 0
     ? health.sample_rate
     : RATE;
-  const server: Server = { model, raw: true, rate };
-  known.set(base, server);
-  log.info("speech", "voice server identified", { model, rate, url: base });
-  return server;
+  return { model, raw: true, rate };
 }
 
-/** The reading happening right now, if any. */
-let playing: { child: Deno.ChildProcess; abort: AbortController } | null = null;
+/**
+ * Did the server turn down raw samples, as opposed to anything else?
+ *
+ * Only this one refusal is worth a second request in the other shape, and only
+ * this one is remembered. Any other failure — a model still loading, a voice
+ * it does not have, a server restarting — used to switch streaming off for the
+ * rest of the run, and a Kokoro that hiccupped once then made every reply wait
+ * for the whole file. Supertonic's answer is a 400 naming `response_format`;
+ * a validating server's is a 422 naming the same field.
+ */
+export const refusesRaw = (status: number, said: string): boolean =>
+  [400, 415, 422].includes(status) && /format|pcm/i.test(said);
+
+/**
+ * The reading happening right now, if any.
+ *
+ * Claimed the moment a reading starts, before it has a player: most of a
+ * reading's first second is asking the server who it is and waiting for the
+ * first piece, and a Stop pressed then must find something to stop. `child`
+ * is null until the player exists.
+ */
+let playing: {
+  child: Deno.ChildProcess | null;
+  abort: AbortController;
+} | null = null;
 
 /**
  * One reading at a time, in the order asked for.
@@ -110,14 +164,7 @@ let playing: { child: Deno.ChildProcess; abort: AbortController } | null = null;
  * one sink do not take turns, they play *over each other*. Your own message
  * and the reply to it, simultaneously, is not a feature anyone would ask for.
  */
-let chain: Promise<unknown> = Promise.resolve();
-
-function inOrder<T>(work: () => Promise<T>): Promise<T> {
-  const next = chain.then(work, work);
-  // The chain has to survive a failure, or one bad reading silences the app.
-  chain = next.then(() => {}, () => {});
-  return next;
-}
+const inOrder = serial();
 
 /**
  * Which era of speech we are in.
@@ -129,20 +176,50 @@ function inOrder<T>(work: () => Promise<T>): Promise<T> {
  */
 let epoch = 0;
 
-/** Is anything being read out right now? */
-export const speaking = (): boolean => playing !== null;
-
 /** Read `text` aloud. Resolves when the last sample has been played. */
 export function say(text: string, opts: SayOpts): Promise<void> {
   const mine = epoch;
   return inOrder(async () => {
     if (mine !== epoch) return; // silenced while this waited its turn
-    await reallySay(text, opts);
+    await reallySay(text, opts, mine);
   });
 }
 
+/**
+ * Nothing is there to ask — no server on that port, or no such host.
+ *
+ * Its own kind of failure because it is the one that repeats: every message
+ * after it would fail the same way, and the cell pauses reading on this one
+ * rather than logging the same refusal for every line of every reply.
+ */
+export class Unreachable extends Error {
+  override name = "Unreachable";
+}
+
 /** One request for speech, in whichever shape this server accepts. */
-function ask(
+async function ask(
+  base: string,
+  text: string,
+  opts: SayOpts,
+  server: Server,
+  raw: boolean,
+  signal: AbortSignal,
+): Promise<Response> {
+  try {
+    return await request(base, text, opts, server, raw, signal);
+  } catch (e) {
+    // `fetch` rejects with a TypeError for exactly one thing: it never got an
+    // answer. An abort is a Stop, and stays one.
+    if (e instanceof TypeError && !signal.aborted) {
+      throw new Unreachable(
+        `No voice server is answering at ${base} — start it, then switch the speaker on again.`,
+      );
+    }
+    throw e;
+  }
+}
+
+function request(
   base: string,
   text: string,
   opts: SayOpts,
@@ -174,23 +251,39 @@ function ask(
   });
 }
 
-async function reallySay(text: string, opts: SayOpts): Promise<void> {
+async function reallySay(
+  text: string,
+  opts: SayOpts,
+  mine: number,
+): Promise<void> {
+  const pieces = intoChunks(text);
+  if (pieces.length === 0) return;
   const abort = new AbortController();
+  // Claimed before the first await — see `playing`.
+  const me = { child: null as Deno.ChildProcess | null, abort };
+  playing = me;
   const at = Date.now();
   const base = opts.baseUrl.replace(/\/+$/, "");
   const signal = AbortSignal.any([abort.signal, AbortSignal.timeout(MAX_MS)]);
-  const server = await learn(base);
-  const pieces = intoChunks(text);
-  if (pieces.length === 0) return;
+  /** Still wanted: not silenced since this reading was asked for. */
+  const wanted = () => mine === epoch && !abort.signal.aborted;
+  const release = () => {
+    if (playing === me) playing = null;
+  };
+
+  const server = await learn(base, signal);
 
   /** One piece of speech as bare samples, in whichever shape this server
    *  offers. Throws what the server said, so a refusal explains itself. */
-  const fetchPiece = async (piece: string): Promise<Uint8Array> => {
+  const fetchPiece = async (piece: string): Promise<Pcm> => {
     let res = await ask(base, piece, opts, server, server.raw, signal);
     if (!res.ok && server.raw) {
+      const said = await res.text().catch(() => "");
+      if (!refusesRaw(res.status, said)) {
+        throw new Error(refusal(res.status, said));
+      }
       // Not a failure — a server that only does whole files. Asked once, then
       // remembered, so this costs one refused request per server per run.
-      await res.body?.cancel();
       log.info("speech", "this server does not stream raw samples", {
         status: res.status,
       });
@@ -199,23 +292,38 @@ async function reallySay(text: string, opts: SayOpts): Promise<void> {
     }
     if (!res.ok) throw new Error(await complaint(res));
     const body = new Uint8Array(await res.arrayBuffer());
-    return server.raw ? body : pcmFromWav(body);
+    return server.raw ? { pcm: body, rate: server.rate } : pcmFromWav(body);
   };
 
   // The first piece BEFORE the player, so a server that is not there cannot
   // leave a `paplay` holding the sound device open with nothing to play.
-  const first = await fetchPiece(pieces[0]);
+  let first: Pcm;
+  try {
+    first = await fetchPiece(pieces[0]);
+  } catch (e) {
+    release();
+    // Stopped while asking is a stop, not a failure to report.
+    if (!wanted()) return;
+    throw e;
+  }
+  // Checked again: Stop pressed while the first piece was being made has to
+  // mean no sound at all, not the first sentence and then silence.
+  if (!wanted()) {
+    release();
+    return;
+  }
 
   // ONE player for the whole reading, fed piece by piece.
   //
   // Always `--raw`, whatever the server hands back, because several pieces go
   // into this one process and a WAV header arriving in the middle of the audio
   // is a click followed by whatever its bytes sound like. The rate is the
-  // server's own, asked for rather than assumed.
+  // server's own, asked for rather than assumed — or the file's own, for a
+  // server that sends whole files and says in each one how fast it is.
   const child = new Deno.Command("paplay", {
     args: [
       "--raw",
-      `--rate=${server.rate}`,
+      `--rate=${first.rate ?? server.rate}`,
       `--channels=${CHANNELS}`,
       "--format=s16le",
       // Named, so this shows up as the app in a volume mixer rather than as a
@@ -227,7 +335,7 @@ async function reallySay(text: string, opts: SayOpts): Promise<void> {
     stdout: "null",
     stderr: "piped",
   }).spawn();
-  playing = { child, abort };
+  me.child = child;
 
   // Drained rather than ignored: an unread pipe can fill and stall the child,
   // and `paplay`'s complaint about a missing sink is the one line that
@@ -241,9 +349,9 @@ async function reallySay(text: string, opts: SayOpts): Promise<void> {
     // Writing BLOCKS once the player's buffer is full, which is the whole
     // trick: the next piece is fetched while the current one is playing, so
     // after the first there is nothing left to wait for.
-    await sink.write(first);
+    await sink.write(first.pcm);
     for (const piece of pieces.slice(1)) {
-      await sink.write(await fetchPiece(piece));
+      await sink.write((await fetchPiece(piece)).pcm);
     }
   } catch (e) {
     // Two very different things end up here and they must not read the same.
@@ -257,11 +365,16 @@ async function reallySay(text: string, opts: SayOpts): Promise<void> {
     await sink.close();
   } catch { /* the player is already gone */ }
   const status = await child.status.catch(() => null);
-  playing = null;
+  release();
+  // Stopped near the end lands HERE rather than in the catch above: every
+  // piece was already written, and only the player's exit says so. `paplay`
+  // traps SIGTERM and exits 0, but one killed before its handler is up dies
+  // of the signal — and a Stop is still a Stop, not "could not play".
+  stopped ||= abort.signal.aborted;
 
   if (failure !== "") throw new Error(failure);
   if (!stopped && status && !status.success) {
-    const why = (await grumbles).trim().split("\n").pop() ?? "";
+    const why = lastLine(await grumbles);
     log.warn("speech", "could not play the audio", {
       code: status.code,
       why: why.slice(0, 200),
@@ -291,7 +404,7 @@ export function silence(): void {
   if (!now) return;
   now.abort.abort();
   try {
-    now.child.kill("SIGTERM");
+    now.child?.kill("SIGTERM");
   } catch { /* already gone */ }
 }
 
@@ -342,35 +455,18 @@ export async function voices(
     .filter((v) => v.id !== "");
 }
 
-/**
- * What a refusal actually said.
- *
- * These servers all answer in OpenAI's error shape, and the message inside is
- * the useful part. Falls back to the status when there is nothing to read,
- * which is the most that can honestly be said then.
- */
-async function complaint(res: Response): Promise<string> {
-  const said = await res.text().catch(() => "");
-  try {
-    const body = JSON.parse(said) as {
-      error?: { message?: string };
-      detail?: unknown;
-    };
-    const msg = body.error?.message;
-    if (typeof msg === "string" && msg !== "") return msg;
-  } catch { /* not JSON; fall through to the raw text */ }
-  const trimmed = said.trim().slice(0, 160);
-  return trimmed === ""
-    ? `the speech server answered ${res.status}`
-    : `the speech server answered ${res.status}: ${trimmed}`;
-}
-
 /** A GET that answers with parsed JSON, or `null` for anything that did not
  *  work — a 404, a refused connection, a body that is not JSON. Every caller
  *  here is asking "is it this shape?" and none of them want a throw. */
-async function json<T>(url: string): Promise<T | null> {
+async function json<T>(
+  url: string,
+  signal?: AbortSignal,
+): Promise<T | null> {
+  const limit = AbortSignal.timeout(4000);
   try {
-    const res = await fetch(url, { signal: AbortSignal.timeout(4000) });
+    const res = await fetch(url, {
+      signal: signal ? AbortSignal.any([signal, limit]) : limit,
+    });
     if (!res.ok) {
       await res.body?.cancel();
       return null;
@@ -388,13 +484,18 @@ async function json<T>(url: string): Promise<T | null> {
  * Kokoro serves `/health`, Supertonic `/v1/health`, and which one you are
  * running is not a thing this app should make you tell it.
  */
-export async function probe(baseUrl: string): Promise<boolean> {
+export async function probe(
+  baseUrl: string,
+  fresh: boolean,
+): Promise<boolean> {
   const base = baseUrl.replace(/\/+$/, "");
-  // Looking again means the answer may have changed. Somebody stopping one
-  // server and starting another on the same port is exactly what the Find
-  // button is pressed after, and a remembered model name from the old one
-  // would 400 every sentence with nothing to explain it.
-  known.delete(base);
+  // Looking again ON PURPOSE means the answer may have changed. Somebody
+  // stopping one server and starting another on the same port is exactly what
+  // the Find button is pressed after, and a remembered model name from the old
+  // one would 400 every sentence with nothing to explain it. A picker that
+  // refreshes its list on focus is not that, and must not cost the next
+  // reading a round of questions.
+  if (fresh) known.delete(base);
   for (const path of ["/health", "/v1/health"]) {
     try {
       const res = await fetch(`${base}${path}`, {

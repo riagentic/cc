@@ -7,7 +7,12 @@
  */
 import { assertEquals } from "@std/assert";
 import { testCell } from "aio/testing";
-import { consoleCell, type Terminal } from "../../cell/console.ts";
+import {
+  consoleCell,
+  readerPresent,
+  shouldWait,
+  type Terminal,
+} from "../../cell/console.ts";
 
 const term = (over: Partial<Terminal> = {}): Terminal => ({
   projectId: "proj-1",
@@ -89,4 +94,29 @@ testCell(consoleCell, "a terminal nobody opened is not invented", (t) => {
   t.init({ terms: {} });
   t.send.setBusy("nope", true, "cargo");
   assertEquals(Object.keys(t.getState().terms).length, 0);
+});
+
+Deno.test("an unwatched shell is never held back", () => {
+  // A dev server in a tab nobody is looking at: the queue fills, and waiting
+  // for a page that is not there stalled it after ~96 chunks. Nobody reading
+  // means keep running and let scrollback drop the oldest.
+  assertEquals(shouldWait(0, 500, 0, 0), false);
+  assertEquals(shouldWait(0, 96, 0, 0), false);
+});
+
+Deno.test("a watched shell waits for its reader, but only past the threshold", () => {
+  const now = 10_000;
+  assertEquals(shouldWait(1, 95, now, now), false);
+  assertEquals(shouldWait(1, 96, now, now), true);
+});
+
+Deno.test("a watcher that stopped acknowledging is not a reader", () => {
+  // A renderer that reloads never sends `unwatch`: the count stays at one for
+  // good. Output waiting unacknowledged for longer than the lease is the
+  // proof nobody is drawing it, and the shell must not stall behind it.
+  assertEquals(readerPresent(1, 200, 0, 4_000), true);
+  assertEquals(readerPresent(1, 200, 0, 6_000), false);
+  assertEquals(shouldWait(1, 200, 0, 6_000), false);
+  // Nothing waiting is not silence: an idle shell's reader is still there.
+  assertEquals(readerPresent(1, 0, 0, 60_000), true);
 });

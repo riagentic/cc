@@ -13,7 +13,14 @@
  */
 import { assert, assertEquals } from "@std/assert";
 import { bootCells } from "aio/testing";
-import { loops, MIN_EVERY_SEC, projectLoops } from "../../cell/loops.ts";
+import {
+  loops,
+  MIN_EVERY_SEC,
+  planTick,
+  projectLoops,
+  type TickWorld,
+} from "../../cell/loops.ts";
+import type { Loop, Status } from "../../type/claude.ts";
 import { session } from "../../cell/session.ts";
 import { workspace } from "../../cell/workspace.ts";
 
@@ -45,6 +52,7 @@ async function withLoops(
     await workspace.addProject(dir);
     await run(h, dir);
   } finally {
+    await h.settle();
     h.dispose();
     await Deno.remove(dir, { recursive: true });
   }
@@ -168,8 +176,109 @@ Deno.test("a loop belongs to exactly one project and fires into no other", async
     );
     assert(idA !== idB);
   } finally {
+    await h.settle();
     h.dispose();
     await Deno.remove(a, { recursive: true });
     await Deno.remove(b, { recursive: true });
   }
+});
+
+/* ── the tick's decisions, as a pure function ─────────────────────────────── */
+
+const loop = (id: string, over: Partial<Loop> = {}): Loop => ({
+  id,
+  prompt: `prompt ${id}`,
+  everySec: 60,
+  paused: false,
+  projectId: "p",
+  createdAt: 0,
+  nextAt: 1_000,
+  runs: [],
+  ...over,
+});
+
+const world = (over: Partial<TickWorld> = {}): TickWorld => ({
+  now: 5_000,
+  activeId: "p",
+  activeKey: "p",
+  statusOf: () => "ready" as Status,
+  answerOf: () => "",
+  sentTo: (l) => l.projectId,
+  ...over,
+});
+
+Deno.test("two loops due together fire one prompt, not two", () => {
+  // `idle` used to be read once per tick, so both went into the same turn —
+  // the second queued behind the first as a prompt nobody typed.
+  const plan = planTick([loop("a"), loop("b")], world());
+  assertEquals(plan.fire, "a");
+  assertEquals(plan.defer, ["b"]);
+});
+
+Deno.test("an open run is settled by its own conversation, not the one on screen", () => {
+  const open = {
+    at: 0,
+    endedAt: null,
+    ok: null,
+    summary: "sent",
+  };
+  // Sent into chat "k2", which is still working; the screen shows an idle
+  // chat. The old tick read the screen and closed the run mid-turn.
+  const busyThere = planTick(
+    [loop("a", { nextAt: 99_999, runs: [open] })],
+    world({
+      statusOf: (k) => k === "k2" ? "working" : "ready",
+      sentTo: () => "k2",
+    }),
+  );
+  assertEquals(busyThere.settle, []);
+
+  // …and the reverse: finished there while the screen is busy elsewhere.
+  const doneThere = planTick(
+    [loop("a", { nextAt: 99_999, runs: [open] })],
+    world({
+      statusOf: (k) => k === "k2" ? "error" : "working",
+      answerOf: (k) => k === "k2" ? "failed: tests" : "wrong chat",
+      sentTo: () => "k2",
+    }),
+  );
+  assertEquals(doneThere.settle, [
+    { id: "a", ok: false, summary: "failed: tests" },
+  ]);
+});
+
+Deno.test("a loop whose last run is still open does not fire again", () => {
+  const open = { at: 0, endedAt: null, ok: null, summary: "" };
+  const plan = planTick(
+    [loop("a", { runs: [open] })],
+    world({
+      statusOf: (k) => k === "k2" ? "working" : "ready",
+      sentTo: () => "k2",
+    }),
+  );
+  assertEquals(plan.fire, null);
+  assertEquals(plan.defer, ["a"]);
+});
+
+Deno.test("a busy screen or another project defers, and fires nothing", () => {
+  assertEquals(
+    planTick([loop("a")], world({ statusOf: () => "working" })).fire,
+    null,
+  );
+  assertEquals(planTick([loop("a")], world({ activeId: "q" })).fire, null);
+});
+
+Deno.test("a due loop is claimed once, before anything is sent", async () => {
+  await withLoops(async () => {
+    await loops.add("ship it", 60);
+    await loops.runNow(loops.loops[0].id);
+    // The write half, on its own: it commits the run and the next due time
+    // whole, so a send that follows can never be the reason they are lost.
+    const first = await loops.claim();
+    assertEquals(first?.prompt, "ship it");
+    assertEquals(loops.loops[0].runs.length, 1);
+    assert(loops.loops[0].nextAt > Date.now());
+    // Claimed: a second pass finds nothing due.
+    assertEquals(await loops.claim(), null);
+  });
 });

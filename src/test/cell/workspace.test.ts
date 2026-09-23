@@ -394,6 +394,7 @@ Deno.test("removeMissingProjects drops only the gone, and moves the selection of
     workspace.removeMissingProjects();
     assertEquals(workspace.projects.length, 1);
   } finally {
+    await h.settle();
     h.dispose();
     await Deno.remove(tmp, { recursive: true });
   }
@@ -429,6 +430,7 @@ Deno.test("a deleted folder takes its tab with it, and the removal is undoable",
     assertEquals(workspace.projects[0].path, `${tmp}/kept`);
     assertEquals(workspace.projects[1].path, `${tmp}/doomed`);
   } finally {
+    await h.settle();
     h.dispose();
     await Deno.remove(tmp, { recursive: true });
   }
@@ -467,6 +469,7 @@ Deno.test("a project on a vanished mount is kept, not forgotten", async () => {
     );
     assertEquals(workspace.forgotten.length, 0);
   } finally {
+    await h.settle();
     h.dispose();
     await Deno.remove(tmp, { recursive: true }).catch(() => {});
   }
@@ -487,6 +490,7 @@ Deno.test("auto-forget can be turned off, and then nothing disappears", async ()
     assertEquals(kept?.missing, true);
     assertEquals(workspace.forgotten.length, 0);
   } finally {
+    await h.settle();
     h.dispose();
     await Deno.remove(tmp, { recursive: true });
   }
@@ -517,6 +521,7 @@ Deno.test("a project added while the app is still booting is not wiped by boot",
     // …and boot still did its own job.
     assertEquals(workspace.home !== "", true);
   } finally {
+    await h.settle();
     h.dispose();
     await Deno.remove(dir, { recursive: true });
   }

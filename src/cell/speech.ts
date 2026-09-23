@@ -101,6 +101,24 @@ type SpeechState = {
    * the speakers were still going.
    */
   busy: number;
+  /**
+   * Which stint of speaking this is.
+   *
+   * Bumped by every Stop — `off`, `hush`, the master switch. A reading that
+   * was in flight when it was bumped still ends, a moment later, and its
+   * `ended` used to decrement a count that Stop had already zeroed and then
+   * declare the speaker idle while the NEXT reading was playing. Each reading
+   * carries the stint it began in, and one from an old stint changes nothing.
+   */
+  gen: number;
+  /**
+   * The server was not there last time — nothing on the port at all.
+   *
+   * Reading pauses until somebody looks again (`on`, or a Find that gets an
+   * answer). Without it, every line of every reply knocked on a closed port
+   * and logged its own copy of the same refusal.
+   */
+  down: boolean;
   error: string | null;
   config: SpeechConfig;
   voices: { id: string; grade: string; name: string }[];
@@ -135,6 +153,8 @@ export const speech = cell("speech", {
     status: "off" as SpeechStatus,
     saying: "",
     busy: 0,
+    gen: 0,
+    down: false,
     error: null as string | null,
     config: {
       enabled: false,
@@ -197,6 +217,8 @@ export const speech = cell("speech", {
       }
       s.status = "idle";
       s.error = null;
+      // Switching on is also "try the server again".
+      s.down = false;
       // Nothing said in a previous stint counts against this one. The backlog
       // is skipped by the marker above, not by this list, and a transcript
       // that was cleared and rebuilt can reuse an id.
@@ -209,6 +231,7 @@ export const speech = cell("speech", {
       s.status = "off";
       s.saying = "";
       s.busy = 0;
+      s.gen += 1;
       s.error = null;
       const io = await import("./speech.server.ts");
       io.silence();
@@ -220,6 +243,7 @@ export const speech = cell("speech", {
       if (s.status === "off") return;
       s.saying = "";
       s.busy = 0;
+      s.gen += 1;
       const io = await import("./speech.server.ts");
       io.silence();
       await speech.quiet(); // aiol-ok: orchestration, one step
@@ -248,10 +272,14 @@ export const speech = cell("speech", {
         if (s.said.includes(id)) return;
         s.said = [...s.said, id].slice(-SAID_KEEP);
       }
+      // After the claim, not before: a line dropped while the server is away
+      // is handed over all the same, and must not be read when it comes back.
+      if (s.down) return;
       const voice = who === "you" ? cfg.voiceIn : cfg.voiceOut;
+      const gen = s.gen;
 
       const io = await import("./speech.server.ts");
-      await speech.began(clean); // aiol-ok: orchestration, one step
+      await speech.began(clean, gen); // aiol-ok: orchestration, one step
       try {
         await io.say(clean, {
           baseUrl: cfg.baseUrl,
@@ -259,14 +287,18 @@ export const speech = cell("speech", {
           speed: cfg.speed,
           language: cfg.language,
         });
-        await speech.ended(""); // aiol-ok: orchestration, one step
+        await speech.ended("", gen, false); // aiol-ok: orchestration, one step
       } catch (e) {
-        await speech.ended(e instanceof Error ? e.message : String(e)); // aiol-ok: orchestration, one step
+        await speech.ended( // aiol-ok: orchestration, one step
+          e instanceof Error ? e.message : String(e),
+          gen,
+          e instanceof io.Unreachable,
+        );
       }
     },
 
-    began(s: SpeechState, text: string) {
-      if (s.status === "off") return;
+    began(s: SpeechState, text: string, gen: number) {
+      if (s.status === "off" || gen !== s.gen) return;
       s.busy += 1;
       s.status = "speaking";
       s.error = null;
@@ -274,7 +306,18 @@ export const speech = cell("speech", {
       s.saying = text.length > 80 ? text.slice(0, 79) + "…" : text;
     },
 
-    ended(s: SpeechState, error: string) {
+    /** A reading is over. `down` says the server was not there at all. */
+    ended(s: SpeechState, error: string, gen: number, down: boolean) {
+      // From a stint that Stop already ended. Its count was zeroed then, and
+      // whatever is playing now belongs to somebody else.
+      if (gen !== s.gen) return;
+      if (down === true && !s.down) {
+        // Said once per outage, not once per line.
+        s.down = true;
+        log.warn("speech", "voice server not answering — reading paused", {
+          error,
+        });
+      }
       s.busy = Math.max(0, s.busy - 1);
       if (s.busy > 0) return; // something else is still talking
       s.saying = "";
@@ -282,14 +325,21 @@ export const speech = cell("speech", {
       if (error !== "") {
         s.status = "error";
         s.error = error;
-        log.warn("speech", "could not read that out", { error });
+        if (down !== true) {
+          log.warn("speech", "could not read that out", { error });
+        }
         return;
       }
       s.status = "idle";
     },
 
+    /** Back to whatever the speaker was before it complained. An error can
+     *  only come from a speaker that was on — unless it was the missing
+     *  address, and then it never got as far as on. */
     dismissError(s: SpeechState) {
-      if (s.status === "error") s.status = s.config.onAtStart ? "idle" : "off";
+      if (s.status === "error") {
+        s.status = s.config.enabled && s.config.baseUrl !== "" ? "idle" : "off";
+      }
       s.error = null;
     },
 
@@ -351,6 +401,7 @@ export const speech = cell("speech", {
       s.status = "off";
       s.saying = "";
       s.busy = 0;
+      s.gen += 1;
       s.error = null;
       s.voices = [];
       s.reachable = false;
@@ -387,8 +438,9 @@ export const speech = cell("speech", {
     },
 
     /** Look for a speech server, adopt it if one answers, and learn its
-     *  voices while we are there. */
-    async find(s: SpeechState) {
+     *  voices while we are there. `fresh` is the Find button: forget what was
+     *  learned about the server, because it may be a different one now. */
+    async find(s: SpeechState, fresh = false) {
       // The whole point of the switch: with it off, nothing here knocks on a
       // speech server. A server that loads its model when first asked keeps
       // that memory free, and one that is not running is not started by a
@@ -396,7 +448,7 @@ export const speech = cell("speech", {
       if (!s.config.enabled) return;
       const url = s.config.baseUrl || DEFAULT_SPEECH_URL;
       const io = await import("./speech.server.ts");
-      const ok = await io.probe(url);
+      const ok = await io.probe(url, fresh === true);
       const list = ok ? await io.voices(url) : [];
       await speech.found(url, ok, list); // aiol-ok: orchestration, after the probe
     },
@@ -408,6 +460,7 @@ export const speech = cell("speech", {
       list: { id: string; grade: string; name: string }[],
     ) {
       s.reachable = ok === true;
+      if (ok) s.down = false; // there again: reading can resume
       if (ok && s.config.baseUrl === "") s.config.baseUrl = url;
       if (!Array.isArray(list) || list.length === 0) return;
       s.voices = list;

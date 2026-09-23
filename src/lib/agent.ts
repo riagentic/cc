@@ -13,10 +13,13 @@
  * fraction of the window it is spending.
  */
 import type {
+  LocalCapability,
   LocalConfig,
   LocalMode,
   LocalMsg,
+  LocalPace,
   LocalPermission,
+  LocalRunAs,
   LocalTodo,
   LocalToolCall,
   PromptEnv,
@@ -24,39 +27,166 @@ import type {
 
 /* ── permission ───────────────────────────────────────────────────────────── */
 
-/** The modes the picker offers, worded the way the Claude side words its own —
- *  the app should not have two vocabularies for one idea. */
-export const LOCAL_PERMISSIONS: {
-  id: LocalPermission;
+/** Capability tiers the picker offers — cumulative, not per-command prompts. */
+export const LOCAL_CAPABILITIES: {
+  id: LocalCapability;
   label: string;
   hint: string;
 }[] = [
   {
-    id: "ask",
-    label: "Ask every time",
-    hint: "See each command before it runs",
+    id: "read",
+    label: "Read",
+    hint: "List, find, read and search — no edits, no shell",
   },
   {
-    id: "dontAsk",
-    label: "Don't ask",
-    hint: "Runs commands unasked in a sandbox — destructive ones are refused",
+    id: "write",
+    label: "Write",
+    hint: "Also edit and write files — still no shell",
   },
-  { id: "bypass", label: "Bypass", hint: "No checks at all. Anything runs." },
+  {
+    id: "execute",
+    label: "Execute",
+    hint: "Also run commands in a sandbox — destructive ones are refused",
+  },
+  {
+    id: "all",
+    label: "Allow all",
+    hint: "No checks at all. Anything runs.",
+  },
+];
+
+/** Pace modes: how thoroughly the agent works a turn. */
+export const LOCAL_PACES: {
+  id: LocalPace;
+  label: string;
+  hint: string;
+}[] = [
+  {
+    id: "draft",
+    label: "Draft",
+    hint: "Ship something that runs — very fast, lightly checked",
+  },
+  {
+    id: "normal",
+    label: "Normal",
+    hint: "Decent quality with a real check — still quick",
+  },
+  {
+    id: "quality",
+    label: "Quality",
+    hint: "Full thorough pass — verify everything (slower)",
+  },
+];
+
+/** Who shell commands run as. */
+export const LOCAL_RUN_AS: {
+  id: LocalRunAs;
+  label: string;
+  hint: string;
+}[] = [
+  {
+    id: "auto",
+    label: "Auto",
+    hint: "cc-agent when the project is in its reach, else you",
+  },
+  {
+    id: "agent",
+    label: "cc-agent",
+    hint: "Always the agent Linux account when set up",
+  },
+  {
+    id: "user",
+    label: "You",
+    hint: "This user account, even if cc-agent exists",
+  },
 ];
 
 /**
- * A project's permission mode, including one configured before there were
- * three of them.
- *
- * Anything unrecognised reads as `ask`: a junk value from a persisted file, a
- * hand-edited config or a future version must fail *closed*, because the value
- * decides whether a shell command runs without anyone seeing it.
+ * Capability tier for a project. New field wins; older `permission` /
+ * `shApproval` migrate. Unknown values fail closed to `read`.
+ */
+export function capabilityOf(cfg: LocalConfig | undefined): LocalCapability {
+  const c = cfg?.capability;
+  if (c === "read" || c === "write" || c === "execute" || c === "all") return c;
+  const p = cfg?.permission;
+  if (p === "bypass") return "all";
+  if (p === "dontAsk") return "execute";
+  // Legacy "ask" maps to *write*, not execute. There is no per-command prompt
+  // any more, and somebody who asked to see every command before it ran did
+  // not thereby ask for unattended shell: the upgrade has to fail closed, and
+  // Execute is one click away in Settings.
+  if (p === "ask") return "write";
+  if (cfg?.shApproval === "always") return "all";
+  // Junk permission values fail closed (no shell).
+  if (p !== undefined) return "read";
+  return "execute";
+}
+
+/** Pace for a project. Default quality (prior behaviour). */
+export function paceOf(cfg: LocalConfig | undefined): LocalPace {
+  const p = cfg?.pace;
+  return p === "draft" || p === "normal" || p === "quality" ? p : "quality";
+}
+
+/** Run-as preference. Default auto. */
+export function runAsOf(cfg: LocalConfig | undefined): LocalRunAs {
+  const r = cfg?.runAs;
+  return r === "auto" || r === "agent" || r === "user" ? r : "auto";
+}
+
+/**
+ * Shell-approval mode derived from capability (and legacy fields).
+ * Used by the command gate that still speaks ask/dontAsk/bypass.
  */
 export function permissionOf(cfg: LocalConfig | undefined): LocalPermission {
-  const p = cfg?.permission;
-  if (p === "bypass" || p === "dontAsk" || p === "ask") return p;
-  // The two-valued field this replaced. "always" meant exactly today's bypass.
-  return cfg?.shApproval === "always" ? "bypass" : "ask";
+  switch (capabilityOf(cfg)) {
+    case "all":
+      return "bypass";
+    case "execute":
+      return "dontAsk";
+    case "write":
+    case "read":
+      // No shell tools exposed; if one slips through, hold it.
+      return "ask";
+  }
+}
+
+/** Round budget for one turn at this pace. */
+export function maxRoundsFor(pace: LocalPace): number {
+  // Draft: short leash. Normal: enough to finish + check. Quality: unchanged.
+  return pace === "draft" ? 48 : pace === "normal" ? 160 : 1024;
+}
+
+/**
+ * Wall-clock budget (ms) for one turn at this pace, as a share of the base
+ * budget — which is the tunable one (`CC_TURN_MS`, twenty minutes by default),
+ * passed in rather than hard-coded here: a pace is a fraction of the turn
+ * clock, not a second clock of its own.
+ */
+export function turnMsFor(pace: LocalPace, baseMs = 20 * 60_000): number {
+  const share = pace === "draft" ? 0.2 : pace === "normal" ? 0.5 : 1;
+  return Math.max(1, Math.round(baseMs * share));
+}
+
+/** Whether the verify-after-edits nudge runs. Draft skips it; Normal and Quality ask once. */
+export function verifyNudgeFor(pace: LocalPace): boolean {
+  return pace !== "draft";
+}
+
+/** Whether to push reading framework docs before writing. Quality only. */
+export function docsNudgeFor(pace: LocalPace): boolean {
+  return pace === "quality";
+}
+
+/** Effective LocalMode for tool schemas given capability. */
+export function modeForCapability(
+  mode: LocalMode,
+  cap: LocalCapability,
+): LocalMode {
+  if (mode === "chat") return "chat";
+  // Explicit read mode wins; capability "read" also forces read tools.
+  if (mode === "read" || cap === "read") return "read";
+  return "agent";
 }
 
 /**
@@ -347,9 +477,9 @@ const LOOKS: ReadonlySet<string> = new Set([
   "find",
 ]);
 /** Subcommands that, by the conventions of command-line tools, only report:
- *  `git status`, `docker logs`, `kubectl describe`, `pm2 list`, an app
- *  manager's `status` or `logs`. Not `get` (`go get` installs), not `version`
- *  (`npm version` bumps one). */
+ *  `docker logs`, `kubectl describe`, `pm2 list`, an app manager's `status`
+ *  or `logs`. Not `get` (`go get` installs), not `version` (`npm version`
+ *  bumps one). */
 const LOOK_VERBS: ReadonlySet<string> = new Set([
   "status",
   "logs",
@@ -368,12 +498,38 @@ const LOOK_VERBS: ReadonlySet<string> = new Set([
   "doctor",
   "state",
 ]);
+/** The programs whose `LOOK_VERBS` are known to only report. A verb is a
+ *  convention, not a promise: `./x.sh status` and `tools/run.py list` run
+ *  whatever the script says, so only programs that are known to keep the
+ *  convention get it. Not `git`: it reads the project's `.git/config`, which
+ *  a sandboxed command can write — `core.fsmonitor`, a hook or a filter
+ *  there runs as the user the moment `git status` runs outside the box. */
+const REPORTERS: ReadonlySet<string> = new Set([
+  "am",
+  "docker",
+  "podman",
+  "kubectl",
+  "helm",
+  "pm2",
+  "forever",
+  "supervisorctl",
+  "systemctl",
+  "apt",
+  "dpkg",
+  "snap",
+  "flatpak",
+  "brew",
+  "pip",
+  "pip3",
+  "conda",
+]);
 /** Programs whose first word names code to run — a script, a task, a
  *  package — so no subcommand of theirs is known to only look. */
 const RUNS_WHAT_IT_NAMES =
   /^(python\d*(\.\d+)?|node|deno|bun|bunx|ruby|perl|php|java|npx|pnpx|npm|pnpm|yarn|make|just|task|rake|gradle|gradlew|mvn|ant|invoke|cargo|go|dotnet|uv|poetry|pipenv|tsx|ts-node)$/;
 
-/** Does this simple command only report, whatever the program? */
+/** Does this simple command only report? `--help`/`--version` alone, of an
+ *  installed program; a report verb, of a program known to keep to it. */
 function reportsOnly(h: CommandHead, words: string[]): boolean {
   if (RUNS_WHAT_IT_NAMES.test(h.prog)) return false;
   const args = words.slice(1);
@@ -382,12 +538,163 @@ function reportsOnly(h: CommandHead, words: string[]): boolean {
   ) {
     return true;
   }
-  return LOOK_VERBS.has(h.sub);
+  return REPORTERS.has(h.prog) && LOOK_VERBS.has(h.sub);
 }
-/** Places a look must not reach even outside: what the sandbox hides —
- *  `.claude*` included, which holds every conversation's transcript. */
-const SECRET_PLACES =
-  /\.ssh\b|\.gnupg|\.aws\b|\.azure|\.kube|\.docker\b|\.password-store|\.netrc|\.git-credentials|\.npmrc|\.pypirc|keyrings|\.claude|\.config\/(gcloud|gh|op)\b|_history\b|\.Xauthority/;
+
+/* ── secrets: one list for the box, the read tools and the looks ─────────── */
+
+/** Directories under a home a sandboxed command may not see at all, no tool
+ *  reads and no look reaches unasked: credential stores, browser profiles,
+ *  this app's own data (the transcripts of every other conversation). All of
+ *  `~/.config` but `CONFIG_SHOWN` goes with them — see there. */
+export const HIDDEN_DIRS: readonly string[] = [
+  ".ssh",
+  ".gnupg",
+  ".aws",
+  ".azure",
+  ".kube",
+  ".docker",
+  ".password-store",
+  ".mozilla",
+  ".claude",
+  ".claude-control",
+  ".local/share/keyrings",
+  ".pki",
+  ".thunderbird",
+  ".var",
+];
+/** Files likewise. */
+export const HIDDEN_FILES: readonly string[] = [
+  // The keys to the user's own screen: with these a command inside the box
+  // could open a window on the real display, read the clipboard, or watch
+  // what is typed — the one wall the box is most obviously supposed to be.
+  ".Xauthority",
+  ".ICEauthority",
+  ".netrc",
+  ".git-credentials",
+  // The file, not the folder: hiding all of `.config/git` would take the
+  // user's own name and email with it, and a commit made in the box would
+  // then be signed by nobody.
+  ".config/git/credentials",
+  ".npmrc",
+  ".pypirc",
+  ".bash_history",
+  ".zsh_history",
+  ".python_history",
+];
+/**
+ * The entries of `~/.config` that stay visible. An allowlist, because the
+ * list of what is secret there has no end: rclone's remotes, copilot's token,
+ * a wallet's keys, a hand-kept `quant-live.env` — one machine had 270 entries
+ * and a denylist named four. What tools legitimately read in a build or a
+ * test is short: git's identity and ignores, fonts, the toolkit theme.
+ */
+export const CONFIG_SHOWN: readonly string[] = [
+  "git",
+  "fontconfig",
+  "gtk-2.0",
+  "gtk-3.0",
+  "gtk-4.0",
+  "mimeapps.list",
+  "user-dirs.dirs",
+  "user-dirs.locale",
+  "matplotlib",
+  "htop",
+  "procps",
+  "nvim",
+  "go",
+];
+/** Files that are credentials by their name alone, wherever they are. */
+export const SECRET_NAMES =
+  /^(\.env(\..+)?|\.netrc|\.npmrc|\.pypirc|\.git-credentials|credentials|id_[a-z0-9]+|.*\.pem|.*\.p12|.*\.pfx|.*\.kdbx|.*\.key)$/i;
+/** Names a glob is tried against for `SECRET_NAMES` — one of each shape. */
+const SECRET_SAMPLES = [
+  ".env",
+  ".env.local",
+  ".netrc",
+  ".npmrc",
+  ".pypirc",
+  ".git-credentials",
+  "credentials",
+  "id_rsa",
+  "id_ed25519",
+  "x.pem",
+  "x.p12",
+  "x.pfx",
+  "x.kdbx",
+  "x.key",
+];
+
+const GLOB = /[*?[]/;
+/** One path segment of a shell glob as a regex — bash's default: `*` and
+ *  `?` never match a leading dot. */
+function segMatch(pattern: string, name: string): boolean {
+  if (!GLOB.test(pattern)) return pattern === name;
+  const body = pattern.replace(/[.+^${}()|\\]/g, "\\$&")
+    .replace(/\*/g, "[^/]*").replace(/\?/g, "[^/]").replace(/\[!/g, "[^");
+  const lead = pattern.startsWith(".") ? "" : "(?!\\.)";
+  try {
+    return new RegExp(`^${lead}${body}$`).test(name);
+  } catch {
+    return true; // a glob that cannot be read is assumed to reach it
+  }
+}
+/** Does the path (or glob) `p` name `entry`, or something inside it? */
+function reaches(p: string[], entry: string[]): boolean {
+  return p.length >= entry.length && entry.every((e, i) => segMatch(p[i], e));
+}
+
+/**
+ * Is `path` a place no tool reads and no look reaches unasked — under the
+ * home directory (this user's, `/root`, or anybody's under `/home`), a
+ * hidden entry or any of `~/.config` but `CONFIG_SHOWN`; anywhere, a file
+ * whose name alone says it is a credential. `path` may be a shell glob:
+ * `~/.s*` reaches `.ssh`. The one predicate the sandbox, the read tools and
+ * the look check share — three lists used to disagree, and each gap was a
+ * way to read what another one hid.
+ */
+export function secretPath(path: string, home = ""): boolean {
+  const segs = path.split("/").filter((s) => s !== "" && s !== ".");
+  const last = segs.at(-1) ?? "";
+  if (
+    GLOB.test(last)
+      ? SECRET_SAMPLES.some((n) => segMatch(last, n))
+      : SECRET_NAMES.test(last)
+  ) return true;
+  if (!path.startsWith("/")) return false;
+  const bases = new Set<string>(["/root"]);
+  if (home) bases.add(home.replace(/\/+$/, ""));
+  const other = /^\/(home|Users)\/[^/]+/.exec(path);
+  if (other && !GLOB.test(other[0])) bases.add(other[0]);
+  for (const base of bases) {
+    const b = base.split("/").filter(Boolean);
+    if (!reaches(segs, b)) continue;
+    const rest = segs.slice(b.length);
+    for (const e of [...HIDDEN_DIRS, ...HIDDEN_FILES]) {
+      if (reaches(rest, e.split("/"))) return true;
+    }
+    if (rest.length >= 2 && segMatch(rest[0], ".config")) {
+      const name = rest[1];
+      if (GLOB.test(name) || !CONFIG_SHOWN.includes(name)) return true;
+    }
+  }
+  return false;
+}
+
+/** Directories a recursive look must not start from: the tops of every home,
+ *  and the parents of the hidden places, where all of them are in reach. */
+function sweepTops(home: string): Set<string> {
+  const tops = new Set(["/", "/home", "/root", "/Users"]);
+  if (!home) return tops;
+  tops.add(home);
+  for (const e of [...HIDDEN_DIRS, ...HIDDEN_FILES, ".config/x"]) {
+    const parts = e.split("/");
+    for (let i = 1; i < parts.length; i++) {
+      tops.add(`${home}/${parts.slice(0, i).join("/")}`);
+    }
+  }
+  return tops;
+}
 
 /** `find` flags that run, delete or write something rather than print. */
 const FIND_ACTS = /\s-(exec|execdir|ok|okdir|delete|fprint0?|fprintf|fls)\b/;
@@ -404,7 +711,18 @@ export type LookEnv = {
   /** Directories no look may reach apart from `own`: where every other
    *  conversation's scratch is. */
   hidden?: readonly string[];
+  /** Where the shell would find a program named without a slash — its real
+   *  path, or `null`. */
+  where?: (prog: string) => string | null;
+  /** Where a sandboxed command can write. A program found there is one the
+   *  model may have put there, and never runs outside unasked. */
+  writable?: readonly string[];
 };
+
+/** A command's words as the paths they may name: split at the shell's
+ *  separators and at `=`/`:` (`--file=~/x`, `a:b`). */
+const pathWords = (text: string): string[] =>
+  text.split(/[\s;|&()<>]+/).flatMap((w) => w.split(/[=:]/)).filter(Boolean);
 
 /**
  * May this outside-the-sandbox request run without asking?
@@ -421,6 +739,10 @@ export type LookEnv = {
  * value is known here put in. Any other variable can point anywhere, so a look
  * that uses one is asked about. A recursive look over the home directory or
  * above it reaches every place the sandbox hides, and is asked about too.
+ *
+ * A program named by a path (`./x.sh status`), or found on `PATH` somewhere a
+ * sandboxed command can write, is never a look and never "allowed": the model
+ * wrote it, and outside the box it would run as the user.
  */
 export function mayLeaveUnasked(
   cmd: string,
@@ -449,22 +771,37 @@ export function mayLeaveUnasked(
     (t, d) => t.split(d.replace(/\/+$/, "") + "/").join("/OWN/"),
     seen,
   );
-  const lookable = !unknownVar && !/\$/.test(seen) &&
-    !SECRET_PLACES.test(mine) && !/\.\.\//.test(mine) &&
+  // A dotted relative name is judged as if the command had `cd ~` first:
+  // `cd ~ && cat .ssh/id_rsa` is one look.
+  const secret = pathWords(mine).some((w) =>
+    secretPath(w, home) ||
+    (home !== "" && w.startsWith(".") && secretPath(`${home}/${w}`, home))
+  );
+  const lookable = !unknownVar && !/\$/.test(seen) && !secret &&
+    !/\.\.\//.test(mine) &&
     !(env.hidden ?? []).some((d) => d.length > 1 && mine.includes(d));
   const broad = sweepsHome(seen, home);
+  const under = (p: string, d: string) =>
+    p === d || p.startsWith(d.replace(/\/+$/, "") + "/");
+  const planted = (h: CommandHead): boolean => {
+    if (h.words[0].includes("/")) return true;
+    const at = env.where?.(h.prog);
+    return !!at && (env.writable ?? []).some((d) => d !== "" && under(at, d));
+  };
   const looks = (h: CommandHead) =>
     lookable && !broad &&
     ((LOOKS.has(h.prog) && !(h.prog === "find" && FIND_ACTS.test(seen))) ||
       reportsOnly(h, h.words));
-  return heads.every((h) => looks(h) || allowed.includes(h.prog));
+  return heads.every((h) =>
+    !planted(h) && (looks(h) || allowed.includes(h.prog))
+  );
 }
 
 /** Does a recursive look (`find`, `grep -r`, `du`, `ls -R`) start at the home
- *  directory or above it — where every hidden place is in reach? */
+ *  directory or above it, or at a parent of a hidden place — where the hidden
+ *  places are in reach? */
 function sweepsHome(text: string, home: string): boolean {
-  const tops = new Set(["/", "/home", "/root", "/Users"]);
-  if (home) tops.add(home);
+  const tops = sweepTops(home);
   for (const seg of text.split(/&&|\|\||[;|\n&]/)) {
     const words = seg.trim().split(/\s+/).filter(Boolean);
     unwrap(words);
@@ -610,6 +947,43 @@ export function isTestPath(path: string): boolean {
     /^test_.+\.[a-z0-9]+$/i.test(name);
 }
 
+/** Extensions and filenames that are prose, not code: a turn that only touched
+ *  these has nothing to run, so "you changed files and ran nothing" is the
+ *  wrong thing to say. Matches the convention opencode and Hermes use. */
+const DOC_EXTENSIONS = new Set([
+  "md",
+  "markdown",
+  "mdx",
+  "rst",
+  "txt",
+  "text",
+  "adoc",
+  "asciidoc",
+  "org",
+  "log",
+  "csv",
+  "tsv",
+]);
+const DOC_FILENAMES = new Set([
+  "license",
+  "licence",
+  "notice",
+  "authors",
+  "contributors",
+  "changelog",
+  "codeowners",
+]);
+
+/** A documentation/prose path — `.md`, `LICENSE`, `CHANGELOG`… — with no
+ *  runtime behavior to verify. */
+export function isDocPath(path: string): boolean {
+  const p = String(path ?? "").replace(/\\/g, "/");
+  const name = p.slice(p.lastIndexOf("/") + 1).toLowerCase();
+  const dot = name.lastIndexOf(".");
+  const ext = dot <= 0 ? "" : name.slice(dot + 1);
+  return ext !== "" ? DOC_EXTENSIONS.has(ext) : DOC_FILENAMES.has(name);
+}
+
 /** Does this shell command run a test suite? `deno test`, `npm test`,
  *  `cargo test`, `go test ./...`, `deno task test`, `pytest`, `vitest`… — not
  *  the shell's own `test -f x`, and not a folder that happens to be named
@@ -681,7 +1055,11 @@ function foreverName(words: string[]): string {
  *  the ones that are not already free to look. `[]` when the command cannot
  *  be read, so nothing is remembered on its behalf. */
 export function programsToAllow(cmd: string): string[] {
-  const heads = commandHeads(cmd) ?? [];
+  const heads = (commandHeads(cmd) ?? []).filter((h) =>
+    // A program named by a path is the model's own: it is never allowed by
+    // name (see `mayLeaveUnasked`), so remembering it would promise nothing.
+    !h.words[0].includes("/")
+  );
   return [...new Set(heads.map((h) => h.prog).filter((p) => !LOOKS.has(p)))];
 }
 
@@ -984,6 +1362,13 @@ function accountRules(
   ].join(" ");
 }
 
+/** Said when the tier gives no shell: the method above talks about running
+ *  checks, and a model told to verify with a tool it does not have either
+ *  invents the call or stalls. */
+const NO_SHELL = `You have no shell at this capability: you cannot run` +
+  ` commands, checks or tests. Where the method says to run something, check` +
+  ` by reading instead, and end by telling the user exactly what to run.`;
+
 /** Read-only mode's own short method: it can only look, so the whole job is
  *  looking well and answering precisely. */
 const READ_METHOD: Record<Tier, string> = {
@@ -1024,8 +1409,18 @@ export function systemPrompt(
   env: PromptEnv,
   summary = "",
   textTools = false,
+  pace: LocalPace = "quality",
+  /** The tier decides the tools; the prompt has to describe the same ones. */
+  cap: LocalCapability = "execute",
 ): string {
-  const tier = tierOf(ctx);
+  mode = modeForCapability(mode, cap);
+  // Draft always uses the terse method; normal uses small when the window is
+  // roomy (less ceremony); quality keeps the window-sized method as before.
+  const tier: Tier = pace === "draft"
+    ? "tiny"
+    : pace === "normal" && tierOf(ctx) === "roomy"
+    ? "small"
+    : tierOf(ctx);
   const parts: string[] = [];
   if (mode === "chat") {
     parts.push(
@@ -1038,7 +1433,15 @@ export function systemPrompt(
     parts.push(
       `You are a careful coding agent working in the project at ${env.cwd}.` +
         ` You act through tools; paths are relative to the project root.` +
-        ` Be direct and brief; never restate tool output the user already saw.`,
+        ` Be direct and brief; never restate tool output the user already saw.` +
+        (pace === "draft"
+          ? ` Pace: DRAFT — get something working as fast as possible. Skip` +
+            ` polish, long plans, and extra tests. One quick run if easy;` +
+            ` do not chase perfection.`
+          : pace === "normal"
+          ? ` Pace: NORMAL — solid result with a real check (type-check or` +
+            ` the project's test/check). Stay focused; no gold-plating.`
+          : ""),
     );
     parts.push(mode === "read" ? READ_METHOD[tier] : METHOD[tier]);
     parts.push(STEERING[tier]);
@@ -1047,7 +1450,10 @@ export function systemPrompt(
     } else if (mode === "agent" && env.sandbox) {
       parts.push(sandboxRules(env.sandbox.net, tier));
     }
-    if (textTools) parts.push(textToolManual(mode, ctx));
+    if (mode === "agent" && !allowedTools(mode, cap).includes("sh")) {
+      parts.push(NO_SHELL);
+    }
+    if (textTools) parts.push(textToolManual(mode, ctx, cap, pace));
   }
   const facts = [
     env.date ? `Date: ${env.date}` : "",
@@ -1270,12 +1676,29 @@ const READ_TOOLS = ["ls", "glob", "read", "grep", "history", "todo"];
 /** Tool names a mode may execute. The single source of truth — the executor
  *  gates on this same list, so the schema sent and the act allowed can never
  *  disagree. */
-export const allowedTools = (mode: LocalMode): string[] =>
-  mode === "agent"
-    ? ["ls", "glob", "read", "grep", "history", "edit", "write", "todo", "sh"]
-    : mode === "read"
-    ? READ_TOOLS
-    : [];
+export const allowedTools = (
+  mode: LocalMode,
+  cap: LocalCapability = "execute",
+): string[] => {
+  if (mode === "chat") return [];
+  const effective = modeForCapability(mode, cap);
+  if (effective === "read") return [...READ_TOOLS];
+  if (cap === "write") {
+    return ["ls", "glob", "read", "grep", "history", "edit", "write", "todo"];
+  }
+  // execute / all — full agent set
+  return [
+    "ls",
+    "glob",
+    "read",
+    "grep",
+    "history",
+    "edit",
+    "write",
+    "todo",
+    "sh",
+  ];
+};
 
 /**
  * The schemas that go on the wire.
@@ -1287,10 +1710,17 @@ export const allowedTools = (mode: LocalMode): string[] =>
  * a luxury when the present one barely fits) and `todo` (a plan nobody has room
  * to carry). Pass the window to have them dropped there.
  */
-export const toolSpecs = (mode: LocalMode, ctx?: number): ToolSpec[] => {
-  const lean = ctx !== undefined && tierOf(ctx) === "tiny";
+export const toolSpecs = (
+  mode: LocalMode,
+  ctx?: number,
+  cap: LocalCapability = "execute",
+  pace: LocalPace = "quality",
+): ToolSpec[] => {
+  const lean = ctx !== undefined && (
+    tierOf(ctx) === "tiny" || pace === "draft"
+  );
   return ALL_TOOLS.filter((t) =>
-    allowedTools(mode).includes(t.function.name) &&
+    allowedTools(mode, cap).includes(t.function.name) &&
     !(lean && LUXURY_TOOLS.includes(t.function.name))
   );
 };
@@ -1312,8 +1742,13 @@ export const parallelSafe = (names: string[]): boolean =>
  * format Hermes and Qwen already know, and `recoverToolCalls` reads it back.
  * Slower and less sure than native calls, and far better than a chat box.
  */
-export function textToolManual(mode: LocalMode, ctx?: number): string {
-  const lines = toolSpecs(mode, ctx).map(({ function: f }) => {
+export function textToolManual(
+  mode: LocalMode,
+  ctx?: number,
+  cap: LocalCapability = "execute",
+  pace: LocalPace = "quality",
+): string {
+  const lines = toolSpecs(mode, ctx, cap, pace).map(({ function: f }) => {
     const props = (f.parameters.properties ?? {}) as Record<string, unknown>;
     const req = (f.parameters.required ?? []) as string[];
     const params = Object.keys(props).map((k) => req.includes(k) ? k : `${k}?`)
@@ -1335,14 +1770,24 @@ export function textToolManual(mode: LocalMode, ctx?: number): string {
  * The protocol pairs a result to its call by id, and plenty of servers stream
  * tool calls without one. Every result then comes back tagged `""` — which is
  * indistinguishable from every other result the moment the model asks for two
- * things at once, and rejected outright by some chat templates. A positional
- * id is stable inside the turn, which is the only place it means anything.
+ * things at once, and rejected outright by some chat templates.
+ *
+ * Positional, under a tag the caller makes once per stretch of rounds: the
+ * round count starts again at 0 each stretch, and `call_0_0` from last turn
+ * and from this one pair the wrong result to the wrong call everywhere a
+ * transcript is read by id — the packer's call map, compaction's stubs.
  */
 export const withCallIds = (
   calls: LocalToolCall[],
   round: number,
+  tag = "",
 ): LocalToolCall[] =>
-  calls.map((c, i) => c.id ? c : { ...c, id: `call_${round}_${i}` });
+  calls.map((c, i) =>
+    c.id ? c : { ...c, id: `call_${tag ? `${tag}_` : ""}${round}_${i}` }
+  );
+
+/** A fresh tag for {@link withCallIds}. */
+export const callTag = (): string => crypto.randomUUID().slice(0, 8);
 
 /** Tools whose answer does not change unless something else changes it. An
  *  identical repeat of one of these in the same turn is answered from the
@@ -1389,6 +1834,56 @@ export function loopVerdict(recent: SeenCall[]): string | null {
       return `That ${a.name} call failed twice with the same arguments.` +
         ` Read the error, then fix the cause or try a different approach —` +
         ` repeating it will fail again.`;
+    }
+  }
+  return null;
+}
+
+/** One call as cycle detection sees it: identity plus what it came back with. */
+export type CycleCall = SeenCall & { result: string };
+
+/**
+ * A repeating *cycle* of calls — `A,B,A,B,…` or `A,B,C,A,B,C,…` — where every
+ * position returns the same result each lap. This is the loop `loopVerdict`
+ * cannot see: an alternation resets the "same call three in a row" streak every
+ * time, so the model can replay one 2–4 call batch to the round budget
+ * unflagged. A read that only ever gets a new answer after a write is not a
+ * cycle: the result hash changes the moment anything real happens.
+ *
+ * `period` is the smallest 2..4 that laps at least three times; `recent` holds
+ * the tail of the turn's calls. `null` when nothing repeats.
+ */
+export function cycleVerdict(
+  recent: readonly CycleCall[],
+  maxPeriod = 4,
+  laps = 3,
+): string | null {
+  const n = recent.length;
+  for (let period = 2; period <= maxPeriod; period++) {
+    if (n < period * laps) continue;
+    const last = recent.slice(n - period);
+    let count = 1;
+    while (true) {
+      const base = n - period * (count + 1);
+      if (base < 0) break;
+      let same = true;
+      for (let i = 0; i < period; i++) {
+        const a = recent[base + i];
+        const b = last[i];
+        if (a.name !== b.name || a.args !== b.args || a.result !== b.result) {
+          same = false;
+          break;
+        }
+      }
+      if (!same) break;
+      count++;
+    }
+    if (count >= laps) {
+      const names = last.map((c) => c.name).join(", ");
+      return `The last ${count} blocks repeated the same ${period} calls` +
+        ` (${names}) with the same results each time — that is not progress.` +
+        ` Change at least one call, use a different approach, or stop calling` +
+        ` tools and answer with what you already have.`;
     }
   }
   return null;
@@ -1468,6 +1963,15 @@ export function isRunaway(text: string): boolean {
 
 const THINK_TAGS = "think|thinking|reasoning|thought";
 
+/** True when `idx` opens a block in `text`: the very start, or a line whose
+ *  text before the tag is whitespace only. Decides whether an *unterminated*
+ *  opening tag is reasoning or just prose mentioning the tag. */
+function atBlockBoundary(text: string, idx: number): boolean {
+  if (idx <= 0) return true;
+  const nl = text.lastIndexOf("\n", idx - 1);
+  return text.slice(nl + 1, idx).trim() === "";
+}
+
 /**
  * Split a reply into what the model said and what it thought.
  *
@@ -1496,9 +2000,14 @@ export function splitThink(
     thoughts.push(close[1].trim());
     text = text.slice(close[0].length);
   }
-  // An opening tag with no close: still thinking (or cut off while it was).
+  // An opening tag with no close: still thinking (or cut off while it was) —
+  // but only when it opens a block. A model that *writes about* thinking tags
+  // ("a ` thinking` block starts the reply") must not have the rest of its
+  // prose eaten, so the tag only counts at a block boundary: position 0, or a
+  // line whose text before it is whitespace. A closed pair above is always
+  // reasoning, boundary or not.
   const open = new RegExp(`<(${THINK_TAGS})>([\\s\\S]*)$`, "i").exec(text);
-  if (open) {
+  if (open && atBlockBoundary(text, open.index)) {
     thoughts.push(open[2].trim());
     text = text.slice(0, open.index);
   }
@@ -1648,6 +2157,67 @@ export function clip(text: string, maxChars: number, head = 0.8): string {
   const tail = maxChars - h;
   return text.slice(0, h) + CLIP_MARK + text.slice(text.length - tail);
 }
+
+/* ── tool-result hygiene ──────────────────────────────────────────────────── */
+
+/**
+ * ESC (0x1b) drive sequences out of text: CSI, OSC, DCS/SOS/PM/APC, the
+ * two-byte escapes, and their 8-bit C1 forms. Run over *every* tool result
+ * (and by `sh` itself, before it reads its output for install noise), because
+ * a file being read can carry escapes just as easily as a command can emit
+ * them — and a model that sees them copies them into an edit.
+ *
+ * The string sequences (OSC, DCS/SOS/PM/APC) still require their terminator,
+ * but their bodies are spelled as "anything that cannot START one" rather
+ * than the obvious lazy `[\s\S]*?`. That lazy form rescans the whole rest of
+ * the text for every opener that never gets a terminator, which is quadratic:
+ * 50k bare `ESC ]` bytes took 1.6 SECONDS, over text the model is being shown
+ * — i.e. text somebody else wrote. With the body bounded by the next ESC (or
+ * BEL) the runs cannot overlap, so the same pass is linear, an unterminated
+ * opener falls through to the two-byte escape below, and the content after it
+ * is kept rather than swallowed.
+ */
+// deno-lint-ignore no-control-regex
+const ESCAPES_RE =
+  /\x1b(?:\[[\x30-\x3f]*[\x20-\x2f]*[\x40-\x7e]|\][^\x07\x1b]*(?:\x07|\x1b\\)|[PX^_][^\x1b]*\x1b\\|[\x20-\x2f]+[\x30-\x7e]|[\x30-\x7e])|\x9b[\x30-\x3f]*[\x20-\x2f]*[\x40-\x7e]|\x9d[^\x07\x9c]*(?:\x07|\x9c)/g;
+/** Bare C0/C1 controls except tab, newline and CR — kept for the CR pass. */
+// deno-lint-ignore no-control-regex
+const CONTROLS_RE = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]/g;
+/** Plane-14 Unicode TAG chars: invisible in every renderer, visible to a
+ *  tokenizer — the classic "ASCII smuggling" prompt-injection channel. A valid
+ *  emoji tag sequence (TR51 flags) is preserved; every other tag char goes. */
+const TAG_RE =
+  /(\u{1F3F4}[\u{E0020}-\u{E007E}]+\u{E007F})|[\u{E0000}-\u{E007F}]/gu;
+
+/** ESC sequences out of text, with a fast path when none are present. */
+export const stripEscapes = (text: string): string =>
+  /[\x1b\x80-\x9f]/.test(text) ? text.replace(ESCAPES_RE, "") : text;
+
+/** Bare control characters and invisible Unicode TAG chars out. `\r` is left
+ *  for {@link sanitizeToolOutput}, which decides what it means. */
+export const stripInvisible = (text: string): string => {
+  let out = text;
+  if (/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]/.test(out)) {
+    out = out.replace(CONTROLS_RE, "");
+  }
+  if (/[\u{E0000}-\u{E007F}]/u.test(out)) {
+    out = out.replace(TAG_RE, (_m, emoji: string) => emoji ?? "");
+  }
+  return out;
+};
+
+/**
+ * Make a tool result safe to send to a model: no escape sequences, no bare
+ * control characters, no invisible Unicode TAG smuggling, and no `\r`
+ * overwrite spoofing (a carriage return that rewrote a line on a terminal is
+ * flattened to a newline so the model sees both halves). Applied once in
+ * {@link runTool}, so every tool — read, grep, ls, sh, history — is covered
+ * rather than the shell alone.
+ */
+export const sanitizeToolOutput = (text: string): string =>
+  stripInvisible(
+    stripEscapes(text).replace(/\r\n/g, "\n").replace(/\r/g, "\n"),
+  );
 
 /**
  * Gate on a model-supplied regex before it is ever compiled and run.
@@ -1806,6 +2376,9 @@ export type PackInput = {
   /** The whole text of a row whose stored copy was folded, when it is still
    *  held — see `LocalMsg.folded`. */
   fullOf?: (m: LocalMsg) => string | undefined;
+  /** The tier and pace the schemas are sent for — they decide which. */
+  cap?: LocalCapability;
+  pace?: LocalPace;
 };
 
 export type Packed = {
@@ -1855,7 +2428,7 @@ export function packContext(input: PackInput): Packed {
   const ratio = input.ratio ?? 1;
   const est = (s: string) => Math.ceil(estTokens(s) * ratio);
   const schemaText = native && mode !== "chat"
-    ? JSON.stringify(toolSpecs(mode, ctx))
+    ? JSON.stringify(toolSpecs(mode, ctx, input.cap, input.pace))
     : "";
   const fixedRaw = estTokens(system) +
     (schemaText ? estTokens(schemaText) : 0) +
@@ -2066,6 +2639,14 @@ function toWire(
   return { role: m.role, content: text };
 }
 
+/** Arguments that carry a file's own text. Once the call has run, the file on
+ *  disk IS that text — keeping it in every later request pays for the same
+ *  bytes again each round, and a `write` of 3 kB is a third of a 10k window. */
+const BODY_KEYS = new Set(["content", "new_string", "old_string", "text"]);
+/** What is left of one of those, so the model can still see which change it
+ *  made without being handed the whole file back. */
+const BODY_CAP = 200;
+
 /**
  * A past call's arguments as they go back on the wire: always valid JSON, and
  * no string in them longer than `cap`.
@@ -2077,14 +2658,6 @@ function toWire(
  * exchange is: on an 8k model that one row is the whole window, and the model
  * does not need its own file content back — the file is on disk to re-read.
  */
-/** Arguments that carry a file's own text. Once the call has run, the file on
- *  disk IS that text — keeping it in every later request pays for the same
- *  bytes again each round, and a `write` of 3 kB is a third of a 10k window. */
-const BODY_KEYS = new Set(["content", "new_string", "old_string", "text"]);
-/** What is left of one of those, so the model can still see which change it
- *  made without being handed the whole file back. */
-const BODY_CAP = 200;
-
 export function wireArgs(args: string, cap: number, whole = false): string {
   let parsed: unknown;
   try {
@@ -2379,6 +2952,32 @@ const MAX_ACC_TOOL_NAME = 256;
 const MAX_ACC_TOOL_ARGS = 1_000_000;
 
 /**
+ * Where a streamed tool call without an `index` goes. Servers that leave the
+ * index out send each call whole (Ollama), or one call in pieces: a new id,
+ * or a name arriving where the newest call already has one, is the next
+ * call; the same id is its own call again; anything else continues the
+ * newest. Every piece into slot 0 fused two calls into one with both
+ * argument strings run together, and ran neither.
+ */
+function slotOf(
+  slots: LocalToolCall[],
+  tc: Record<string, unknown>,
+): number {
+  const last = slots.length - 1;
+  if (last < 0) return 0;
+  const id = typeof tc.id === "string" ? tc.id : "";
+  if (id) {
+    const at = slots.findIndex((s) => s.id === id);
+    if (at >= 0) return at;
+  }
+  const fn = tc.function as Record<string, unknown> | undefined;
+  const named = typeof fn?.name === "string" && fn.name !== "";
+  const next = (id !== "" && slots[last].id !== "") ||
+    (named && slots[last].name !== "");
+  return next ? Math.min(last + 1, MAX_ACC_TOOL_CALLS - 1) : last;
+}
+
+/**
  * Fold one parsed SSE chunk (`data: {...}` payload of a chat completion) into
  * the accumulator. Tolerant by construction: a malformed chunk changes
  * nothing, because the stream belongs to another program.
@@ -2417,7 +3016,7 @@ export function foldChunk(acc: StreamAcc, chunk: unknown): StreamAcc {
       const i = typeof tc.index === "number" && Number.isInteger(tc.index) &&
           tc.index >= 0 && tc.index < MAX_ACC_TOOL_CALLS
         ? tc.index
-        : 0;
+        : slotOf(acc.toolCalls, tc);
       while (acc.toolCalls.length <= i) {
         acc.toolCalls.push({ id: "", name: "", args: "" });
       }

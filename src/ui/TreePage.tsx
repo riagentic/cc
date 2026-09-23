@@ -14,9 +14,10 @@ import { gitMark, touchedPaths, tree } from "../cell/tree.ts";
 import { activeProject, workspace } from "../cell/workspace.ts";
 import type { Touch, TreeNode } from "../type/claude.ts";
 import { bytes, listKey, tildePath } from "../lib/format.ts";
-import { highlight, langOfFile } from "../lib/highlight.ts";
+import { langOfFile } from "../lib/highlight.ts";
 import {
   Banner,
+  codeTokens,
   Empty,
   matches,
   Panel,
@@ -157,7 +158,6 @@ function FilePane(): VNode {
   }
 
   const name = path.slice(path.lastIndexOf("/") + 1);
-  const tokens = highlight(p.text, langOfFile(name));
 
   return (
     <div style={{ display: "grid", gap: "10px", minWidth: 0 }}>
@@ -203,16 +203,7 @@ function FilePane(): VNode {
         ? <DiffView before={head} after={p.text} />
         : (
           <pre class="codeview">
-            <code>
-              {tokens.map((t, i) => (
-                <span
-                  key={i}
-                  class={t.kind === "plain" ? undefined : `tok--${t.kind}`}
-                >
-                  {t.text}
-                </span>
-              ))}
-            </code>
+            <code>{codeTokens(p.text, langOfFile(name))}</code>
           </pre>
         )}
     </div>
@@ -275,6 +266,32 @@ function TouchedList(
   );
 }
 
+/**
+ * The rows of the open tree that answer `query`: every node whose name
+ * matches, and every folder on the way to a matching FILE — so a hit three
+ * levels down does not appear parentless.
+ *
+ * One pass to collect those folders, one to keep rows. Asking each folder
+ * "does anything under you match?" was a scan of the whole list per folder,
+ * per keystroke — quadratic in exactly the big trees that need a filter.
+ */
+export function filterTree(nodes: TreeNode[], query: string): TreeNode[] {
+  if (query.trim() === "") return nodes;
+  const onTheWay = new Set<string>();
+  for (const n of nodes) {
+    if (n.dir || !matches(query, n.name)) continue;
+    for (let cut = n.path.lastIndexOf("/"); cut > 0;) {
+      const dir = n.path.slice(0, cut);
+      if (onTheWay.has(dir)) break; // the rest of the way is already marked
+      onTheWay.add(dir);
+      cut = dir.lastIndexOf("/");
+    }
+  }
+  return nodes.filter((n) =>
+    matches(query, n.name) || (n.dir && onTheWay.has(n.path))
+  );
+}
+
 export function TreePage(): VNode {
   const project = activeProject();
   const touched = touchedPaths();
@@ -308,17 +325,7 @@ export function TreePage(): VNode {
   // Filtering the flat list, which is only ever the open folders. Said out
   // loud in the empty state rather than pretended otherwise: walking the whole
   // repository to answer a keystroke is the cost this panel exists to avoid.
-  // A directory is kept whenever it is on the way to a match, so a hit three
-  // levels down does not appear parentless.
-  const shown = query.trim() === ""
-    ? nodes
-    : nodes.filter((n) =>
-      matches(query, n.name) ||
-      (n.dir && nodes.some((m) =>
-        !m.dir && m.path.startsWith(n.path + "/") &&
-        matches(query, m.name)
-      ))
-    );
+  const shown = filterTree(nodes, query);
 
   return (
     <div class="page">

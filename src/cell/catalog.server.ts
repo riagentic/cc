@@ -13,7 +13,6 @@
  * by a CLI that is upgraded independently of this app. A field that moved is a
  * missing value, never a thrown page.
  */
-import { log } from "aio";
 import { join } from "@std/path";
 import type {
   DaemonInfo,
@@ -27,7 +26,7 @@ import type {
   SkillInfo,
   TreeNode,
 } from "../type/claude.ts";
-import { homeDir, resolvePath } from "./claude.server.ts";
+import { homeDir } from "./claude.server.ts";
 import { makeTargets, type Manifests, noManifests } from "../lib/launch.ts";
 
 /* ── small readers ───────────────────────────────────────────────────────── */
@@ -37,6 +36,67 @@ import { makeTargets, type Manifests, noManifests } from "../lib/launch.ts";
 async function readJson(path: string): Promise<unknown> {
   try {
     return JSON.parse(await Deno.readTextFile(path));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * JSON with comments and trailing commas made plain JSON: `//` and `/* *\/`
+ * comments dropped, a comma before `}` or `]` dropped, strings untouched.
+ *
+ * Deno reads `deno.json` this way too — a commented one is ordinary, and
+ * `deno.jsonc` is commented by name — so a strict parse found no tasks in
+ * either and the project's Dev button never appeared. Pure, one pass.
+ */
+export function stripJsonc(text: string): string {
+  let out = "";
+  let i = 0;
+  while (i < text.length) {
+    const c = text[i];
+    if (c === '"') {
+      // A string, copied whole — a `//` inside a URL is not a comment.
+      let j = i + 1;
+      while (j < text.length && text[j] !== '"') j += text[j] === "\\" ? 2 : 1;
+      out += text.slice(i, j + 1);
+      i = j + 1;
+    } else if (c === "/" && text[i + 1] === "/") {
+      while (i < text.length && text[i] !== "\n") i++;
+    } else if (c === "/" && text[i + 1] === "*") {
+      const end = text.indexOf("*/", i + 2);
+      i = end < 0 ? text.length : end + 2;
+    } else if (c === ",") {
+      // Trailing: only whitespace and comments stand between it and a close.
+      const next = text[skipBlank(text, i + 1)];
+      if (next !== "}" && next !== "]") out += c;
+      i++;
+    } else {
+      out += c;
+      i++;
+    }
+  }
+  return out;
+}
+
+/** The index of the next character that is neither whitespace nor inside a
+ *  comment — what a comma is followed by, for {@link stripJsonc}. */
+function skipBlank(text: string, from: number): number {
+  let i = from;
+  while (i < text.length) {
+    if (/\s/.test(text[i])) i++;
+    else if (text.startsWith("//", i)) {
+      while (i < text.length && text[i] !== "\n") i++;
+    } else if (text.startsWith("/*", i)) {
+      const end = text.indexOf("*/", i + 2);
+      i = end < 0 ? text.length : end + 2;
+    } else break;
+  }
+  return i;
+}
+
+async function readJsonc(path: string): Promise<unknown> {
+  try {
+    return JSON.parse(stripJsonc(await Deno.readTextFile(path)));
   } catch {
     return null;
   }
@@ -154,12 +214,13 @@ async function jobTimeline(dir: string): Promise<JobEvent[]> {
  * learn what four JSON files already say is a cost with nothing bought. The
  * subcommands are still what *acts* on a job — see {@link jobAction}.
  */
-export async function listJobs(): Promise<Job[]> {
+export async function listJobs(known?: DaemonInfo): Promise<Job[]> {
   const root = join(homeDir(), ".claude", "jobs");
   const out: Job[] = [];
   // Read once for the whole listing: staleness is a fact about the service,
   // not about each job, and asking per job would stat the same pid N times.
-  const daemon = await readDaemon();
+  // A caller that has just read it passes it in, rather than reading twice.
+  const daemon = known ?? await readDaemon();
   let entries: Deno.DirEntry[];
   try {
     entries = await Array.fromAsync(Deno.readDir(root));
@@ -234,7 +295,7 @@ export async function readManifests(root: string): Promise<Manifests> {
   const found = noManifests();
 
   for (const name of ["deno.json", "deno.jsonc"]) {
-    const cfg = obj(await readJson(join(root, name)));
+    const cfg = obj(await readJsonc(join(root, name)));
     const tasks = obj(cfg.tasks);
     if (Object.keys(tasks).length > 0) {
       found.denoTasks = Object.keys(tasks);
@@ -551,9 +612,15 @@ async function describe(path: string): Promise<string> {
     // Only the head is read: a description lives in the first few lines, and a
     // skill's reference material can run to megabytes.
     const f = await Deno.open(path);
+    let n = 0;
     const buf = new Uint8Array(4_000);
-    const n = await f.read(buf) ?? 0;
-    f.close();
+    try {
+      n = await f.read(buf) ?? 0;
+    } finally {
+      // Closed on a failed read too: a skills folder is scanned on every
+      // project switch, and each leaked handle stays open for the app's life.
+      f.close();
+    }
     const text = new TextDecoder().decode(buf.subarray(0, n));
     return frontMatter(text).description || firstProse(text);
   } catch {
@@ -617,11 +684,10 @@ export async function scanDefinitionDirs(
     "user",
     kind,
   );
-  const project = await scanDefinitions(
-    join(projectPath, ".claude", sub),
-    "project",
-    kind,
-  );
+  // No project, no project scope — see `inProject`.
+  const project = projectPath
+    ? await scanDefinitions(join(projectPath, ".claude", sub), "project", kind)
+    : [];
   const byName = new Map(user.map((d) => [d.name, d]));
   for (const d of project) byName.set(d.name, d);
   return [...byName.values()].sort((a, b) => a.name.localeCompare(b.name));
@@ -631,9 +697,26 @@ export async function scanDefinitionDirs(
  *  applies, so the list reads in the order that decides who wins. */
 const settingsFiles = (projectPath: string): [string, Scope][] => [
   [join(homeDir(), ".claude", "settings.json"), "user"],
-  [join(projectPath, ".claude", "settings.json"), "project"],
-  [join(projectPath, ".claude", "settings.local.json"), "project"],
+  ...inProject(projectPath, [
+    [".claude", "settings.json"],
+    [".claude", "settings.local.json"],
+  ]),
 ];
+
+/**
+ * A project's own files, or none when there is no project.
+ *
+ * `join("", ".mcp.json")` is `.mcp.json` — relative, so resolved against the
+ * APP's working directory. With nothing selected, the pages listed whatever
+ * configuration the app happened to be launched beside, labelled "project".
+ */
+const inProject = (
+  projectPath: string,
+  files: string[][],
+): [string, Scope][] =>
+  projectPath
+    ? files.map((parts) => [join(projectPath, ...parts), "project"])
+    : [];
 
 /**
  * What the CLI itself is configured to do for this project.
@@ -728,20 +811,22 @@ export async function scanMcp(projectPath: string): Promise<McpInfo[]> {
   const sources: [string, Scope][] = [
     [join(homeDir(), ".claude.json"), "user"],
     [join(homeDir(), ".claude", "settings.json"), "user"],
-    [join(projectPath, ".mcp.json"), "project"],
-    [join(projectPath, ".claude", "settings.json"), "project"],
-    [join(projectPath, ".claude", "settings.local.json"), "project"],
+    ...inProject(projectPath, [
+      [".mcp.json"],
+      [".claude", "settings.json"],
+      [".claude", "settings.local.json"],
+    ]),
   ];
   const byName = new Map<string, McpInfo>();
 
   for (const [path, scope] of sources) {
     const doc = obj(await readJson(path));
-    // `~/.claude.json` keys its servers by project path; every other file has
-    // them at the top level.
+    // `~/.claude.json` also keys servers by project path — THIS project's
+    // entry only. Merging every project's made a server configured for one
+    // codebase show as available in all of them, which the CLI never does.
     const scopes = [obj(doc.mcpServers)];
-    for (const proj of Object.values(obj(doc.projects))) {
-      const servers = obj(obj(proj).mcpServers);
-      if (Object.keys(servers).length > 0) scopes.push(servers);
+    if (projectPath) {
+      scopes.push(obj(obj(obj(doc.projects)[projectPath]).mcpServers));
     }
     for (const servers of scopes) {
       for (const [name, raw] of Object.entries(servers)) {
@@ -761,14 +846,4 @@ export async function scanMcp(projectPath: string): Promise<McpInfo[]> {
     }
   }
   return [...byName.values()].sort((a, b) => a.name.localeCompare(b.name));
-}
-
-/** Resolve a path the UI handed back, so a tree row can be opened by path
- *  without the client being trusted to have produced an absolute one. */
-export const absolute = (path: string): string => resolvePath(path);
-
-export function logCatalogError(what: string, e: unknown): void {
-  log.warn("catalog", `${what} failed`, {
-    error: e instanceof Error ? e.message : String(e),
-  });
 }

@@ -26,7 +26,41 @@ import { workspace } from "../cell/workspace.ts";
 import { duration, pct as percent } from "../lib/format.ts";
 import type { Status } from "../type/claude.ts";
 
+/* ── keyboard lists ───────────────────────────────────────────────────────── */
+
+/**
+ * Keep a list's `.selected` row on screen while the arrow keys move it.
+ *
+ * Returns the function the key handler calls when it moves the selection. Only
+ * those moves scroll: a row the pointer selected by hovering is on screen by
+ * definition, and scrolling it would slide another row under the pointer,
+ * which selects that one, which scrolls again.
+ */
+export function useSelectedInView(
+  list: { current: HTMLElement | null },
+  index: number,
+): () => void {
+  const shown = useRef(index);
+  const byKey = useRef(false);
+  afterRender(() => {
+    const keyed = byKey.current;
+    byKey.current = false;
+    if (index === shown.current) return;
+    shown.current = index;
+    if (!keyed) return;
+    list.current?.querySelector<HTMLElement>(".selected")?.scrollIntoView?.({
+      block: "nearest",
+    });
+  });
+  return () => {
+    byKey.current = true;
+  };
+}
+
 /* ── menu ─────────────────────────────────────────────────────────────────── */
+
+/** Numbers each Menu's popover for the trigger's aria-controls. */
+let menuIds = 0;
 
 /** One row of a {@link Menu}. `hint` is the second line; `tone` marks the
  *  option that grants more than the others. */
@@ -76,6 +110,18 @@ export function Menu<T extends string>(
 ): VNode {
   const [open, setOpen] = useLocal(false);
   const root = useRef<HTMLSpanElement>(null!);
+  const trigger = useRef<HTMLButtonElement | null>(null);
+  const popId = useRef("");
+  if (popId.current === "") popId.current = `menu-pop-${++menuIds}`;
+  // Whether the next close hands focus back to the trigger. Yes after Escape
+  // or a choice — the focused row is about to vanish, and focus left on it
+  // drops to the page body, sending the next Tab to the top of the window. No
+  // after a click elsewhere: that click put focus where it wanted it.
+  const refocus = useRef(false);
+  const close = (giveBack: boolean) => {
+    refocus.current = giveBack;
+    setOpen(false);
+  };
   // Read at event time, not closed over at mount: `onMount` runs once, so a
   // captured `open` would be false forever (the same trap `onGlobalKey`
   // documents in dep/aio/src/air/renderer-lifecycle.ts).
@@ -86,8 +132,12 @@ export function Menu<T extends string>(
   // is where it still is right after a click. Handling the key only on the
   // popover meant the one place it was guaranteed NOT to work was the common
   // one. `ignoreInInput: false` so it also closes over a focused field.
-  onGlobalKey("Escape", () => {
-    if (openRef.current) setOpen(false);
+  onGlobalKey("Escape", (e) => {
+    if (!openRef.current) return;
+    // Claimed, so the app's own Escape (back to the chat, stop the turn) can
+    // see this press was spent closing the menu.
+    e.preventDefault();
+    close(true);
   }, { ignoreInInput: false });
 
   onMount(() => {
@@ -129,7 +179,11 @@ export function Menu<T extends string>(
   afterRender(() => {
     if (open === wasOpen.current) return;
     wasOpen.current = open;
-    if (!open) return;
+    if (!open) {
+      if (refocus.current) trigger.current?.focus();
+      refocus.current = false;
+      return;
+    }
     const pop = root.current?.querySelector(".menu__pop");
     const items = [
       ...(pop?.querySelectorAll<HTMLElement>(".menu__item") ?? []),
@@ -176,11 +230,18 @@ export function Menu<T extends string>(
 
   return (
     <span class="menu" ref={root}>
+      {
+        /* A disclosure: the trigger shows and hides a group of toggle buttons,
+          each saying with aria-pressed whether it is the current value. Not a
+          listbox — its rows would have to be options — and not a menu, whose
+          items are commands rather than a choice. */
+      }
       <button
+        ref={trigger}
         type="button"
         class={`menu__btn${open ? " open" : ""}`}
-        aria-haspopup="listbox"
         aria-expanded={open}
+        aria-controls={open ? popId.current : undefined}
         aria-label={props.label}
         title={props.title ?? `${props.label} — click to change`}
         disabled={props.disabled}
@@ -205,12 +266,13 @@ export function Menu<T extends string>(
           class={`menu__pop${
             props.align === "right" ? " menu__pop--right" : ""
           }`}
-          role="listbox"
+          id={popId.current}
+          role="group"
           aria-label={props.label}
           onKeyDown={(e: KeyboardEvent) => {
             if (e.key === "Escape") {
               e.preventDefault();
-              setOpen(false);
+              close(true);
               return;
             }
             navigate(e);
@@ -237,7 +299,7 @@ export function Menu<T extends string>(
                   o.tone ? ` menu__item--${o.tone}` : ""
                 }`}
                 onClick={() => {
-                  setOpen(false);
+                  close(true);
                   if (o.id !== props.value) props.onChange(o.id);
                 }}
               >
@@ -824,6 +886,9 @@ export function Overlay(
 
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
+        // A field inside that took the Escape for itself — a filter clearing,
+        // an inline editor backing out — has said so; the dialog stays.
+        if (e.defaultPrevented) return;
         e.preventDefault();
         props.onClose();
         return;
@@ -877,7 +942,10 @@ export function Overlay(
         if (e.target === e.currentTarget) props.onClose();
       }}
       onKeyDown={(e: KeyboardEvent) => {
-        if (e.key === "Escape") props.onClose();
+        if (e.key !== "Escape" || e.defaultPrevented) return;
+        // Vetoed here, so the document-level handler does not close it twice.
+        e.preventDefault();
+        props.onClose();
       }}
     >
       {props.children as VNode}

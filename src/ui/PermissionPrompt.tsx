@@ -28,12 +28,25 @@ export function PermissionQueue(
   );
 }
 
+/**
+ * How long the CLI has been waiting. Its own component so the twice-a-second
+ * tick re-renders this one line, not the card around it — which holds the
+ * highlighted JSON of the whole request.
+ */
+function Waiting(props: { since: number }): VNode {
+  const now = useNow(true, 500);
+  return (
+    <span class="perm__wait mono" title={`Asked at ${clock(props.since)}`}>
+      waiting {duration(now - props.since)}
+    </span>
+  );
+}
+
 function PermissionCard(props: { request: PermissionRequest }): VNode {
   const r = props.request;
   const [showInput, setShowInput] = useLocal(false);
   const [denying, setDenying] = useLocal(false);
   const [reason, setReason] = useLocal("");
-  const now = useNow(true, 500);
   const suggestion = r.suggestions[0] ?? null;
 
   // No keys and no focus grab. Answering takes a click: a prompt that took
@@ -52,9 +65,7 @@ function PermissionCard(props: { request: PermissionRequest }): VNode {
           Claude Code needs your approval
         </span>
         <span style={{ flex: 1 }} />
-        <span class="perm__wait mono" title={`Asked at ${clock(r.askedAt)}`}>
-          waiting {duration(now - r.askedAt)}
-        </span>
+        <Waiting since={r.askedAt} />
       </header>
 
       <div class="perm__body">
@@ -131,7 +142,12 @@ function PermissionCard(props: { request: PermissionRequest }): VNode {
                     e.preventDefault();
                     void session.denyPermission(r.id, reason);
                   }
-                  if (e.key === "Escape") setDenying(false);
+                  // preventDefault: the global Escape would otherwise also
+                  // run — and there, a second Escape stops the turn.
+                  if (e.key === "Escape") {
+                    e.preventDefault();
+                    setDenying(false);
+                  }
                 }}
               />
               <div class="perm__actions">

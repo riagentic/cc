@@ -1,26 +1,19 @@
 /**
  * @module
- * The command palette, and the shortcut sheet it is twinned with.
+ * The command palette.
  *
- * Both read `commands.ts`, so neither can list something that does not work.
- * The palette is the answer to "where is that button" — in an app with three
- * panels, fifteen pages and two engines, the fastest path to any of them should
- * be the name of the thing you want, typed.
+ * It reads `commands.ts`, so it cannot list something that does not work. It
+ * is the answer to "where is that button" — in an app with three panels,
+ * fifteen pages and two engines, the fastest path to any of them should be the
+ * name of the thing you want, typed.
  *
  * Deliberately not a router: a command runs and the overlay closes. Nothing in
  * here holds state that outlives the keystroke.
  */
 import { onMount, useLocal, useRef, type VNode } from "aio/air";
-import { type Command, commands, helpRows } from "./commands.ts";
-import { matchesAll, Overlay } from "./parts.tsx";
+import { type Command, commands } from "./commands.ts";
+import { matchesAll, Overlay, useSelectedInView } from "./parts.tsx";
 import { IconSearch } from "./icons.tsx";
-
-/** Render a chord the way a keyboard shows it: one key per box. */
-const Keys = (props: { keys: string }): VNode => (
-  <span class="pal__keys">
-    {props.keys.split(" ").map((k) => <kbd class="kbd" key={k}>{k}</kbd>)}
-  </span>
-);
 
 /**
  * Rank matches so typing a couple of letters lands on the obvious thing.
@@ -55,6 +48,8 @@ export function CommandPalette(props: { onClose: () => void }): VNode {
   // Clamped rather than reset: filtering down to fewer rows than the cursor
   // index must not leave Enter pointing at nothing.
   const index = Math.min(sel, Math.max(0, hits.length - 1));
+  const list = useRef<HTMLDivElement | null>(null);
+  const moved = useSelectedInView(list, index);
 
   onMount(() => {
     input.current?.focus();
@@ -67,6 +62,7 @@ export function CommandPalette(props: { onClose: () => void }): VNode {
   };
 
   const onKey = (e: KeyboardEvent) => {
+    if (["ArrowDown", "ArrowUp", "Home", "End"].includes(e.key)) moved();
     if (e.key === "ArrowDown") {
       e.preventDefault();
       setSel(Math.min(index + 1, hits.length - 1));
@@ -116,7 +112,7 @@ export function CommandPalette(props: { onClose: () => void }): VNode {
           <kbd class="kbd">Esc</kbd>
         </div>
 
-        <div class="pal__list" role="listbox">
+        <div class="pal__list" role="listbox" ref={list}>
           {hits.length === 0 && (
             <div class="pal__none" key="none">
               Nothing matches <strong>{query}</strong>.
@@ -144,7 +140,6 @@ export function CommandPalette(props: { onClose: () => void }): VNode {
                     <span class="pal__label">{c.label}</span>
                     {c.hint && <span class="pal__hint">{c.hint}</span>}
                   </span>
-                  {c.keys && <Keys keys={c.keys} />}
                 </button>
               </div>
             );
@@ -158,53 +153,6 @@ export function CommandPalette(props: { onClose: () => void }): VNode {
           <span>
             <kbd class="kbd">↵</kbd> to run
           </span>
-          <span>
-            <kbd class="kbd">?</kbd> for shortcuts
-          </span>
-        </div>
-      </div>
-    </Overlay>
-  );
-}
-
-/** The printed keyboard map. Same source as the bindings themselves. */
-export function ShortcutHelp(props: { onClose: () => void }): VNode {
-  const rows = helpRows({ openPalette: () => {}, openHelp: () => {} });
-  const groups = [...new Set(rows.map((r) => r.group))];
-  return (
-    <Overlay onClose={props.onClose} label="Keyboard shortcuts">
-      <div class="pal pal--help">
-        <div class="pal__title">
-          Keyboard shortcuts
-          <button
-            type="button"
-            class="btn btn--sm btn--ghost"
-            onClick={props.onClose}
-          >
-            Close
-          </button>
-        </div>
-        <div class="pal__list">
-          {groups.map((g) => (
-            <div key={g}>
-              <div class="pal__group">{g}</div>
-              {rows.filter((r) => r.group === g).map((r) => (
-                <div class="pal__help" key={r.keys}>
-                  <span class="truncate">{r.label}</span>
-                  <Keys keys={r.keys} />
-                </div>
-              ))}
-            </div>
-          ))}
-          <div class="pal__group">In the message box</div>
-          <div class="pal__help">
-            <span class="truncate">Send</span>
-            <Keys keys="↵" />
-          </div>
-          <div class="pal__help">
-            <span class="truncate">New line</span>
-            <Keys keys="Shift ↵" />
-          </div>
         </div>
       </div>
     </Overlay>

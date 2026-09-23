@@ -201,12 +201,15 @@ export function Rail(): VNode {
         >
           <span class="brand__mark">{IconLogo({ size: 19 })}</span>
           <span class="brand__text truncate">
-            <div class="brand__name">Claude Control</div>
-            <div class="brand__sub">
+            {
+              /* Spans, not divs: a button may only hold phrasing content. */
+            }
+            <span class="brand__name">Claude Control</span>
+            <span class="brand__sub">
               {workspace.cliVersion
                 ? `CLI ${workspace.cliVersion}`
                 : "CLI not found"}
-            </div>
+            </span>
           </span>
         </button>
       </div>

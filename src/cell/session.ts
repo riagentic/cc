@@ -7,8 +7,9 @@
  * first result, a branch, memory on disk) is measured elsewhere and labelled as
  * such, never guessed silently.
  *
- * Not persisted: a session dies with its process, and a restored transcript
- * next to a dead process is a lie. Use Resume to pick a real one back up.
+ * The conversation is persisted; the process is not. A restored transcript is
+ * marked offline at boot ({@link offlineAgain}), and the first message sent
+ * into it resumes the CLI session it came from.
  *
  * **One conversation per project.** Each project owns a `claude` process and a
  * transcript of its own, and they run concurrently — a turn started in one
@@ -23,34 +24,23 @@ import type {
   ActivityItem,
   AgentStats,
   BackgroundTask,
-  Block,
   Message,
   PermissionRequest,
   RateLimit,
-  SessionMeta,
   Status,
   ToolRun,
   TurnEnd,
-  Usage,
 } from "../type/claude.ts";
 import {
-  agentResultOf,
-  blocksOf,
   contextUsed as contextUsedOf,
-  contextWindowOf,
   controlError,
   type Evt,
-  fallbackWindow,
-  isAgentTool,
   isHandshakeAck,
   isInterruptAck,
   isModelAck,
   MODEL_PREFIX,
   MODELS,
-  permissionOf,
-  toolDetail,
-  toolTitle,
-  usageOf,
+  str,
 } from "../lib/stream.ts";
 import { oneLine, perSecond } from "../lib/format.ts";
 import {
@@ -64,14 +54,15 @@ import {
   EMPTY_META,
   EMPTY_USAGE,
   failPermission,
+  forDisk,
   MAX_MESSAGES,
   note,
   offlineAgain,
   type ProjectSession,
   rateLimit,
   reset,
+  resetProcess,
   result,
-  str,
   system,
   userEvent,
 } from "./session-reduce.ts";
@@ -81,7 +72,6 @@ import {
   activeSessionKey,
   activeSettings,
   panesOf,
-  projectOfPane,
   workspace,
 } from "./workspace.ts";
 
@@ -135,6 +125,52 @@ function at(s: SessionState, key: string): ProjectSession {
 }
 
 /**
+ * The record for one project if there is one — never creates it.
+ *
+ * What everything after an `await` and every process callback reads through.
+ * {@link at} *writes* (`??=`), so a dying process's last line, arriving after
+ * `release()` deleted its record, used to bring the record back and persist it:
+ * a removed project's transcript resurrected by its own exit.
+ */
+function lookup(s: SessionState, key: string): ProjectSession | undefined {
+  return !s.activeKey || key === s.activeKey ? s : s.parked[key];
+}
+
+/**
+ * The record a process callback reduces into, or `null` when it belongs to
+ * nobody: a record that is gone, or a start that has since been replaced.
+ *
+ * A call with no token is a test or a hand-driven event, not a process, and may
+ * open the record it names — which is all {@link at} is for.
+ */
+function target(
+  s: SessionState,
+  token: number | undefined,
+  key: string | undefined,
+): ProjectSession | null {
+  const k = key ?? currentKey(s);
+  if (token === undefined) return at(s, k);
+  const rec = lookup(s, k);
+  return rec && rec.startToken === token ? rec : null;
+}
+
+/** A record with a process behind it — or one on its way. `starting` has no
+ *  pid yet, and skipping it would leave the child being spawned running. */
+const running = (p: ProjectSession): boolean =>
+  p.pid !== null || p.status === "starting";
+
+/**
+ * The start in flight for each conversation.
+ *
+ * Module-local and written synchronously, before the start's first `await`:
+ * "is one already starting?" has to be answerable the instant a second caller
+ * asks, and a cell field would publish a dispatch later. Restart then Enter
+ * used to spawn two children for one conversation, the second orphaning the
+ * first.
+ */
+const inflight = new Map<string, Promise<void>>();
+
+/**
  * Bring another project's conversation to the top level.
  *
  * A plain function, not a method another method calls: a nested same-cell
@@ -166,7 +202,16 @@ async function endSession(
   why: string,
   error: string,
 ): Promise<void> {
-  const cur = at(s, key);
+  const cur = lookup(s, key);
+  // Nothing on record (a project released twice, a pane that never ran) still
+  // gets the teardown below — the process registry is the authority on that.
+  if (cur) mark(cur, why, error);
+  const io = await import("./claude.server.ts");
+  await io.stop(key);
+}
+
+/** The state half of {@link endSession}: the session is over, published now. */
+function mark(cur: ProjectSession, why: string, error: string): void {
   // The process being ended is no longer this session's, so nothing it says on
   // the way out may write here — bump the identity first and every one of its
   // callbacks is ignored as superseded.
@@ -189,9 +234,145 @@ async function endSession(
   cancelPending(cur, why);
   closeOpenWork(cur, why);
   note(cur, "session", "Session stopped", error);
+}
+
+/**
+ * The body of `session.start`, for one conversation named up front.
+ *
+ * A plain function so the method can register the promise it returns before
+ * anything is awaited — see {@link inflight}. Every write after an `await` goes
+ * through {@link lookup} by `key`, never to the top level: the user may have
+ * switched conversation while the process spawned, and the pid (or the error)
+ * belongs to the one that was started, not to whatever is on screen now.
+ */
+async function startIn(
+  s: SessionState,
+  key: string,
+  resume: boolean,
+): Promise<void> {
+  const project = activeProject();
+  // The switch normally arrives from `workspace.select`; doing it here too
+  // makes `start()` correct when it is the first thing that happens, which
+  // is what boot and every test do. Applied directly rather than
+  // dispatched — see `applySwitch`.
+  if (project) applySwitch(s, key);
+  if (!project) {
+    s.error = "Add a project directory first — Settings → Projects.";
+    s.status = "error";
+    return;
+  }
+  // A persisted project is a claim about a directory, and directories go
+  // away between runs. Spawning into one that is gone failed with a bare
+  // "Could not start" and left the user with nothing to act on, while the
+  // remedy — pick another project, or remove this one — was one page away
+  // and unlabelled. Say which folder, and say what to do about it.
+  if (project.missing) {
+    s.error =
+      `The project folder is gone: ${project.path} — pick another project ` +
+      `in Settings, or remove it from the list.`;
+    s.status = "error";
+    log.error("session", "project directory is missing", {
+      path: project.path,
+    });
+    note(s, "error", "Project folder is gone", project.path);
+    return;
+  }
+  const settings = activeSettings();
+  const resumeId = resume ? s.resumeId : null;
+
+  // Restarting kills the previous process, and its exit callback arrives
+  // *after* this one has published "starting" — which used to flip the
+  // fresh session straight to "offline". Every callback now carries the
+  // token of the start that created it, and a stale one is ignored.
+  const token = s.startToken + 1;
+
+  if (resume) {
+    // The conversation continues, so the transcript does too — only what
+    // was true of the old process goes. Emptying it here threw away a
+    // restored conversation on the first message sent into it.
+    const why = "the session restarted";
+    cancelPending(s, why);
+    closeOpenWork(s, why);
+    resetProcess(s);
+  } else reset(s);
+  s.startToken = token;
+  s.status = "starting";
+  s.cwd = project.path;
+  s.model = settings.model;
+  s.startedAt = Date.now();
+  s.resumeId = resumeId;
+  note(s, "session", "Starting session", `${project.path} · ${s.model}`);
+
+  /** This start's record, if it is still this start's. */
+  const mine = (): ProjectSession | null => {
+    const rec = lookup(s, key);
+    return rec && rec.startToken === token ? rec : null;
+  };
 
   const io = await import("./claude.server.ts");
-  await io.stop(key);
+  try {
+    const { pid } = await io.start(key, {
+      cwd: project.path,
+      model: settings.model,
+      permissionMode: settings.permissionMode,
+      allowedDirs: [...settings.allowedDirs],
+      skipPermissions: settings.skipPermissions,
+      effort: settings.effort,
+      resume: resumeId,
+    }, {
+      // These are *process callbacks*, not nested calls: they are stored now
+      // and invoked later, from the stdout reader, long after this method has
+      // returned. Each one has to be its own dispatch — that is what a reducer
+      // fed by a live stream is. `aiol` sees only the lexical nesting, and this
+      // cell is `transaction: false` besides, so there is no pinned snapshot
+      // for them to read stale.
+      // Every callback carries the project it belongs to. Without it a
+      // background project's events would reduce into whatever happens to be
+      // on screen when they arrive.
+      onEvent: (evt) => {
+        void session.ingest(evt as Evt, token, key); // aiol-ok: callback
+        // `system/init` is the only place the CLI names the session's own
+        // memory directories, and it re-emits after every result — so this
+        // is the cheap memory-only pass, paced inside the catalog, not the
+        // whole configuration walk.
+        if (evt.type === "system" && evt.subtype === "init") {
+          void import("./catalog.ts").then((m) =>
+            // aiol-ok: callback
+            m.catalog.refreshMemory(false)
+          );
+        }
+      },
+      onDelta: (kind, text) => {
+        void session.delta(kind, text, token, key); // aiol-ok: callback
+      },
+      onExit: (code, detail) => {
+        void session.exited(code, detail, token, key); // aiol-ok: callback
+      },
+    });
+    // Replaced or released while it spawned: the pid is not this record's to
+    // hold. The registry has already been told — a later start replaces the
+    // child, a release stops it — so there is nothing left to do here.
+    const rec = mine();
+    if (rec) rec.pid = pid;
+  } catch (e) {
+    const error = e instanceof Error ? e.message : String(e);
+    log.error("session", "could not start Claude Code", {
+      cwd: project.path,
+      model: settings.model,
+      error,
+    });
+    const rec = mine();
+    if (rec) {
+      rec.status = "error";
+      rec.error = error;
+      note(rec, "error", "Could not start", error);
+    }
+    // The commonest cause is a folder that has been deleted since it was
+    // remembered. Re-checking here is what makes the Projects list honest by
+    // the time the user gets to it — otherwise the row that just failed
+    // still looks perfectly fine.
+    void workspace.refreshProjects();
+  }
 }
 
 /** Which project a call with no key of its own is about: the one on screen.
@@ -221,6 +402,16 @@ export const session = cell("session", {
    */
   persist: "all",
 
+  /** What is written is the conversation, not the moment: no half-streamed
+   *  sentence (rewritten ~10× a second while a turn streams, and cleared at
+   *  boot regardless), and no whole file carried in a `Write`'s arguments. */
+  onPersist: (s: SessionState): SessionState => ({
+    ...forDisk(s),
+    parked: Object.fromEntries(
+      Object.entries(s.parked).map(([k, p]) => [k, forDisk(p)]),
+    ),
+  }),
+
   /** Nothing here ran a program since the app closed. {@link offlineAgain}
    *  says what that costs, and is applied to the conversation on screen and to
    *  every parked one alike. */
@@ -237,8 +428,9 @@ export const session = cell("session", {
 
   // The session owns a real OS process, so shutting the cell down has to end
   // it. Best-effort by contract — the framework calls this without awaiting —
-  // which is why `claude.server.ts` also guards the signal and unload paths
-  // itself; between them, no exit route leaves a `claude` running.
+  // which is why `claude.server.ts` also SIGKILLs any child still alive on
+  // `unload`; between them, no exit route leaves a `claude` running. Signals
+  // stay aio's: its handler runs this and then the final state flush.
   onInit() {
     // The runtime is not up during `onInit`, so the watchdog arms itself on the
     // next macrotask — the same constraint every other cell here works around.
@@ -313,117 +505,32 @@ export const session = cell("session", {
       applySwitch(s, key);
     },
 
-    /** Start (or restart) the session for the active project. `resume` hands
-     *  the CLI its previous session id, so the model keeps everything it knew;
-     *  the CLI replays none of it on the wire, so the transcript here starts
-     *  empty and fills from the next turn on (measured against 2.1.232). */
+    /** Start (or restart) the session for the active project.
+     *
+     *  `resume` continues the conversation: the CLI is handed its previous
+     *  session id, so the model keeps everything it knew, and the transcript
+     *  here is kept to match. Without it the start is a blank context, and the
+     *  transcript goes with it.
+     *
+     *  One start per conversation at a time: a second one waits for the first
+     *  to settle, so the process registry never sees two spawns racing. */
     async start(s: SessionState, resume = false) {
       // The conversation being started is the one on screen — which is a pane
       // now, not a project: a project can hold several, and starting one must
-      // not restart another.
+      // not restart another. Read once, here: after an await, "the one on
+      // screen" may be another.
       const key = currentKey(s);
-      const project = activeProject();
-      // The switch normally arrives from `workspace.select`; doing it here too
-      // makes `start()` correct when it is the first thing that happens, which
-      // is what boot and every test do. Applied directly rather than
-      // dispatched — see `applySwitch`.
-      if (project) applySwitch(s, key);
-      if (!project) {
-        s.error = "Add a project directory first — Settings → Projects.";
-        s.status = "error";
-        return;
-      }
-      // A persisted project is a claim about a directory, and directories go
-      // away between runs. Spawning into one that is gone failed with a bare
-      // "Could not start" and left the user with nothing to act on, while the
-      // remedy — pick another project, or remove this one — was one page away
-      // and unlabelled. Say which folder, and say what to do about it.
-      if (project.missing) {
-        s.error =
-          `The project folder is gone: ${project.path} — pick another project ` +
-          `in Settings, or remove it from the list.`;
-        s.status = "error";
-        log.error("session", "project directory is missing", {
-          path: project.path,
-        });
-        note(s, "error", "Project folder is gone", project.path);
-        return;
-      }
-      const settings = activeSettings();
-      const resumeId = resume ? s.resumeId : null;
-
-      // Restarting kills the previous process, and its exit callback arrives
-      // *after* this one has published "starting" — which used to flip the
-      // fresh session straight to "offline". Every callback now carries the
-      // token of the start that created it, and a stale one is ignored.
-      const token = s.startToken + 1;
-
-      reset(s);
-      s.startToken = token;
-      s.status = "starting";
-      s.cwd = project.path;
-      s.model = settings.model;
-      s.startedAt = Date.now();
-      s.resumeId = resumeId;
-      note(s, "session", "Starting session", `${project.path} · ${s.model}`);
-
-      const io = await import("./claude.server.ts");
+      const run = startIn(s, key, resume);
+      inflight.set(key, run);
       try {
-        const { pid } = await io.start(key, {
-          cwd: project.path,
-          model: settings.model,
-          permissionMode: settings.permissionMode,
-          allowedDirs: [...settings.allowedDirs],
-          skipPermissions: settings.skipPermissions,
-          effort: settings.effort,
-          resume: resumeId,
-        }, {
-          // These four are *process callbacks*, not nested calls: they are
-          // stored now and invoked later, from the stdout reader, long after
-          // this method has returned. Each one has to be its own dispatch —
-          // that is what a reducer fed by a live stream is. `aiol` sees only the
-          // lexical nesting, and this cell is `transaction: false` besides, so
-          // there is no pinned snapshot for them to read stale.
-          // Every callback carries the project it belongs to. Without it a
-          // background project's events would reduce into whatever happens to
-          // be on screen when they arrive.
-          onEvent: (evt) => {
-            void session.ingest(evt as Evt, token, key); // aiol-ok: callback
-            // `system/init` is the only place the CLI names the session's own
-            // memory directories, and it re-emits after every result — so this
-            // is the cheap memory-only pass, paced inside the catalog, not the
-            // whole configuration walk.
-            if (evt.type === "system" && evt.subtype === "init") {
-              void import("./catalog.ts").then((m) =>
-                // aiol-ok: callback
-                m.catalog.refreshMemory(false)
-              );
-            }
-          },
-          onDelta: (kind, text) => {
-            void session.delta(kind, text, token, key); // aiol-ok: callback
-          },
-          onExit: (code, detail) => {
-            void session.exited(code, detail, token, key); // aiol-ok: callback
-          },
-        });
-        s.pid = pid;
-      } catch (e) {
-        s.status = "error";
-        s.error = e instanceof Error ? e.message : String(e);
-        log.error("session", "could not start Claude Code", {
-          cwd: project.path,
-          model: settings.model,
-          error: s.error, // aiol-ok: written two lines above
-        });
-        // aiol-ok: live read of a value written one line above, by design
-        note(s, "error", "Could not start", s.error);
-        // The commonest cause is a folder that has been deleted since it was
-        // remembered. Re-checking here is what makes the Projects list honest by
-        // the time the user gets to it — otherwise the row that just failed
-        // still looks perfectly fine.
-        void workspace.refreshProjects();
+        await run;
+      } finally {
+        if (inflight.get(key) === run) inflight.delete(key);
       }
+      // A second start while one is in flight is safe without waiting: it
+      // bumps the token (the first one's late writes are dropped as stale), and
+      // the registry spawns one child per conversation at a time, the later
+      // replacing the earlier.
     },
 
     /**
@@ -438,7 +545,7 @@ export const session = cell("session", {
      * remains valid and Resume brings the context back; throwing the
      * conversation away on a mis-click would be the expensive mistake here.
      */
-    async stop(s: SessionState, key?: string) {
+    async stop(s: SessionState, key: string | undefined = undefined) {
       const project = key ?? currentKey(s);
       await endSession(s, project, "the session was stopped", "");
     },
@@ -460,23 +567,21 @@ export const session = cell("session", {
       // argument left off must not reject on a `for…of undefined`.
       if (!Array.isArray(keys)) return;
       for (const key of keys) {
-        await endSession(s, key, "the project was removed", "");
+        const rec = lookup(s, key);
+        // A conversation that never ran has nothing to end — marking it would
+        // write "Session stopped" into a record about to be deleted, and an
+        // errored one would be rewritten as offline. The registry is still
+        // asked: it is the authority on whether a child exists.
+        if (rec && running(rec)) {
+          await endSession(s, key, "the project was removed", "");
+        } else {
+          const io = await import("./claude.server.ts");
+          await io.stop(key);
+        }
         delete s.parked[key];
       }
     },
 
-    /**
-     * Close any session whose project folder has gone.
-     *
-     * Polled, because a deleted directory produces no event — nothing tells a
-     * running `claude` that the ground it is standing on is gone. Left alone it
-     * keeps a process, a context and a token bill alive for a codebase that no
-     * longer exists, and every tool call it makes fails in a way that reads like
-     * the model being confused rather than the folder being deleted.
-     *
-     * Only sessions with a live process are checked: a `stat` per running
-     * session is nothing, and a project nobody has started has nothing to close.
-     */
     /** Start the folder watch, once. Kept out of {@link watchFolders}
      *  deliberately — re-arming `every` from inside its own tick replaces the
      *  timer on every pass, which aio rightly warns about ("set dynamically
@@ -491,14 +596,28 @@ export const session = cell("session", {
       ));
     },
 
+    /**
+     * Close any session whose project folder has gone.
+     *
+     * Polled, because a deleted directory produces no event — nothing tells a
+     * running `claude` that the ground it is standing on is gone. Left alone it
+     * keeps a process, a context and a token bill alive for a codebase that no
+     * longer exists, and every tool call it makes fails in a way that reads like
+     * the model being confused rather than the folder being deleted.
+     *
+     * Only sessions with a live process are checked: a `stat` per running
+     * session is nothing, and a project nobody has started has nothing to close.
+     */
     async watchFolders(s: SessionState) {
       // Read before the first await, so the list is one consistent view of what
       // was running when the tick began rather than a mix of before and after.
       const live: { key: string; cwd: string }[] = [];
       for (const key of [s.activeKey, ...Object.keys(s.parked)]) {
         if (!key) continue;
-        const rec = at(s, key);
-        if (rec.pid !== null && rec.cwd) live.push({ key, cwd: rec.cwd });
+        const rec = lookup(s, key);
+        if (rec && rec.pid !== null && rec.cwd) {
+          live.push({ key, cwd: rec.cwd });
+        }
       }
       if (live.length === 0) return;
 
@@ -534,11 +653,11 @@ export const session = cell("session", {
       s: SessionState,
       code: number,
       detail: string,
-      token?: number,
-      key?: string,
+      token: number | undefined = undefined,
+      key: string | undefined = undefined,
     ) {
-      const p = at(s, key ?? currentKey(s));
-      if (token !== undefined && token !== p.startToken) return; // superseded
+      const p = target(s, token, key);
+      if (!p) return; // superseded, or its record is gone
       p.pid = null;
       p.turnStartedAt = null;
       p.streaming = null;
@@ -578,15 +697,18 @@ export const session = cell("session", {
       // Closed over the picker's own list, like `workspace.setModel` — a model
       // id from anywhere else is not a model this app offers.
       if (!MODELS.some((m) => m.id === model)) return;
-      // Read before either await: whether there is a process to tell is a
-      // question about now, not about after the preference has committed.
-      const live = s.pid !== null;
+      // Read before either await: which conversation, and whether there is a
+      // process to tell, are questions about now — not about after the
+      // preference has committed and the user has perhaps moved on.
+      const key = currentKey(s);
+      const cur = at(s, key);
+      const live = cur.pid !== null;
       // Optimistic, and corrected by the CLI either way: the next assistant
       // message names the model it actually answered from, and a refusal is
       // reduced in `control_response` below.
       if (live) {
-        s.model = model;
-        note(s, "session", "Model switched", model);
+        cur.model = model;
+        note(cur, "session", "Model switched", model);
       }
       // The preference is what the *next* session is spawned with, and it has
       // to hold whether or not there was a process to tell.
@@ -595,11 +717,15 @@ export const session = cell("session", {
 
       const io = await import("./claude.server.ts");
       try {
-        await io.setModel(currentKey(s), model); // aiol-ok: the key is not state
+        await io.setModel(key, model);
       } catch (e) {
-        s.error = e instanceof Error ? e.message : String(e);
-        log.error("session", "model switch failed", { model, error: s.error }); // aiol-ok
-        note(s, "error", "Model switch failed", s.error); // aiol-ok: just written
+        const error = e instanceof Error ? e.message : String(e);
+        log.error("session", "model switch failed", { model, error });
+        const rec = lookup(s, key);
+        if (rec) {
+          rec.error = error;
+          note(rec, "error", "Model switch failed", error);
+        }
       }
     },
 
@@ -610,15 +736,26 @@ export const session = cell("session", {
     async send(s: SessionState, text: string) {
       const body = typeof text === "string" ? text.trim() : "";
       if (!body) return;
+      // The conversation this turn is for is the one on screen NOW. Every
+      // write below goes to it by key, so a switch while the process spawns
+      // cannot land the message in another project.
+      const key = currentKey(s);
       // Send-starts-the-session: the composer is always live. Only a *dead
-      // process* justifies a restart — a turn that failed leaves the session
+      // process* justifies a start — a turn that failed leaves the session
       // perfectly usable, and restarting it would silently discard its context.
-      if (s.pid === null) await session.start();
+      // A start already under way is joined, not repeated: Restart then Enter
+      // spawned two children and orphaned the first.
+      if (at(s, key).pid === null) {
+        await (inflight.get(key) ?? session.start(true));
+      }
 
+      // Gone while it started (the project was removed): nowhere to put it.
+      const cur = lookup(s, key);
+      if (!cur) return;
       // A new message ends the window in which the last clear can be undone —
       // and lets go of the transcript it was holding.
-      s.cleared = [];
-      s.messages.push({
+      cur.cleared = [];
+      cur.messages.push({
         id: `local-${crypto.randomUUID()}`,
         role: "user",
         blocks: [{ kind: "text", text: body }],
@@ -627,60 +764,69 @@ export const session = cell("session", {
       });
       // The live read is the point — the reducer may have appended while
       // `start()` was awaited, and the cap must apply to the real list.
-      cap(s.messages, MAX_MESSAGES); // aiol-ok
+      cap(cur.messages, MAX_MESSAGES);
 
       // The spawn above failed and already reported *why* ("…Set CLAUDE_BIN if
       // it is not on PATH"). Carrying on would call `io.send`, fail with the
       // generic "No session is running." and overwrite the one message that
       // tells the user what to do. Keep the message, keep the cause, stop here.
-      if (s.pid === null) { // aiol-ok: re-read after start(), deliberately
-        s.status = "error";
-        s.turnStartedAt = null;
+      if (cur.pid === null) {
+        cur.status = "error";
+        cur.turnStartedAt = null;
         return;
       }
 
       // Sent while a turn is already in flight: the CLI will queue it, and the
-      // count is corrected by the next result either way.
-      //
-      // The live read is the point — the reducer has been running throughout
-      // the awaits above, and "is a turn in flight *now*" is the only question
-      // worth asking here. aiol-ok: deliberate live read
-      if (s.status === "working") s.queuedTurns += 1;
-      s.status = "working";
+      // count is corrected by the next result either way. The live read is the
+      // point — the reducer has been running throughout the awaits above, and
+      // "is a turn in flight *now*" is the only question worth asking here.
+      if (cur.status === "working") cur.queuedTurns += 1;
+      cur.status = "working";
       // A turn sent while one is running is queued by the CLI and answered
       // after it (verified against 2.1.232), so the clock in the strip belongs
       // to the turn actually in flight — restarting it here reported a
       // three-minute turn as having just begun.
-      s.turnStartedAt ??= Date.now();
-      s.streaming = null;
-      s.error = null;
-      s.interrupting = false;
-      note(s, "session", "Turn sent", oneLine(body, 120));
+      cur.turnStartedAt ??= Date.now();
+      cur.streaming = null;
+      cur.error = null;
+      cur.interrupting = false;
+      note(cur, "session", "Turn sent", oneLine(body, 120));
 
       const io = await import("./claude.server.ts");
       try {
-        await io.send(currentKey(s), body); // aiol-ok: the key is not state
+        await io.send(key, body);
       } catch (e) {
-        s.status = "error";
-        s.turnStartedAt = null;
-        s.error = e instanceof Error ? e.message : String(e);
-        log.error("session", "send failed", { error: s.error }); // aiol-ok
-        note(s, "error", "Send failed", s.error); // aiol-ok: just written
+        const error = e instanceof Error ? e.message : String(e);
+        log.error("session", "send failed", { error });
+        const rec = lookup(s, key);
+        if (rec) {
+          rec.status = "error";
+          rec.turnStartedAt = null;
+          rec.error = error;
+          note(rec, "error", "Send failed", error);
+        }
       }
     },
 
     /** Stop the current turn, keeping the session alive. */
     async interrupt(s: SessionState) {
-      if (s.status !== "working") return;
-      s.interrupting = true;
+      const key = currentKey(s);
+      const cur = at(s, key);
+      if (cur.status !== "working") return;
+      cur.interrupting = true;
       const io = await import("./claude.server.ts");
       try {
-        await io.interrupt(currentKey(s)); // aiol-ok: the key is not state
-        note(s, "session", "Interrupt requested", "");
+        await io.interrupt(key);
+        const rec = lookup(s, key);
+        if (rec) note(rec, "session", "Interrupt requested", "");
       } catch (e) {
-        s.interrupting = false;
-        s.error = e instanceof Error ? e.message : String(e);
-        log.error("session", "interrupt failed", { error: s.error }); // aiol-ok
+        const error = e instanceof Error ? e.message : String(e);
+        log.error("session", "interrupt failed", { error });
+        const rec = lookup(s, key);
+        if (rec) {
+          rec.interrupting = false;
+          rec.error = error;
+        }
       }
     },
 
@@ -689,11 +835,11 @@ export const session = cell("session", {
       s: SessionState,
       kind: "text" | "thinking",
       text: string,
-      token?: number,
-      key?: string,
+      token: number | undefined = undefined,
+      key: string | undefined = undefined,
     ) {
-      const cur = at(s, key ?? currentKey(s));
-      if (token !== undefined && token !== cur.startToken) return; // superseded
+      const cur = target(s, token, key);
+      if (!cur) return; // superseded, or its record is gone
       if (typeof text !== "string" || text.length === 0) return;
       if (cur.status !== "working") cur.status = "working";
       cur.streaming = cur.streaming && cur.streaming.kind === kind
@@ -703,10 +849,9 @@ export const session = cell("session", {
 
     /* ── the protocol reducer ──────────────────────────────────────────── */
 
-    /** One decoded CLI event → state. Sync and allocation-light: this runs on
-     *  every line the model produces. */
     /**
-     * One decoded protocol event, reduced into the project it came from.
+     * One decoded protocol event, reduced into the project it came from. Sync
+     * and allocation-light: this runs on every line the model produces.
      *
      * `key` is that project. It is not optional in spirit — every process
      * callback supplies it — but it defaults to the project on screen so a test
@@ -721,9 +866,10 @@ export const session = cell("session", {
       token: number | undefined = undefined,
       key: string | undefined = undefined,
     ) {
-      const cur = at(s, key ?? currentKey(s));
-      // A late line from a process we already replaced belongs to nobody.
-      if (token !== undefined && token !== cur.startToken) return;
+      // A late line from a process we already replaced — or whose record was
+      // released — belongs to nobody.
+      const cur = target(s, token, key);
+      if (!cur) return;
       // The wire is not ours: a truncated line, a future event shape, or a
       // missing payload must never take the session down with it.
       if (!evt || typeof evt !== "object") return;
@@ -769,7 +915,9 @@ export const session = cell("session", {
           // Deriving the interrupt flag from the CLI's own reply — not just
           // from our optimistic request — means a request the CLI never
           // honoured cannot silently mask a real failure.
-          if (isInterruptAck(evt)) {
+          // Only while a turn runs: an ack that lands after the turn's own
+          // result would otherwise leave an idle session "interrupting".
+          if (isInterruptAck(evt) && cur.status === "working") {
             cur.interrupting = true;
             note(cur, "session", "Interrupt acknowledged", "");
           }
@@ -801,7 +949,9 @@ export const session = cell("session", {
      * come back on the next call.
      */
     async allowPermission(s: SessionState, id: string, always = false) {
-      const req = s.permissions.find((p) => p.id === id);
+      const key = currentKey(s);
+      const cur = at(s, key);
+      const req = cur.permissions.find((p) => p.id === id);
       if (!req || req.status !== "pending") return;
       const suggestions = always
         ? req.suggestions.map((x) => ({ ...x.raw }))
@@ -809,38 +959,43 @@ export const session = cell("session", {
       req.status = "allowed";
       req.decidedAt = Date.now();
       req.appliedSuggestion = always ? req.suggestions[0]?.label ?? null : null;
-      clearPermissionFlag(s, id);
+      clearPermissionFlag(cur, id);
       note(
-        s,
+        cur,
         "permission",
         always ? `Allowed always · ${req.tool}` : `Allowed · ${req.tool}`,
         req.description,
       );
+      const input = { ...req.input };
 
       const io = await import("./claude.server.ts");
       try {
-        await io.allowTool(currentKey(s), id, { ...req.input }, suggestions);
+        await io.allowTool(key, id, input, suggestions);
       } catch (e) {
-        failPermission(s, id, e);
+        const rec = lookup(s, key);
+        if (rec) failPermission(rec, id, e);
       }
     },
 
     /** Refuse a held tool call. The reason is handed to the model verbatim. */
     async denyPermission(s: SessionState, id: string, reason = "") {
-      const req = s.permissions.find((p) => p.id === id);
+      const key = currentKey(s);
+      const cur = at(s, key);
+      const req = cur.permissions.find((p) => p.id === id);
       if (!req || req.status !== "pending") return;
       const message = reason.trim() ||
         "The user declined this action in Claude Control.";
       req.status = "denied";
       req.decidedAt = Date.now();
-      clearPermissionFlag(s, id);
-      note(s, "permission", `Denied · ${req.tool}`, req.description);
+      clearPermissionFlag(cur, id);
+      note(cur, "permission", `Denied · ${req.tool}`, req.description);
 
       const io = await import("./claude.server.ts");
       try {
-        await io.denyTool(currentKey(s), id, message);
+        await io.denyTool(key, id, message);
       } catch (e) {
-        failPermission(s, id, e);
+        const rec = lookup(s, key);
+        if (rec) failPermission(rec, id, e);
       }
     },
 
@@ -858,7 +1013,7 @@ export const session = cell("session", {
       cur.messages = [];
       cur.streaming = null;
       note(
-        s,
+        cur,
         "session",
         "Transcript cleared",
         "view only — the model still remembers",
@@ -913,6 +1068,10 @@ export const session = cell("session", {
     async stopAll(s: SessionState) {
       const keys = [s.activeKey, ...Object.keys(s.parked)].filter(Boolean);
       for (const key of keys) {
+        // Only what runs: a conversation that never started would gain a
+        // "Session stopped" line, and an errored one would lose its error.
+        const rec = lookup(s, key);
+        if (!rec || !running(rec)) continue;
         // `endSession` publishes "offline" before awaiting the teardown, so
         // the list goes quiet immediately rather than one project at a time.
         await endSession(s, key, "stopped every session", "");
@@ -1034,8 +1193,6 @@ export const agentSteps = (agentToolUseId: string): ToolRun[] =>
 export const busyTaskCount = (): number =>
   runningTasks().length + runningTools().length;
 
-/** Tokens occupying the context window after the most recent request. Cache
- *  reads count — they are still resident in the window. */
 /**
  * How fast the last turn produced text, in output tokens per second — or
  * `null` when there is nothing honest to divide.
@@ -1048,6 +1205,8 @@ export const busyTaskCount = (): number =>
 export const lastSpeed = (): number | null =>
   perSecond(view().lastTurnOutput, view().lastTurnMs);
 
+/** Tokens occupying the context window after the most recent request. Cache
+ *  reads count — they are still resident in the window. */
 export const contextUsed = (): number => contextUsedOf(view().usage);
 
 export const contextWindow = (): number =>

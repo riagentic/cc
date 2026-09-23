@@ -10,6 +10,7 @@ import { assert, assertEquals } from "@std/assert";
 import { join } from "@std/path";
 import { bootCells } from "aio/testing";
 import { readFilePreview, readTree } from "../../cell/catalog.server.ts";
+import { parsePorcelainZ } from "../../cell/claude.server.ts";
 import { gitMark, touchedPaths, tree } from "../../cell/tree.ts";
 import { session } from "../../cell/session.ts";
 import { workspace } from "../../cell/workspace.ts";
@@ -173,6 +174,7 @@ Deno.test("the cell expands, collapses and previews", async () => {
     assertEquals(tree.selected, "");
     assertEquals(tree.preview.text, "");
   } finally {
+    await h.settle();
     h.dispose();
     await Deno.remove(root, { recursive: true });
   }
@@ -200,6 +202,7 @@ Deno.test("switching project drops the other one's expansion and preview", async
     assertEquals(tree.selected, "");
     assert(tree.nodes.every((n) => n.path.startsWith(b)));
   } finally {
+    await h.settle();
     h.dispose();
     await Deno.remove(a, { recursive: true });
     await Deno.remove(b, { recursive: true });
@@ -246,6 +249,7 @@ Deno.test("the touch overlay reports the session's own file calls", async () => 
     // A tool that names no file is not a touch.
     assertEquals(touched.has("/p/c.ts"), false);
   } finally {
+    await h.settle();
     h.dispose();
   }
 });
@@ -292,6 +296,7 @@ Deno.test("tree — git marks the files it considers changed", async () => {
     await tree.refresh();
     assertEquals(gitMark(`${dir}/inner/deep.txt`), "new");
   } finally {
+    await h.settle();
     h.dispose();
     await Deno.remove(dir, { recursive: true });
   }
@@ -351,7 +356,22 @@ Deno.test("tree — a changed file carries its committed version", async () => {
     await tree.select(`${dir}/fresh.txt`);
     assertEquals(tree.previewHead, "");
   } finally {
+    await h.settle();
     h.dispose();
     await Deno.remove(dir, { recursive: true });
   }
+});
+
+Deno.test("a rename in git status is one entry, under its new name", () => {
+  // `-z` puts a rename's old path in a field of its own, with no status code.
+  // Read as an entry, "old.ts" lost three characters and became a changed
+  // file called ".ts" that does not exist.
+  const out =
+    "R  src/new.ts\0src/old.ts\0 M a b.ts\0?? n.ts\0C  c2.ts\0c1.ts\0";
+  assertEquals(parsePorcelainZ(out), [
+    { code: "R ", name: "src/new.ts" },
+    { code: " M", name: "a b.ts" },
+    { code: "??", name: "n.ts" },
+    { code: "C ", name: "c2.ts" },
+  ]);
 });

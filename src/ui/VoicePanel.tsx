@@ -7,39 +7,26 @@ import { DEFAULT_VOICE_URL, voice, voiceReady } from "../cell/voice.ts";
 import { Pill, Segmented, Toggle } from "./parts.tsx";
 import { keyLabel } from "./Mic.tsx";
 import { IconRefresh } from "./icons.tsx";
+import { HEARD_LANGUAGES } from "./languageList.ts";
 
 /**
- * A shortlist of whisper's hundred, and "" is a real answer.
+ * What to offer in the microphone picker.
  *
- * These serve two controls: forcing one language, and naming the several you
- * actually speak. Anything missing here can still be reached by leaving
- * detection on and simply speaking it — this list is about the ones worth
- * one click.
+ * The saved one is always among them, even before the machine has been asked
+ * what it has: the list is filled when the picker is focused, and until then
+ * a `select` whose value is not among its options renders "System default"
+ * while recording from something else — which is a lie about the one setting
+ * that decides whether you are heard at all.
  */
-const LANGUAGES: { id: string; label: string }[] = [
-  { id: "", label: "Detect" },
-  { id: "en", label: "English" },
-  { id: "cs", label: "Czech" },
-  { id: "sk", label: "Slovak" },
-  { id: "pl", label: "Polish" },
-  { id: "de", label: "German" },
-  { id: "nl", label: "Dutch" },
-  { id: "es", label: "Spanish" },
-  { id: "pt", label: "Portuguese" },
-  { id: "fr", label: "French" },
-  { id: "it", label: "Italian" },
-  { id: "hu", label: "Hungarian" },
-  { id: "ro", label: "Romanian" },
-  { id: "uk", label: "Ukrainian" },
-  { id: "ru", label: "Russian" },
-  { id: "tr", label: "Turkish" },
-  { id: "ar", label: "Arabic" },
-  { id: "hi", label: "Hindi" },
-  { id: "ne", label: "Nepali" },
-  { id: "zh", label: "Chinese" },
-  { id: "ja", label: "Japanese" },
-  { id: "ko", label: "Korean" },
-];
+export function micOptions(
+  devices: { id: string; label: string }[],
+  current: string,
+): { id: string; label: string }[] {
+  const listed = [{ id: "", label: "System default" }, ...devices];
+  return listed.some((d) => d.id === current)
+    ? listed
+    : [...listed, { id: current, label: current }];
+}
 
 export function VoicePanel(): VNode {
   const cfg = voice.config;
@@ -65,9 +52,8 @@ export function VoicePanel(): VNode {
         <>
           <div class="field__hint">
             Hold <b>{keyLabel(cfg.key)}</b>{" "}
-            and speak; let go and the words land in the composer — never sent on
-            their own, because speech gets names and paths wrong often enough
-            that you want to see them first. Needs <code>whisper-server</code>
+            and speak; let go and the words land in the composer, and are sent
+            unless you choose otherwise below. Needs <code>whisper-server</code>
             {" "}
             running locally.
           </div>
@@ -117,9 +103,8 @@ export function VoicePanel(): VNode {
               onChange={(e: Event) =>
                 voice.setDevice((e.target as HTMLSelectElement).value)}
             >
-              <option key="default" value="">System default</option>
-              {voice.devices.map((d) => (
-                <option key={d.id} value={d.id}>{d.label}</option>
+              {micOptions(voice.devices, cfg.device).map((d) => (
+                <option key={d.id || "default"} value={d.id}>{d.label}</option>
               ))}
             </select>
           </div>
@@ -137,7 +122,7 @@ export function VoicePanel(): VNode {
               onChange={(e: Event) =>
                 voice.setLanguage((e.target as HTMLSelectElement).value)}
             >
-              {LANGUAGES.map((l) => (
+              {HEARD_LANGUAGES.map((l) => (
                 <option key={l.id || "auto"} value={l.id}>{l.label}</option>
               ))}
             </select>
@@ -154,7 +139,7 @@ export function VoicePanel(): VNode {
               Leave it empty to trust detection.
             </span>
             <div class="chips">
-              {LANGUAGES.filter((l) => l.id !== "").map((l) => {
+              {HEARD_LANGUAGES.filter((l) => l.id !== "").map((l) => {
                 const on = spoken.includes(l.id);
                 return (
                   <button

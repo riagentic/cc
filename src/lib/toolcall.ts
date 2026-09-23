@@ -308,10 +308,22 @@ export function canonicalArgs(
 
 /* ── JSON the model almost wrote ──────────────────────────────────────────── */
 
-/** Escape raw control characters inside string literals — a newline typed
- *  straight into `"content": "…"` is the commonest reason a `write` call is
- *  not JSON. Everything outside strings is left alone. */
-function escapeInStrings(text: string): string {
+/** Whether the next non-whitespace character from `i` closes a container. */
+function closesNext(text: string, i: number): boolean {
+  while (i < text.length && /\s/.test(text[i])) i++;
+  return text[i] === "}" || text[i] === "]";
+}
+
+/** The two repairs that need to know where strings are, in one pass:
+ *
+ *  - inside a string, escape raw control characters — a newline typed straight
+ *    into `"content": "…"` is the commonest reason a `write` call is not JSON;
+ *  - outside one, drop a trailing comma before `}` or `]`.
+ *
+ *  One scanner, because the comma repair used to be a regex over the whole
+ *  text: it ran inside string values too, and quietly rewrote the file a
+ *  `write` call was carrying (`[1, 2, ]` became `[1, 2]`). */
+function repairJson(text: string): string {
   let out = "";
   let inStr = false;
   for (let i = 0; i < text.length; i++) {
@@ -334,6 +346,7 @@ function escapeInStrings(text: string): string {
         continue;
       }
     } else if (ch === '"') inStr = true;
+    else if (ch === "," && closesNext(text, i + 1)) continue;
     out += ch;
   }
   return out;
@@ -383,7 +396,7 @@ export function parseArgs(
   if (truncated) return { ok: false };
 
   let fixed = text.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
-  fixed = escapeInStrings(fixed).replace(/,\s*([}\]])/g, "$1");
+  fixed = repairJson(fixed);
   for (
     const tail of ["", "}", '"}', "]}", '"]}', "}}", '"}}', "]}}", '"]}}']
   ) {

@@ -22,6 +22,36 @@ export type Engine = "claude" | LocalEngine;
  */
 export type LocalMode = "chat" | "read" | "agent";
 
+/**
+ * How thoroughly the local agent works a turn. Orthogonal to tools and
+ * permissions: the same model can draft quickly or finish carefully.
+ *
+ *  - `draft`   — fewest rounds, terse method, no verify tax.
+ *  - `normal`  — middle budget and a lighter method.
+ *  - `quality` — today's full loop (1024 rounds, verify nudge, full method).
+ */
+export type LocalPace = "draft" | "normal" | "quality";
+
+/**
+ * Who shell commands run as on Linux.
+ *
+ *  - `auto`  — agent account when the project is in its reach; else you.
+ *  - `agent` — the cc-agent account (or `CC_AGENT_USER`); fail visibly if absent.
+ *  - `user`  — this app's user, even when an agent account exists.
+ */
+export type LocalRunAs = "auto" | "agent" | "user";
+
+/**
+ * What the agent may touch, as cumulative capability tiers.
+ *
+ *  - `read`    — list / find / read / search / todo; no edits, no shell.
+ *  - `write`   — also edit and write files; still no shell.
+ *  - `execute` — also run commands under sandbox + destructive deny-list
+ *                (today's "Don't ask").
+ *  - `all`     — no checks (today's Bypass).
+ */
+export type LocalCapability = "read" | "write" | "execute" | "all";
+
 /** One tool invocation the model asked for. `args` is the raw JSON string the
  *  model produced — parsed (and judged) at execution time, not before. */
 export type LocalToolCall = {
@@ -96,17 +126,19 @@ export type LocalConfig = {
    */
   urlManual?: boolean;
   /**
-   * What the agent may do without being asked — the local half of Claude
-   * Code's permission modes, and named to read the same way.
-   *
-   * This is the boundary for `sh`. The file tools resolve every path inside
-   * the project — symlinks included — but a shell command reaches wherever
-   * its user can. So the control is the one Claude Code gets: the command, in
-   * full, before it runs, with somebody deciding — unless somebody has said
-   * not to be asked, and then a guardrail and (where bubblewrap works) a
-   * sandbox stand in for them.
+   * @deprecated Prefer {@link LocalConfig.capability}. Kept so older saved
+   * projects still load; {@link capabilityOf} migrates it.
    */
   permission?: LocalPermission;
+  /** How thoroughly to work: draft / normal / quality. Default quality. */
+  pace?: LocalPace;
+  /** Who shell commands run as. Default auto. */
+  runAs?: LocalRunAs;
+  /**
+   * Cumulative capability: read → write → execute → all.
+   * Replaces asking about every shell command. Default execute.
+   */
+  capability?: LocalCapability;
   /** Sandboxed commands may use the network. Off by default — see
    *  `local.setSandboxNet`. */
   sandboxNet?: boolean;
@@ -114,25 +146,29 @@ export type LocalConfig = {
    *  without asking again ("Run it, and allow `am` outside"). Cleared when
    *  the permission mode changes. */
   outsideAllowed?: string[];
-  /** The mode "Auto-approve" was switched on over, and goes back to when it
-   *  is switched off. Set only while the permission is `bypass`. */
+  /**
+   * @deprecated Prefer {@link LocalConfig.beforeCapability}. A three-valued
+   * permission cannot say which of Read and Write to come back to — both read
+   * as `ask` — so unticking used to hand a read-only project full shell.
+   * Still read for projects saved before the tiers existed.
+   */
   beforeAutoApprove?: LocalPermission;
+  /** The capability tier "Auto-approve" was switched on over, and goes back to
+   *  when it is switched off. Set only while the capability is `all`. */
+  beforeCapability?: LocalCapability;
   /** What this field was called when it had two values. Read once, for a
    *  project configured before the third one existed; never written. */
   shApproval?: "ask" | "always";
 };
 
 /**
- * How much the local agent may do on its own.
+ * Legacy shell-approval modes. New UI writes {@link LocalCapability} instead;
+ * {@link capabilityOf} / {@link permissionOf} bridge both ways for one release.
  *
- *  - `ask`     — every command is held until the user answers. The default.
- *  - `dontAsk` — commands run unasked, except the ones that destroy, escalate
- *                or reach outside the machine: those are refused, in words the
- *                model can act on. The rest run with credentials scrubbed
- *                from their environment and, where bubblewrap works, in a
- *                sandbox that can write only the project. No prompts, and no
- *                quiet damage.
- *  - `bypass`  — no checks at all. Whatever the model writes, runs.
+ *  - `ask`     — every command held (legacy; maps to capability write for tools
+ *                with no auto shell — prefer capability tiers).
+ *  - `dontAsk` — sandboxed auto shell (= capability execute).
+ *  - `bypass`  — no checks (= capability all).
  */
 export type LocalPermission = "ask" | "dontAsk" | "bypass";
 

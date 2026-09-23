@@ -39,6 +39,21 @@ export function fillComposer(text: string): boolean {
   return true;
 }
 
+/** The tallest the box grows before it scrolls instead. */
+const COMPOSER_MAX_PX = 260;
+
+/**
+ * Size the box to its text, up to a cap. Both engines' composers call it after
+ * anything changes the value — typing, a draft coming back, a send clearing it.
+ */
+export function fitComposer(el: HTMLTextAreaElement | null): void {
+  if (!el) return;
+  // "auto" first: scrollHeight never reports less than the current height, so
+  // without it a box could grow and never shrink back.
+  el.style.height = "auto";
+  el.style.height = `${Math.min(el.scrollHeight, COMPOSER_MAX_PX)}px`;
+}
+
 /** Add text to the end of whatever is already in the box, on its own line. */
 export function appendToComposer(text: string): boolean {
   const el = box();

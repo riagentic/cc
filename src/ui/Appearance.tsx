@@ -74,7 +74,7 @@ export function AppearanceFields(): VNode {
 
       <Field
         label="Zoom"
-        hint="Ctrl and the scroll wheel does the same thing, anywhere in the app."
+        hint="Zoom lives here — Ctrl and the scroll wheel are left alone."
       >
         <div class="stepper">
           <button
@@ -178,7 +178,7 @@ export function AppearanceFields(): VNode {
 /** Every global shortcut, printed. Same table the keys are installed from, so
  *  this cannot list a key that does nothing. */
 export function ShortcutList(): VNode {
-  const rows = helpRows({ openPalette: () => {}, openHelp: () => {} });
+  const rows = helpRows();
   const groups = [...new Set(rows.map((r) => r.group))];
   return (
     <div class="stack">

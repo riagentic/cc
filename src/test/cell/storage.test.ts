@@ -12,6 +12,7 @@ import { bootCells } from "aio/testing";
 import {
   deleteProjectHistory,
   scanStorage,
+  verdict,
 } from "../../cell/storage.server.ts";
 import { stale, staleBytes, storage } from "../../cell/storage.ts";
 
@@ -77,7 +78,7 @@ Deno.test("a history with no recorded cwd is 'unknown', never 'gone'", async () 
     assertEquals(p.exists, null);
     assertEquals(p.path, "");
 
-    const refused = await deleteProjectHistory(p.dir, p.path);
+    const refused = await deleteProjectHistory(p.dir);
     assert(refused !== null);
     assert(refused!.includes("cannot be identified"));
     assertEquals((await scanStorage()).projects.length, 1); // still there
@@ -91,7 +92,7 @@ Deno.test("history for a folder that still exists is refused", async () => {
     const dir = join(home, ".claude", "projects", "-code-alive");
     await transcript(dir, ID_A, real);
 
-    const refused = await deleteProjectHistory(dir, real);
+    const refused = await deleteProjectHistory(dir);
     assert(refused !== null);
     assert(refused!.includes("is not stale"));
     assertEquals((await scanStorage()).projects.length, 1);
@@ -104,7 +105,7 @@ Deno.test("nothing outside ~/.claude/projects can be deleted", async () => {
     await Deno.mkdir(elsewhere, { recursive: true });
     await Deno.writeTextFile(join(elsewhere, "keep.txt"), "precious");
 
-    const refused = await deleteProjectHistory(elsewhere, "/gone");
+    const refused = await deleteProjectHistory(elsewhere);
     assert(refused !== null);
     assert(refused!.includes("not part of Claude Code"));
     assertEquals(
@@ -135,7 +136,7 @@ Deno.test("stale history is deleted with its file-history, and nothing else", as
     assertEquals(target.exists, false);
     assert(target.bytes > 4000);
 
-    assertEquals(await deleteProjectHistory(target.dir, target.path), null);
+    assertEquals(await deleteProjectHistory(target.dir), null);
 
     const after = await scanStorage();
     assertEquals(after.projects.length, 1);
@@ -174,6 +175,79 @@ Deno.test("the cell reports only what it can prove is stale", async () => {
       assertEquals(stale()[0].path, join(home, "code", "deleted"));
       assert(staleBytes() > 0);
     } finally {
+      await h.settle();
+      h.dispose();
+    }
+  });
+});
+
+Deno.test("a history is stale only when EVERY folder it names is gone", () => {
+  // The slug is lossy: `/a/b-c` and `/a/b/c` share one. Deciding from a
+  // single transcript called a live project dead.
+  assertEquals(verdict([]), null);
+  assertEquals(verdict([{ cwd: "/a/b-c", exists: false }]), false);
+  assertEquals(
+    verdict([
+      { cwd: "/a/b-c", exists: false },
+      { cwd: "/a/b/c", exists: true },
+    ]),
+    true,
+  );
+});
+
+Deno.test("a slug shared by a live and a dead folder is not stale, and the delete re-checks", async () => {
+  await withHome(async (home) => {
+    const alive = join(home, "a", "b", "c");
+    await Deno.mkdir(alive, { recursive: true });
+    const dir = join(home, ".claude", "projects", "-a-b-c");
+    // Two transcripts: the dead folder in the NEWER one. The page would show
+    // that path, and the old code would have called the history stale.
+    await transcript(dir, ID_A, alive);
+    await transcript(dir, ID_B, join(home, "a", "b-c"));
+    const later = new Date(Date.now() + 60_000);
+    await Deno.utime(join(dir, `${ID_B}.jsonl`), later, later);
+
+    const [p] = (await scanStorage()).projects;
+    assertEquals(p.path, join(home, "a", "b-c"));
+    assertEquals(p.exists, true);
+
+    // The server decides from the disk, not from what the page claims.
+    const refused = await deleteProjectHistory(dir);
+    assert(refused!.includes("is not stale"));
+    assert(await Deno.stat(dir).then(() => true));
+  });
+});
+
+Deno.test("history under a symlinked ~/.claude can still be deleted", async () => {
+  await withHome(async (home) => {
+    // Dotfiles kept in a repository: ~/.claude is a link to it.
+    const real = join(home, "dotfiles", "claude");
+    await Deno.mkdir(real, { recursive: true });
+    await Deno.symlink(real, join(home, ".claude"));
+    const dir = join(home, ".claude", "projects", "-code-deleted");
+    await transcript(dir, ID_A, join(home, "code", "deleted"));
+
+    assertEquals(await deleteProjectHistory(dir), null);
+    assertEquals(await Deno.stat(dir).catch(() => null), null);
+  });
+});
+
+Deno.test("a refused delete keeps its reason through the rescan", async () => {
+  await withHome(async (home) => {
+    const real = join(home, "code", "alive");
+    await Deno.mkdir(real, { recursive: true });
+    const dir = join(home, ".claude", "projects", "-code-alive");
+    await transcript(dir, ID_A, real);
+
+    const h = await bootCells([storage]);
+    try {
+      await storage.remove(dir, "/claimed/by/the/page");
+      await h.settle();
+      assert((storage.error ?? "").includes("is not stale"));
+      assertEquals(storage.busyDir, "");
+      assertEquals(storage.loading, false);
+    } finally {
+      await h.settle();
       h.dispose();
     }
   });

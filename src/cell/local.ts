@@ -20,33 +20,41 @@ import { cell, log, type MethodDraftMeta, schedule } from "aio";
 import {
   allowedTools,
   calibrate,
+  callTag,
+  capabilityOf,
   clip,
   commandAdvice,
+  type CycleCall,
+  cycleVerdict,
   destructiveReason,
+  docsNudgeFor,
   explainError,
   failureMark,
   foldChunk,
   foldedText,
+  isDocPath,
   isNoToolSupport,
   isOverflow,
   isRunaway,
   isStopIntent,
   isTestPath,
   isUnreachable,
-  LOCAL_PERMISSIONS,
+  LOCAL_CAPABILITIES,
   loopVerdict,
   maxOutput,
+  maxRoundsFor,
   mayLeaveUnasked,
   newAcc,
   overflowFacts,
+  paceOf,
   packContext,
   parallelSafe,
   parseTodos,
   permissionOf,
   programsToAllow,
   REPEATABLE,
+  runAsOf,
   runsTests,
-  type SeenCall,
   splitThink,
   storeBudget,
   storeStubs,
@@ -56,6 +64,8 @@ import {
   todoNote,
   TOOL_NAMES,
   toolSpecs,
+  turnMsFor,
+  verifyNudgeFor,
   wantsToContinue,
   withCallIds,
 } from "../lib/agent.ts";
@@ -67,12 +77,14 @@ import {
 import type {
   Engine,
   EngineProbe,
+  LocalCapability,
   LocalChat,
   LocalConfig,
   LocalEngine,
   LocalMode,
   LocalMsg,
-  LocalPermission,
+  LocalPace,
+  LocalRunAs,
   LocalToolCall,
 } from "../type/local.ts";
 import {
@@ -89,7 +101,8 @@ import type { HistRow, Recall } from "../lib/history.ts";
  *
  *  Exported so its tests can be written against the limit rather than against
  *  a number copied out of it — the two drifted apart once already, and a test
- *  that hard-codes a cap fails for the one reason that is not a bug. */
+ *  that hard-codes a cap fails for the one reason that is not a bug. This is
+ *  Quality's; `maxRoundsFor` gives each pace its own. */
 export const MAX_ROUNDS = 1024;
 /** The same call, this many times in one turn, is a loop — even with other
  *  calls in between (`read a` → `ls` → `read a` → `ls` …), which is how a
@@ -119,12 +132,46 @@ export const DEFAULT_URLS: Record<LocalEngine, string> = {
 
 const DEFAULT_CTX = 32_768;
 
+/** The tier, and the legacy permission mirrored beside it — written
+ *  together, from the one mapping (`permissionOf`). */
+function setTier(cfg: LocalConfig, cap: LocalCapability): void {
+  cfg.capability = cap;
+  cfg.permission = permissionOf({ capability: cap } as LocalConfig);
+}
+
+/** Apply a capability tier onto a config in place. */
+function applyCapability(cfg: LocalConfig, next: LocalCapability): void {
+  // Setting the boundary by name re-sets it whole: the programs allowed
+  // outside the sandbox were allowed under the boundary as it stood, and
+  // re-picking the same tier is still somebody saying where the wall goes.
+  delete cfg.outsideAllowed;
+  setTier(cfg, next);
+  // Chosen by name in Settings: there is nothing for "Auto-approve" to go
+  // back to any more.
+  delete cfg.beforeCapability;
+  delete cfg.beforeAutoApprove;
+  // The field this replaced is left behind rather than carried forward: a
+  // stale "always" outliving a switch down would be read by `capabilityOf` on
+  // the next boot as "Allow all".
+  delete cfg.shApproval;
+  if (next === "read" && cfg.mode === "agent") cfg.mode = "read";
+  if (
+    (next === "write" || next === "execute" || next === "all") &&
+    cfg.mode === "read"
+  ) {
+    cfg.mode = "agent";
+  }
+}
+
 const blankConfig = (): LocalConfig => ({
   engine: "claude",
   baseUrl: "",
   model: "",
   mode: "chat",
   ctx: DEFAULT_CTX,
+  pace: "quality",
+  runAs: "auto",
+  capability: "execute",
 });
 
 const blankChat = (): LocalChat => ({
@@ -231,9 +278,13 @@ function inherited(s: LocalState, id: string): LocalConfig {
     .filter((r) => r.at > 0 && r.cfg !== undefined)
     .sort((a, b) => b.at - a.at)[0];
   const blank = blankConfig();
-  return recent && permissionOf(recent.cfg) === "dontAsk"
-    ? { ...blank, permission: "dontAsk" }
-    : blank;
+  // Execute travels; "Allow all" does not. Turning every check off is a thing
+  // said about one project, in front of its files — a project the user has not
+  // opened yet is not covered by it.
+  if (recent && capabilityOf(recent.cfg) === "execute") {
+    return { ...blank, capability: "execute", permission: "dontAsk" };
+  }
+  return blank;
 }
 
 /**
@@ -269,6 +320,9 @@ const TOUCHED = new Map<string, number>();
 /** Unparks in flight, so a page render and a send asking at once read the
  *  file once. */
 const UNPARKING = new Map<string, Promise<boolean>>();
+
+/** The engine scan in flight, for `detect` to join. */
+let SCAN: Promise<void> | null = null;
 
 /** Idle this long, and not on screen: the conversation goes to disk. */
 export const PARK_AFTER_MS = 10 * 60_000;
@@ -475,8 +529,12 @@ export const local = cell("local", {
     async findServer(s: LocalState, key: string) {
       // Before the await: which engine this project is on is the question the
       // scan is being run to answer, and it must not change under it.
-      const engine = cfgAt(s, key).engine;
-      if (engine === "claude") return;
+      // Read, never created: picking an engine schedules this, and the project
+      // can be removed (or the tab closed) in the gap. `cfgAt` would write a
+      // blank config back under a key nothing can reach — settings that
+      // outlive their project, which is what `pruneUnknown` exists to stop.
+      const cfg = s.configs[key];
+      if (!cfg || cfg.engine === "claude") return;
       await local.detect(true); // aiol-ok: orchestration
       await local.adoptFound(key); // aiol-ok: orchestration
     },
@@ -484,8 +542,9 @@ export const local = cell("local", {
     /** The sync half of {@link findServer}: point the project at the address
      *  the scan got an answer from, and carry over what it learned there. */
     adoptFound(s: LocalState, key: string) {
-      const cfg = cfgAt(s, key);
-      if (cfg.engine === "claude" || cfg.urlManual) return;
+      // Read, never created — see `findServer`.
+      const cfg = s.configs[key];
+      if (!cfg || cfg.engine === "claude" || cfg.urlManual) return;
       const found = s.detected.find((d) =>
         d.engine === cfg.engine && d.reachable
       );
@@ -857,7 +916,6 @@ export const local = cell("local", {
       s: LocalState & Partial<MethodDraftMeta>,
       force = false,
     ) {
-      if (local.detecting || (!force && local.detectedAt > 0)) return;
       // Read before any await, not after: this is the list of addresses to
       // knock on, and gathering it first is what keeps the scan's question
       // fixed for the length of the scan.
@@ -867,26 +925,39 @@ export const local = cell("local", {
           engine: c.engine as LocalEngine,
           baseUrl: c.baseUrl,
         }));
-      await local.beginScan(); // aiol-ok: orchestration, see above
+      // A scan already running is joined, not skipped: `findServer` adopts
+      // what the scan found the moment this returns, and returning before
+      // it ended handed over the previous scan's answer. Module-local, set
+      // before the first await — the `detecting` flag is a dispatch behind.
+      if (SCAN) return await SCAN;
+      if (!force && local.detectedAt > 0) return;
+      let done = () => {};
+      SCAN = new Promise<void>((r) => done = r);
       try {
-        const io = await import("./local.server.ts");
-        // The method's own abort, threaded all the way to the sockets. Three
-        // loopback probes are quick when a server answers and two seconds when
-        // nothing does — long enough that a shutdown, or a harness waiting for
-        // the app to go quiet, should not have to sit through it.
-        // `configured` was gathered above: every address this workspace points
-        // at, so a server on a port somebody chose is found as readily as one
-        // on the default.
-        const found = await io.detectEngines(s.$signal, configured);
-        await local.endScan(found); // aiol-ok: orchestration
-        log.info("local", "engine scan", {
-          reachable: found.filter((f) => f.reachable).map((f) => f.engine),
-        });
-      } catch (e) {
-        await local.endScan(null); // aiol-ok: orchestration
-        log.warn("local", "engine scan failed", {
-          error: e instanceof Error ? e.message : String(e),
-        });
+        await local.beginScan(); // aiol-ok: orchestration, see above
+        try {
+          const io = await import("./local.server.ts");
+          // The method's own abort, threaded all the way to the sockets. Three
+          // loopback probes are quick when a server answers and two seconds when
+          // nothing does — long enough that a shutdown, or a harness waiting for
+          // the app to go quiet, should not have to sit through it.
+          // `configured` was gathered above: every address this workspace points
+          // at, so a server on a port somebody chose is found as readily as one
+          // on the default.
+          const found = await io.detectEngines(s.$signal, configured);
+          await local.endScan(found); // aiol-ok: orchestration
+          log.info("local", "engine scan", {
+            reachable: found.filter((f) => f.reachable).map((f) => f.engine),
+          });
+        } catch (e) {
+          await local.endScan(null); // aiol-ok: orchestration
+          log.warn("local", "engine scan failed", {
+            error: e instanceof Error ? e.message : String(e),
+          });
+        }
+      } finally {
+        SCAN = null;
+        done();
       }
     },
 
@@ -904,9 +975,12 @@ export const local = cell("local", {
 
     /** Find out which account a conversation's commands run as. Orchestrator
      *  only — stored by {@link setAccount}. */
-    async checkAccount(_s: LocalState, id: string) {
+    async checkAccount(s: LocalState, id: string) {
+      // Read before the await, and never created (see `findServer`).
+      const runAs = runAsOf(s.configs[id]);
       const io = await import("./local.server.ts");
-      const a = await io.projectAccount(cwdOf(id)).catch(() => null);
+      const a = await io.projectAccount(cwdOf(id), runAs)
+        .catch(() => null);
       await local.setAccount(id, a?.user ?? null); // aiol-ok: orchestration
     },
 
@@ -1033,13 +1107,29 @@ export const local = cell("local", {
       io.beginUndo(id);
       const engine = cfg.engine as LocalEngine;
       const { baseUrl, model } = cfg;
-      /** Live reads of what the user can change mid-turn. */
-      const live = () => cfgAt(s, id);
+      /** Live reads of what the user can change mid-turn. Once the tab has
+       *  closed, the settings the turn began with — a read here must not
+       *  re-create what `closeChat` just removed. */
+      const live = (): LocalConfig =>
+        // aio-ok: a live read, deliberately — what the user changed mid-turn
+        s.configs[id] ?? (ACTIVE.get(id) === claim ? cfgAt(s, id) : cfg);
+
+      /** This stretch's wall clock: the tunable turn budget (`CC_TURN_MS`),
+       *  at the share this pace takes of it. Read once, when the stretch
+       *  starts — a pace picked mid-turn changes the *rounds* on the next one,
+       *  not the clock a turn is already being measured against. */
+      const paceMs = turnMsFor(paceOf(live()), io.turnMs());
 
       /** Everything one turn remembers across its rounds and retries. */
       const turn = {
         round: 0,
-        recent: [] as SeenCall[],
+        /** Ids given to calls the server sent without one are unique under
+         *  this — new with every stretch, as `round` starts over. */
+        tag: callTag(),
+        /** Tool-free "answer now" rounds taken at the end of the budget — the
+         *  bound that closes the loop when a round cap shrinks under it. */
+        finals: 0,
+        recent: [] as CycleCall[],
         verdicts: 0,
         /** Every call of this whole turn, counted. `recent` forgets after
          *  twelve and is emptied on every verdict — an alternating loop lives
@@ -1054,7 +1144,7 @@ export const local = cell("local", {
         /** How long a stretch of work may go on, and when this one is over.
          *  Reset for a new stretch, which only a message the user typed can
          *  start. */
-        budgetMs: io.turnMs(),
+        budgetMs: paceMs,
         /**
          * The furthest the clock can ever be pushed, and how much work buys.
          *
@@ -1065,8 +1155,8 @@ export const local = cell("local", {
          * minutes more, up to a hard ceiling — and a turn that touches nothing
          * still ends exactly when it used to.
          */
-        hardUntil: Date.now() + io.turnMs() * 3,
-        grantMs: Math.round(io.turnMs() / 4),
+        hardUntil: Date.now() + paceMs * 3,
+        grantMs: Math.round(paceMs / 4),
         /** Files touched as of the last round, so "a new one" is measurable. */
         touchedAt: 0,
         /** How much the work bought, so the cut can say the honest number. */
@@ -1074,7 +1164,7 @@ export const local = cell("local", {
         /** When this stretch of work began — what `until` is measured from
          *  when a slow model's clock is stretched (see `turnStretch`). */
         since: Date.now(),
-        until: Date.now() + io.turnMs(),
+        until: Date.now() + paceMs,
         passes: 0,
         /** Why the turn was cut short, in the user's words — "" when the model
          *  finished by itself. Said out loud in the transcript, because a
@@ -1107,6 +1197,10 @@ export const local = cell("local", {
         /** Has this turn changed a file yet — and how many looks inside a
          *  dependency since the last change, and has "decide" been said. */
         changedOnce: false,
+        /** A change with runtime behavior to verify — a `.md`/`LICENSE` edit
+         *  is not, so "you changed files and ran nothing" never fires on prose
+         *  alone. Set alongside `unchecked`, which is what the note counts. */
+        codeChanged: false,
         depLooks: 0,
         depNudged: false,
         /** Per command: what each failure in a row said — and the commands
@@ -1200,7 +1294,9 @@ export const local = cell("local", {
       // model the rules of the box up front when they are.
       const boxed = await io.sandboxAvailable().catch(() => false);
       // …or whether they run as the agent account, which has no box at all.
-      const account = await io.projectAccount(cwd).catch(() => null);
+      const account = await io.projectAccount(cwd, runAsOf(live())).catch(() =>
+        null
+      );
       if (local.accounts[id] !== (account?.user ?? null)) {
         await local.setAccount(id, account?.user ?? null); // aiol-ok: orchestration
       }
@@ -1257,6 +1353,8 @@ export const local = cell("local", {
           key: id,
           ctx: ctxNow(),
           permission: permissionOf(live()),
+          capability: capabilityOf(live()),
+          runAs: runAsOf(live()),
           net: live().sandboxNet === true,
           outside: gate.outside,
           recall: call.name === "history"
@@ -1269,7 +1367,9 @@ export const local = cell("local", {
        *  the text protocol: the transcript already holds everything, so a
        *  retry continues the turn rather than repeating it. */
       const runLoop = async (): Promise<void> => {
-        while (turn.round < MAX_ROUNDS) {
+        while (true) {
+          const pace = paceOf(live());
+          const roundCap = maxRoundsFor(pace);
           // Stopped between rounds (during a tool, a probe, the compaction):
           // no new request goes out.
           if (signal.aborted) throw new Error("Stopped.");
@@ -1279,6 +1379,10 @@ export const local = cell("local", {
           // Mode is re-read every round: dropping from agent to read-only
           // mid-turn is a security action, and it must bite on the next call.
           const mode = live().mode;
+          const capability = capabilityOf(live());
+          /** Whether this round has a shell — "run the check" is advice only
+           *  a turn that can run something can take. */
+          const canRun = allowedTools(mode, capability).includes("sh");
           const ctx = ctxNow();
           const native = here().toolsOk !== false;
           // Out of time. Checked between rounds, not mid-reply: a reply that
@@ -1294,7 +1398,13 @@ export const local = cell("local", {
             turn.cut = spanWords((turn.budgetMs + turn.granted) * stretch);
             log.info("local", "turn out of time", { key: id, round });
           }
-          const lastRound = round === MAX_ROUNDS - 1;
+          // `>=`, not `===`: the pace is read live, so a turn switched to a
+          // shorter one can already be past the new cap. Past it the turn
+          // still gets the tool-free round that writes an answer — a setting
+          // changed mid-turn must not end it in silence — and `finals` bounds
+          // how many such rounds a retry may take, so the loop always closes.
+          const lastRound = round >= roundCap - 1;
+          if (lastRound && ++turn.finals > 3) break;
           const paused = turn.pause && !turn.forceAnswer && !lastRound;
           turn.pause = false;
           const noTools = mode === "chat" || lastRound || turn.forceAnswer ||
@@ -1302,9 +1412,12 @@ export const local = cell("local", {
 
           const notes = [todoNote(here().todos), turn.note];
           if (lastRound) {
-            turn.cut = `${MAX_ROUNDS} tool rounds`;
-            here().error = `Reached the ${MAX_ROUNDS}-round tool limit` +
-              ` for one turn — this answer was written without tools.`;
+            turn.cut = `${roundCap} tool rounds`;
+            here().error = `Reached the ${roundCap}-round tool limit` +
+              ` for one turn (${pace} pace) — this answer was written without tools.` +
+              (pace === "draft"
+                ? ` Draft mode stops early on purpose; switch to Normal or Quality for a fuller pass.`
+                : "");
           }
           if (paused && mode !== "chat") {
             // Not "answer now": told that, a live session read the pause as
@@ -1322,7 +1435,6 @@ export const local = cell("local", {
                 " what you have — what was done, what is left, and any risk.",
             );
           }
-          turn.note = "";
           const note = notes.filter(Boolean).join("\n\n");
 
           // Pack — and fold anything that fell off into the rolling summary
@@ -1351,8 +1463,12 @@ export const local = cell("local", {
                 },
                 here().summary,
                 !native && mode !== "chat",
+                pace,
+                capability,
               ),
               native,
+              cap: capability,
+              pace,
               ratio: here().tokRatio,
               note,
               fullOf: (m) => io.fullText(id, m.id),
@@ -1443,7 +1559,9 @@ export const local = cell("local", {
               baseUrl,
               model,
               messages: packed.wire,
-              tools: noTools || !native ? [] : toolSpecs(mode, ctx),
+              tools: noTools || !native
+                ? []
+                : toolSpecs(mode, ctx, capability, pace),
               signal: cut.signal,
               maxTokens: maxOutput(ctx, packed.tokens),
               // llama.cpp honours a per-request thinking budget; the other
@@ -1477,6 +1595,10 @@ export const local = cell("local", {
           } finally {
             signal.removeEventListener("abort", relay);
           }
+          // Delivered — only now. A request that failed (an overflow, a
+          // server that refused the tools) is retried, and the retry has to
+          // say what this one was going to.
+          turn.note = "";
           {
             const c = here();
             c.usedTokens = acc.promptTokens ?? packed.tokens;
@@ -1527,6 +1649,7 @@ export const local = cell("local", {
           const asked = withCallIds(
             raw.map((c) => normalizeCall(c, TOOL_NAMES, truncated)),
             round,
+            turn.tag,
           );
           // One reply, a sane number of acts. Two hundred `sh` calls in one
           // breath is a guess, not a plan: the first few run, the rest are
@@ -1636,6 +1759,7 @@ export const local = cell("local", {
             // reverse-engineering the source of a framework whose own docs
             // begin "Read these first, in this order".
             if (
+              docsNudgeFor(paceOf(live())) &&
               tools && docs !== null && !turn.studied && !turn.docsNudged &&
               (here().changed ?? 0) > 0
             ) {
@@ -1658,7 +1782,9 @@ export const local = cell("local", {
             // most often skipped, and the cheapest one to enforce here.
             const touched = here().changed ?? 0;
             if (
-              tools && !turn.verified && touched > 0 && !turn.ranCommand &&
+              verifyNudgeFor(paceOf(live())) && canRun &&
+              tools && !turn.verified && touched > 0 && turn.codeChanged &&
+              !turn.ranCommand &&
               here().env?.data?.toolchain
             ) {
               turn.verified = true;
@@ -1707,7 +1833,12 @@ export const local = cell("local", {
               toolName: call.name,
             });
             here().messages.push(row);
-            turn.recent.push({ name: call.name, args: call.args, failed });
+            turn.recent.push({
+              name: call.name,
+              args: call.args,
+              failed,
+              result,
+            });
             if (isTestWork(call)) {
               if (!turn.tests.open) {
                 turn.tests = {
@@ -1754,7 +1885,10 @@ export const local = cell("local", {
               turn.depNudged = false;
               try {
                 const path = JSON.parse(call.args).path;
-                if (typeof path === "string") turn.unchecked.add(path);
+                if (typeof path === "string") {
+                  turn.unchecked.add(path);
+                  if (!isDocPath(path)) turn.codeChanged = true;
+                }
               } catch { /* the executor already refused torn arguments */ }
               for (const key of [...turn.tally.keys()]) {
                 if (!MUTATES.has(key.slice(0, key.indexOf("\n")))) {
@@ -1820,7 +1954,8 @@ export const local = cell("local", {
             ? CHECK_AFTER_FILES
             : CHECK_AFTER_FILES * 2;
           if (
-            turn.checkNudges < 2 && turn.unchecked.size >= due &&
+            canRun && turn.codeChanged && turn.checkNudges < 2 &&
+            turn.unchecked.size >= due &&
             !turn.forceAnswer
           ) {
             turn.checkNudges++;
@@ -1888,7 +2023,7 @@ export const local = cell("local", {
           // a fake clock learned from the test harness's own source, each
           // attempt a two-minute think. No single check failed four times in a
           // row, so nothing above saw it; rounds and minutes do.
-          if (turn.tests.open) {
+          if (turn.tests.open && canRun) {
             turn.tests.rounds++;
             const t = turn.tests;
             const mins = (Date.now() - t.since) / 60_000;
@@ -1937,6 +2072,17 @@ export const local = cell("local", {
               key: id,
               count: turn.verdicts,
             });
+          } // A loop that is never three in a row: `A,B,A,B,…` resets the streak
+          // above on every alternation, and only the whole-turn tally would see
+          // it — four laps later, as "the same call four times". Caught here,
+          // named, before the repeated results pile up.
+          else {
+            const cycle = cycleVerdict(turn.recent);
+            if (cycle) {
+              turn.note = also(turn.note, cycle);
+              turn.recent = [];
+              log.info("local", "loop cycle", { key: id });
+            }
           }
           // The other shape of a loop: the same act again and again with other
           // acts in between, so nothing is ever three in a row. The count is
@@ -2109,6 +2255,8 @@ export const local = cell("local", {
           // on the loop tally — a circle the model was walking before the
           // interruption is the same circle after it.
           turn.round = 0;
+          turn.tag = callTag();
+          turn.finals = 0;
           // A new stretch of work: the clock and what it can be pushed to both
           // start over, because only a message the user typed gets here.
           turn.since = Date.now();
@@ -2126,7 +2274,7 @@ export const local = cell("local", {
         // aiol-ok: live reads, deliberately — the address this turn actually
         // failed against and the scan's newest answer are both facts about
         // NOW, and this cell publishes as it goes (transaction: false).
-        const now = cfgAt(s, id);
+        const now = live();
         here().error = explainError(raw, {
           baseUrl: now.baseUrl,
           engine: now.engine,
@@ -2169,8 +2317,7 @@ export const local = cell("local", {
       if (s.chats[key]) s.chats[key].queued = queuedOf(key);
     },
 
-    /** The page's copy of the queue — see `QUEUED`. */
-    /** Show what is waiting. The list is read here, not passed in: a list read
+    /** The page's copy of the queue (see `QUEUED`). The list is read here, not passed in: a list read
      *  before the await that leads here can name a message the running turn has
      *  already delivered, and the chip would then point at a message that is
      *  sitting in the transcript. */
@@ -2248,14 +2395,22 @@ export const local = cell("local", {
       // live session asked seven times to start and look at one app.
       if (allowed && always) {
         const cfg = cfgAt(s, key);
-        if (chat.pending.outside && permissionOf(cfg) === "dontAsk") {
+        // In "Don't ask" a command is only ever asked about when it runs
+        // unconfined — outside the box, or where there is no box — so
+        // "always" allows its programs, the same either way.
+        if (permissionOf(cfg) === "dontAsk") {
           cfg.outsideAllowed = [
             ...new Set([
               ...(cfg.outsideAllowed ?? []),
               ...programsToAllow(chat.pending.cmd),
             ]),
           ];
-        } else cfg.permission = "dontAsk";
+        } else {
+          // The tier is what decides now; the permission beside it is the
+          // legacy mirror. Writing only the mirror was a button that did
+          // nothing, because `capabilityOf` reads the tier first.
+          setTier(cfg, "execute");
+        }
       }
       chat.pending = null;
       const io = await import("./local.server.ts");
@@ -2288,21 +2443,41 @@ export const local = cell("local", {
      * junk value from the control plane has to fail closed.
      */
     setPermission(s: LocalState, key: string, mode: string) {
-      const known = LOCAL_PERMISSIONS.some((p) => p.id === mode);
-      const next = (known ? mode : "ask") as LocalPermission;
-      // What was allowed outside was allowed under the old mode.
-      if (cfgAt(s, key).permission !== next) {
-        delete cfgAt(s, key).outsideAllowed;
-      }
-      cfgAt(s, key).permission = next;
-      // Chosen by name in Settings: there is nothing for "Auto-approve" to go
-      // back to any more.
-      delete cfgAt(s, key).beforeAutoApprove;
-      // The field this replaced is left behind rather than carried forward: a
-      // stale "always" outliving a switch back to Ask would be read by
-      // `permissionOf` on the next boot as Bypass.
-      delete cfgAt(s, key).shApproval;
-      log.info("local", "permission set", { key, mode: next });
+      // Legacy entry point. The mapping is `capabilityOf`'s and nothing else's
+      // — a second copy here is how the boot-time meaning and the click-time
+      // meaning of the same word drift apart. Junk fails closed to Read.
+      const next = capabilityOf({ permission: mode } as LocalConfig);
+      applyCapability(cfgAt(s, key), next);
+      log.info("local", "permission set", { key, mode, capability: next });
+    },
+
+    setCapability(s: LocalState, key: string, cap: string) {
+      const known = LOCAL_CAPABILITIES.some((p) => p.id === cap);
+      // A junk value from the control plane fails closed: this decides whether
+      // a shell command runs with nobody looking.
+      const next = (known ? cap : "read") as LocalCapability;
+      applyCapability(cfgAt(s, key), next);
+      log.info("local", "capability set", { key, capability: next });
+    },
+
+    setPace(s: LocalState, key: string, pace: string) {
+      const next: LocalPace =
+        pace === "draft" || pace === "normal" || pace === "quality"
+          ? pace
+          : "quality";
+      cfgAt(s, key).pace = next;
+      log.info("local", "pace set", { key, pace: next });
+    },
+
+    setRunAs(s: LocalState, key: string, runAs: string) {
+      const next: LocalRunAs =
+        runAs === "auto" || runAs === "agent" || runAs === "user"
+          ? runAs
+          : "auto";
+      cfgAt(s, key).runAs = next;
+      log.info("local", "runAs set", { key, runAs: next });
+      // Refresh which account the strip shows.
+      void local.checkAccount(key); // aiol-ok: orchestration
     },
 
     /**
@@ -2313,15 +2488,23 @@ export const local = cell("local", {
      */
     autoApprove(s: LocalState, key: string, on: boolean) {
       const cfg = cfgAt(s, key);
-      const now = permissionOf(cfg);
-      if (on === (now === "bypass")) return;
+      const now = capabilityOf(cfg);
+      if (on === (now === "all")) return;
       if (on) {
-        cfg.beforeAutoApprove = now;
-        cfg.permission = "bypass";
+        // The *tier*, not the derived permission: Read and Write both read as
+        // "ask", so coming back through a permission handed a read-only
+        // project full shell.
+        cfg.beforeCapability = now;
+        setTier(cfg, "all");
       } else {
-        cfg.permission = cfg.beforeAutoApprove ?? "ask";
-        delete cfg.beforeAutoApprove;
+        const back = cfg.beforeCapability ??
+          // Saved before the tiers existed: the one migration rule, not a
+          // second one written here.
+          capabilityOf({ permission: cfg.beforeAutoApprove } as LocalConfig);
+        setTier(cfg, back);
+        delete cfg.beforeCapability;
       }
+      delete cfg.beforeAutoApprove;
       delete cfg.outsideAllowed;
       delete cfg.shApproval;
       const chat = chatAt(s, key);
@@ -2335,7 +2518,6 @@ export const local = cell("local", {
       log.info("local", "auto-approve set", { key, on });
     },
 
-    /** Abort the in-flight turn. The loop's own catch writes the outcome. */
     /**
      * Changing who answers ends the answer already coming.
      *
@@ -2390,11 +2572,10 @@ export const local = cell("local", {
       }
     },
 
-    /** Wipe the conversation (and its summary). Config stays. A running turn
-     *  is aborted first — resetting `status` under a live loop would admit a
-     *  second concurrent one. */
     /**
-     * Start again on a blank slate.
+     * Start again on a blank slate — the transcript and its summary; the
+     * settings stay. A running turn is stopped first: resetting `status` under
+     * a live loop would admit a second concurrent one.
      *
      * What was there is kept — once, and only for this project — so the
      * decision can be taken back. A conversation is not persisted anywhere
@@ -2585,19 +2766,18 @@ export const local = cell("local", {
   },
 });
 
-/**
- * Hold an `sh` call until the user answers — or let it straight through.
- *
- * Returns `null` when the call may proceed, and the tool *result* to feed back
- * when it may not: a refusal is part of the conversation, not an error. The
- * model reads it and picks something else, exactly as it does on the Claude
- * side.
- */
 /** What the approval step decided: a refusal to hand back to the model, or
  *  a go — and whether the go is the user's approval to run this one command
  *  outside the sandbox. */
 type Gate = { refusal: string | null; outside: boolean };
 
+/**
+ * Hold an `sh` call until the user answers — or let it straight through.
+ *
+ * A refusal comes back as the tool *result*: it is part of the conversation,
+ * not an error. The model reads it and picks something else, exactly as it
+ * does on the Claude side.
+ */
 async function approveCommand(
   s: LocalState,
   io: typeof import("./local.server.ts"),
@@ -2610,8 +2790,14 @@ async function approveCommand(
   // The mode gate comes first, always. Asking about a call the executor is
   // going to refuse anyway would park the turn on a question whose only honest
   // answer changes nothing — and in read-only mode there is no `sh` to allow.
-  if (!allowedTools(cfgAt(s, id).mode).includes(call.name)) return pass;
-  const permission = permissionOf(cfgAt(s, id));
+  // Read, never created: a turn still winding down after its tab closed must
+  // not bring the conversation's settings back — nor run anything.
+  const cfg = s.configs[id];
+  if (!cfg) return { refusal: io.STOPPED_RESULT, outside: false };
+  if (!allowedTools(cfg.mode, capabilityOf(cfg)).includes(call.name)) {
+    return pass;
+  }
+  const permission = permissionOf(cfg);
   let cmd = "";
   let wantsOut = false;
   let background = false;
@@ -2627,7 +2813,8 @@ async function approveCommand(
   if (/^\s*(jobs|stop-job\s+(all|\d+))\s*$/.test(cmd)) return pass;
   // As the agent account nothing is boxed and there is no "outside" to ask
   // for: the project is in the account's reach, and the account is the wall.
-  const account = await io.projectAccount(cwdOf(id)).catch(() => null);
+  const account = await io.projectAccount(cwdOf(id), runAsOf(cfg))
+    .catch(() => null);
   const boxed = !account && permission === "dontAsk" && !wantsOut &&
     await io.sandboxAvailable();
   // A shape that only wastes the turn is answered before anyone is asked and
@@ -2655,8 +2842,17 @@ async function approveCommand(
     // between "don't ask" and the user's home directory is a reading of the
     // command's words, and words are easy to disguise: `\rm -rf ~`,
     // `X=rm; $X -rf ~`, `python -c shutil.rmtree(...)`, an eval of base64.
-    // This mode then behaves as Ask — slower, and still there tomorrow.
+    // Every command then runs the way one outside the box does: a look, or
+    // only programs the user allowed for this chat, goes; the rest is asked
+    // about — and "always" on that question allows its programs.
     if (!boxed) {
+      if (
+        mayLeaveUnasked(
+          cmd,
+          s.configs[id]?.outsideAllowed ?? [],
+          await io.lookEnv(id, cwdOf(id), cmd),
+        )
+      ) return { refusal: null, outside: true };
       log.info("local", "no sandbox here — asking instead of running", {
         key: id,
       });
@@ -2679,7 +2875,11 @@ async function approveCommand(
     // looks, or runs only programs the user already allowed outside, goes;
     // anything else is the one command the user is asked about in this mode.
     else if (
-      mayLeaveUnasked(cmd, cfgAt(s, id).outsideAllowed, io.lookEnv(id))
+      mayLeaveUnasked(
+        cmd,
+        s.configs[id]?.outsideAllowed ?? [],
+        await io.lookEnv(id, cwdOf(id), cmd),
+      )
     ) {
       log.info("local", "left the sandbox unasked", { key: id });
       return { refusal: null, outside: true };
@@ -2754,10 +2954,43 @@ function fold(
  *  way back into a conversation the turn no longer owns — re-creating a chat
  *  that Clear or a removed project had just taken away. */
 function cap(id: string, c: LocalChat): void {
-  if (c.messages.length <= MAX_LOCAL_MESSAGES) return;
-  const gone = c.messages.splice(0, c.messages.length - MAX_LOCAL_MESSAGES);
+  const gone = capChat(c, MAX_LOCAL_MESSAGES);
+  if (gone.length) saveRows(id, gone, c);
+}
+
+/**
+ * Bring a chat under `limit` rows, in place, and return the rows that went —
+ * the oldest, except the task: the newest thing the user typed (not a
+ * message delivered mid-turn) is kept whatever its age. A long agent turn
+ * passes 400 rows by itself, and cutting its request away left the model
+ * working on a task nobody had set.
+ *
+ * Rows the packer had not folded yet were still the model's view: what they
+ * held goes into the summary, as an eviction's would — a cap that only cut
+ * made the model forget without a trace.
+ *
+ * Spliced out, never rebuilt: the rows are the method's live draft, and an
+ * array assembled from them would hold references aio has already retired.
+ */
+export function capChat(
+  c: Pick<LocalChat, "messages" | "summary" | "archived">,
+  limit: number,
+): LocalMsg[] {
+  const rows = c.messages;
+  const cut = rows.length - limit;
+  if (cut <= 0) return [];
+  const task = rows.findLastIndex((m) => m.role === "user" && !m.steer);
+  const gone = task < 0 || task >= cut ? rows.splice(0, cut) : [
+    ...rows.splice(0, task),
+    // The task is now row 0: what came after it, up to the old cut.
+    ...rows.splice(1, cut - task),
+  ];
   c.archived = (c.archived ?? 0) + gone.length;
-  saveRows(id, gone, c);
+  const unseen = gone.filter((m) => !m.evicted);
+  if (unseen.length) {
+    c.summary = appendLines(c.summary, mechanicalSummary(unseen));
+  }
+  return gone;
 }
 
 /** The folder a conversation works in — from the workspace, or, for one
@@ -2796,8 +3029,6 @@ function trackFailure(
   else turn.fails.set(key, [...(turn.fails.get(key) ?? []), mark]);
 }
 
-/** "Step back", once per command: when an error seen earlier in a row of
- *  failures is back, or the row has grown long. `""` when neither. */
 /**
  * One more thing for the next request to say, after what is already queued.
  *
@@ -2809,6 +3040,8 @@ function trackFailure(
 export const also = (queued: string, next: string): string =>
   !queued ? next : queued.includes(next) ? queued : `${queued}\n\n${next}`;
 
+/** "Step back", once per command: when an error seen earlier in a row of
+ *  failures is back, or the row has grown long. `""` when neither. */
 function stuckOn(
   turn: { fails: Map<string, string[]>; stuckNudged: Set<string> },
 ): string {
@@ -3018,7 +3251,6 @@ export const localChatsOf = (projectId: string): LocalChat[] => {
 /** What runs this project. The one question every Claude-facing module asks. */
 export const engineOf = (key: string): Engine => localConfig(key).engine;
 
-/** Is the *active* project on a local engine? The routing question. */
 /** Is the conversation on screen answered by a local engine? A project can
  *  hold a Claude chat and a local one at once, so this is a question about the
  *  chat, never about the project. */

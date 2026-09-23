@@ -13,7 +13,13 @@
  */
 import { onMount, useLocal, useRef, type VNode } from "aio/air";
 import { browse, crumbs, parentOf, visibleEntries } from "../cell/browse.ts";
-import { Banner, matches, Overlay, Toggle } from "./parts.tsx";
+import {
+  Banner,
+  matches,
+  Overlay,
+  Toggle,
+  useSelectedInView,
+} from "./parts.tsx";
 import {
   IconBranch,
   IconChevron,
@@ -48,6 +54,8 @@ export function FolderPicker(
     ? all
     : all.filter((e) => matches(query, e.name));
   const index = Math.min(sel, Math.max(0, hits.length - 1));
+  const list = useRef<HTMLDivElement | null>(null);
+  const moved = useSelectedInView(list, index);
   const up = parentOf(browse.cwd);
 
   const enter = (path: string) => {
@@ -62,6 +70,7 @@ export function FolderPicker(
   };
 
   const onKey = (e: KeyboardEvent) => {
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") moved();
     if (e.key === "ArrowDown") {
       e.preventDefault();
       setSel(Math.min(index + 1, hits.length - 1));
@@ -139,7 +148,7 @@ export function FolderPicker(
             some not reconciles the unkeyed ones by position. That is how a
             banner ends up wearing a folder row. */
         }
-        <div class="pal__list" role="listbox">
+        <div class="pal__list" role="listbox" ref={list}>
           {[
             browse.error
               ? <Banner key="error" tone="warn">{browse.error}</Banner>
@@ -200,7 +209,13 @@ export function FolderPicker(
                 aria-label="New folder name"
                 autoFocus
                 onKeyDown={(e: KeyboardEvent) => {
-                  if (e.key === "Escape") setMaking(false);
+                  // Backs out of naming and stops there: the dialog around it
+                  // and the global Escape both respect a vetoed event.
+                  if (e.key === "Escape") {
+                    e.preventDefault();
+                    setMaking(false);
+                    return;
+                  }
                   if (e.key !== "Enter") return;
                   const name = newName.current?.value.trim() ?? "";
                   if (name === "") return;

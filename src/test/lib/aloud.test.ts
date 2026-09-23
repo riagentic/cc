@@ -12,14 +12,12 @@ import {
   FIRST_CHARS,
   fromClaude,
   fromLocal,
-  furtherOn,
   intoChunks,
   MAX_CHARS,
   nextToSpeak,
   pcmFromWav,
   type Said,
   startAt,
-  toHandOver,
   type Watched,
 } from "../../lib/aloud.ts";
 import { speakable } from "../../lib/aloud.ts";
@@ -207,46 +205,23 @@ Deno.test("nextToSpeak — your own message is read the moment you send it", () 
   );
 });
 
-Deno.test("toHandOver — a marker that has not committed yet is not a second reading", () => {
-  // THE bug. `speech.mark()` is a dispatch: it lands a render or more later,
-  // and a streaming reply causes dozens of renders in that window. Each one
-  // used to read the un-moved cell marker, decide nothing had been said yet,
-  // and say it again — twice for your sentence, three times for the reply,
-  // the count depending on how fast the tokens arrived.
+Deno.test("nextToSpeak — a marker written at the decision is not a second reading", () => {
+  // THE bug. A marker kept in the cell is a dispatch: it lands a render or
+  // more later, and a streaming reply causes dozens of renders in that window.
+  // Each one read the un-moved marker, decided nothing had been said yet, and
+  // said it again. The page now writes its own marker the moment it decides,
+  // and every later render asks from there.
   const msgs = [
     msg("u1", "user", "run the tests"),
     msg("a1", "assistant", "All green."),
   ];
-
-  // First render: both are settled, both go out, the local marker moves.
-  const first = toHandOver(msgs, "", "", false);
+  const first = nextToSpeak(msgs, "", false);
   assertEquals(first.speak.map((m) => m.id), ["u1", "a1"]);
   assertEquals(first.mark, "a1");
-
-  // Every render until the dispatch commits: the CELL marker is still "".
   for (let i = 0; i < 30; i++) {
-    const again = toHandOver(msgs, "", first.mark, false);
+    const again = nextToSpeak(msgs, first.mark, false);
     assertEquals(again.speak, [], `render ${i} said it again`);
   }
-
-  // And once it commits, still nothing new.
-  assertEquals(toHandOver(msgs, "a1", "a1", false).speak, []);
-});
-
-Deno.test("furtherOn — the marker that is actually ahead wins", () => {
-  const msgs = [
-    msg("a", "user", "one"),
-    msg("b", "assistant", "two"),
-    msg("c", "user", "three"),
-  ];
-  assertEquals(furtherOn(msgs, "a", "c"), "c");
-  assertEquals(furtherOn(msgs, "c", "a"), "c");
-  // A marker from another conversation is behind any real one, so switching
-  // project cannot make a stale local marker suppress the recovery.
-  assertEquals(furtherOn(msgs, "gone", "b"), "b");
-  assertEquals(furtherOn(msgs, "b", "gone"), "b");
-  // Neither is here: the cell's is returned, and `nextToSpeak` recovers.
-  assertEquals(furtherOn(msgs, "x", "y"), "y");
 });
 
 Deno.test("startAt — a new chat reads its first line", () => {
@@ -345,12 +320,13 @@ Deno.test("pcmFromWav — the header never reaches the speakers", () => {
   put(36, "data");
   view.setUint32(40, samples.length, true);
   wav.set(samples, 44);
-  assertEquals([...pcmFromWav(wav)], [...samples]);
+  assertEquals([...pcmFromWav(wav).pcm], [...samples]);
 
   // Raw samples that were never a WAV come back untouched — which is what the
   // caller wanted anyway, so it is the useful answer rather than an error.
-  assertEquals([...pcmFromWav(samples)], [...samples]);
-  assertEquals([...pcmFromWav(new Uint8Array(0))], []);
+  assertEquals([...pcmFromWav(samples).pcm], [...samples]);
+  assertEquals(pcmFromWav(samples).rate, null); // nothing said how fast
+  assertEquals([...pcmFromWav(new Uint8Array(0)).pcm], []);
 });
 
 Deno.test("pcmFromWav — a chunk before the data one does not shift the audio", () => {
@@ -369,5 +345,31 @@ Deno.test("pcmFromWav — a chunk before the data one does not shift the audio",
   put(24, "data");
   view.setUint32(28, samples.length, true);
   wav.set(samples, 32);
-  assertEquals([...pcmFromWav(wav)], [...samples]);
+  assertEquals([...pcmFromWav(wav).pcm], [...samples]);
+});
+
+Deno.test("pcmFromWav — the file says how fast to play it", () => {
+  // Stripping the header throws away the rate, and paplay told the wrong one
+  // plays the voice at the wrong pitch. Piper sends 22.05 kHz in a WAV while
+  // the reading was set up for 24.
+  const samples = new Uint8Array([1, 2, 3, 4]);
+  const wav = new Uint8Array(44 + samples.length);
+  const view = new DataView(wav.buffer);
+  const put = (at: number, s: string) => {
+    for (let i = 0; i < s.length; i++) wav[at + i] = s.charCodeAt(i);
+  };
+  put(0, "RIFF");
+  view.setUint32(4, 36 + samples.length, true);
+  put(8, "WAVE");
+  put(12, "fmt ");
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, 22_050, true);
+  put(36, "data");
+  view.setUint32(40, samples.length, true);
+  wav.set(samples, 44);
+  const out = pcmFromWav(wav);
+  assertEquals(out.rate, 22_050);
+  assertEquals([...out.pcm], [...samples]);
 });

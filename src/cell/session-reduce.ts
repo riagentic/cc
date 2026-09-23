@@ -22,6 +22,7 @@ import type {
 } from "../type/claude.ts";
 import {
   agentResultOf,
+  arr,
   blocksOf,
   contextUsed as contextUsedOf,
   contextWindowOf,
@@ -29,7 +30,10 @@ import {
   fallbackWindow,
   isAgentTool,
   isSynthetic,
+  num,
+  obj,
   permissionOf,
+  str,
   toolDetail,
   toolTitle,
   usageOf,
@@ -532,23 +536,35 @@ function closeRunFor(s: ProjectSession, task: BackgroundTask) {
  * zero on a session that had ended: the lying spinner this app exists to end.
  */
 export function closeOpenWork(s: ProjectSession, why: string) {
-  const at = Date.now();
+  const now = Date.now();
+  const cut = cutOff(s, () => now);
+  if (cut > 0) {
+    note(s, "session", `${cut} call${cut > 1 ? "s" : ""} cut off`, why);
+  }
+}
+
+/**
+ * End every open call and running task, and say how many calls that was.
+ *
+ * `endOf` picks the end time from when the thing started — "now" for a process
+ * that just died, the start itself for one that died while the app was closed
+ * (nobody knows when). No outcome is invented either way: `ok` stays null and
+ * a task is "stopped", never "completed".
+ */
+function cutOff(s: ProjectSession, endOf: (startedAt: number) => number) {
   let cut = 0;
   for (const run of s.tools) {
     if (run.endedAt !== null) continue;
-    run.endedAt = at;
+    run.endedAt = endOf(run.startedAt);
     run.permissionId = null;
     cut++;
   }
   for (const task of s.tasks) {
     if (task.status !== "running") continue;
-    // "stopped", not "completed": the CLI never reported an outcome for it.
     task.status = "stopped";
-    task.endedAt ??= at;
+    task.endedAt ??= endOf(task.startedAt);
   }
-  if (cut > 0) {
-    note(s, "session", `${cut} call${cut > 1 ? "s" : ""} cut off`, why);
-  }
+  return cut;
 }
 
 export function userEvent(s: ProjectSession, evt: Evt) {
@@ -802,31 +818,43 @@ export function rateLimit(s: ProjectSession, evt: Evt) {
 
 /* ── helpers ──────────────────────────────────────────────────────────────── */
 
+/**
+ * Forget the process, keep the conversation.
+ *
+ * What a resumed start (and a send that has to start one first) needs: the
+ * transcript is the user's record of the work and the CLI is handed the same
+ * session back, so only the claims about the old process go.
+ */
+export function resetProcess(s: ProjectSession) {
+  s.pid = null;
+  s.sessionId = null;
+  s.streaming = null;
+  s.turnStartedAt = null;
+  s.interrupting = false;
+  s.queuedTurns = 0;
+  s.thinkingTokens = 0;
+  s.error = null;
+  // startToken is deliberately NOT reset — it is the identity of the current
+  // start, and resetting it would let a superseded callback match again.
+}
+
+/** Forget the process AND the conversation — a start with a blank context. */
 export function reset(s: ProjectSession) {
+  resetProcess(s);
   s.messages = [];
   s.tools = [];
   s.tasks = [];
   s.permissions = [];
   s.activity = [];
-  s.streaming = null;
   s.usage = { ...EMPTY_USAGE };
   s.meta = { ...EMPTY_META };
   s.cost = 0;
   s.turns = 0;
   s.lastTurnMs = 0;
   s.lastTurnOutput = 0;
-  s.turnStartedAt = null;
-  s.interrupting = false;
   s.turnEnd = null;
   s.agentStats = null;
-  s.queuedTurns = 0;
-  s.thinkingTokens = 0;
-  // startToken is deliberately NOT reset — it is the identity of the current
-  // start, and resetting it would let a superseded callback match again.
   s.rateLimit = null;
-  s.sessionId = null;
-  s.pid = null;
-  s.error = null;
 }
 
 export function upsertTask(s: ProjectSession, task: BackgroundTask) {
@@ -878,17 +906,9 @@ export function cancelPending(s: ProjectSession, why: string) {
   }
 }
 
-export const str = (v: unknown): string | null =>
-  typeof v === "string" && v.length > 0 ? v : null;
-const num = (v: unknown): number => (typeof v === "number" ? v : 0);
 /** `0` is a real answer for a count, so absence has to stay distinguishable. */
 const numOrNull = (v: unknown): number | null =>
   typeof v === "number" ? v : null;
-const obj = (v: unknown): Record<string, unknown> =>
-  v && typeof v === "object" && !Array.isArray(v)
-    ? v as Record<string, unknown>
-    : {};
-const arr = (v: unknown): unknown[] => (Array.isArray(v) ? v : []);
 const strings = (v: unknown): string[] =>
   arr(v).filter((x): x is string => typeof x === "string");
 
@@ -917,13 +937,85 @@ export function offlineAgain(p: ProjectSession): void {
   p.turnStartedAt = null;
   p.queuedTurns = 0;
   p.thinkingTokens = 0;
-  // A tool call cannot still be running, whatever it said last. Given an end
-  // so it stops spinning, but NOT given an outcome: `ok` stays null, which is
-  // "nobody knows how that finished" — because nobody does.
-  for (const t of p.tools) if (t.endedAt === null) t.endedAt = t.startedAt;
+  // A tool call or task cannot still be running, whatever it said last. Given
+  // an end so it stops spinning, but NOT given an outcome: `ok` stays null,
+  // which is "nobody knows how that finished" — because nobody does.
+  cutOff(p, (startedAt) => startedAt);
+  // The prompts went above, so no call may still point at one — a dangling id
+  // renders as "waiting for you" on a call nobody can answer.
+  for (const t of p.tools) t.permissionId = null;
   // The undo for a clear is for the moment right after pressing the button.
   // Across a restart it is a week-old transcript waiting to be merged into a
   // live one, which is not what the button promised.
   p.cleared = [];
   p.error = null;
+}
+
+/* ── what goes to disk ────────────────────────────────────────────────────── */
+
+/**
+ * A tool call's arguments, with every string cut to the size a result is cut
+ * to — for the stored copy only.
+ *
+ * A `Write` carries the whole file it writes, and the store is written on every
+ * debounce window of a streaming turn: uncapped, one large write sat in the
+ * snapshot twice (the message block and the run) for the life of the session.
+ * On screen the input stays whole. Returns the same object when nothing needed
+ * cutting, so an unchanged call costs no allocation.
+ */
+export function capInput<T>(v: T, max = MAX_OUTPUT): T {
+  if (typeof v === "string") {
+    return (v.length > max ? `${v.slice(0, max)}…` : v) as T;
+  }
+  if (Array.isArray(v)) {
+    const out = v.map((x) => capInput(x, max));
+    return (out.some((x, i) => x !== v[i]) ? out : v) as T;
+  }
+  if (v && typeof v === "object") {
+    const src = v as Record<string, unknown>;
+    let out: Record<string, unknown> | null = null;
+    for (const [k, x] of Object.entries(src)) {
+      const c = capInput(x, max);
+      if (c !== x) (out ??= { ...src })[k] = c;
+    }
+    return (out ?? v) as T;
+  }
+  return v;
+}
+
+/** A tool block with its input capped; every other block as it is. */
+const blockForDisk = (b: Block): Block =>
+  b.kind === "tool" ? withInput(b, capInput(b.input)) : b;
+
+/** `x` with `input` replaced — or `x` itself when the input did not change. */
+const withInput = <X extends { input: Record<string, unknown> }>(
+  x: X,
+  input: Record<string, unknown>,
+): X => input === x.input ? x : { ...x, input };
+
+/** Map a list, returning the SAME list when no element changed. */
+const mapSame = <X>(xs: X[], f: (x: X) => X): X[] => {
+  const out = xs.map(f);
+  return out.some((x, i) => x !== xs[i]) ? out : xs;
+};
+
+/**
+ * One conversation as it is written to disk: the half-written sentence dropped
+ * (nothing can finish it after a restart — {@link offlineAgain} would clear it
+ * anyway) and tool inputs capped. Pure: the committed state is frozen, so this
+ * builds a copy wherever it changes anything and shares the rest.
+ */
+export function forDisk<P extends ProjectSession>(p: P): P {
+  return {
+    ...p,
+    streaming: null,
+    tools: mapSame(p.tools, (t) => withInput(t, capInput(t.input))),
+    messages: mapSame(
+      p.messages,
+      (m) => {
+        const blocks = mapSame(m.blocks, blockForDisk);
+        return blocks === m.blocks ? m : { ...m, blocks };
+      },
+    ),
+  };
 }

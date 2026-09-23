@@ -107,6 +107,22 @@ Deno.test("parseArgs — repairs what is safe, refuses what is cut off", () => {
   assertEquals(parseArgs("garbage"), { ok: false });
 });
 
+Deno.test("parseArgs — a trailing-comma repair never edits a string's contents", () => {
+  // The raw newline is what sends this down the repair path; the file being
+  // written must still arrive byte for byte, trailing commas and all.
+  const content = "const xs = [1, 2, ];\nconst o = { a: 1, };";
+  const raw = `{"path":"a.ts","content":"${content}",}`;
+  assertEquals(parseArgs(raw), {
+    ok: true,
+    args: { path: "a.ts", content },
+  });
+  // An escaped quote does not end the string early.
+  assertEquals(parseArgs('{"s":"say \\"x, ]\\"\n",}'), {
+    ok: true,
+    args: { s: 'say "x, ]"\n' },
+  });
+});
+
 Deno.test("normalizeCall — one call, in our vocabulary", () => {
   const c = normalizeCall(
     { id: "1", name: "Bash", args: '{"command":"ls -la"}' },

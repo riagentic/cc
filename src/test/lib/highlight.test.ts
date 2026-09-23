@@ -133,3 +133,14 @@ Deno.test("a quote does not colour the lines below it", () => {
   // The one hard invariant holds throughout.
   assertEquals(text(highlight(py, "python")), py);
 });
+
+Deno.test("css — `#id` and `#fff` are not comments; `/* */` is", () => {
+  assertEquals(
+    kinds("#main { color: #fff; }", "css").includes("comment"),
+    false,
+  );
+  assertEquals(kinds("a { } /* note */", "css").includes("comment"), true);
+  // …and the C family: a directive or an attribute, never a comment.
+  assertEquals(kinds("#include <stdio.h>", "c").includes("comment"), false);
+  assertEquals(kinds("#[derive(Debug)]", "rust").includes("comment"), false);
+});

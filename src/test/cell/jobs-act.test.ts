@@ -34,6 +34,7 @@ async function withStubCli(
   try {
     await run(argvFile);
   } finally {
+    await booted.settle();
     booted.dispose();
     if (beforeHome === undefined) Deno.env.delete("HOME");
     else Deno.env.set("HOME", beforeHome);

@@ -34,6 +34,7 @@ Deno.test("prefs — an accent that is not offered is ignored", async () => {
     prefs.setAccent(undefined as unknown as string);
     assertEquals(prefs.accent, "ocean", "and neither must nothing at all");
   } finally {
+    await h.settle();
     h.dispose();
   }
 });
@@ -46,6 +47,7 @@ Deno.test("prefs — every offered accent is settable", async () => {
       assertEquals(prefs.accent, a.id);
     }
   } finally {
+    await h.settle();
     h.dispose();
   }
 });
@@ -67,6 +69,7 @@ Deno.test("prefs — zoom is clamped from both directions", async () => {
     for (let i = 0; i < 100; i++) prefs.zoomBy(0.1);
     assertEquals(prefs.zoom, ZOOM_MAX);
   } finally {
+    await h.settle();
     h.dispose();
   }
 });
@@ -82,6 +85,7 @@ Deno.test("prefs — a junk zoom leaves the current one alone", async () => {
     prefs.setZoom(Infinity);
     assertEquals(prefs.zoom, ZOOM_MAX, "infinity is a number, and clamps");
   } finally {
+    await h.settle();
     h.dispose();
   }
 });
@@ -121,6 +125,7 @@ Deno.test("prefs — reset puts every choice back", async () => {
     assertEquals(prefs.dockCollapsed, false);
     assertEquals(prefs.railCollapsed, false);
   } finally {
+    await h.settle();
     h.dispose();
   }
 });
@@ -137,6 +142,7 @@ Deno.test("prefs — the booleans only ever store booleans", async () => {
     prefs.setSounds(true);
     assert(prefs.sounds === true);
   } finally {
+    await h.settle();
     h.dispose();
   }
 });

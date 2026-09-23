@@ -62,9 +62,6 @@ export type Command = {
   /** The second line: which project, which page, what it will cost you. */
   hint?: string;
   group: string;
-  /** The chord, written the way it is pressed. Display only — the binding
-   *  itself lives in `bindings()`, so the two are generated from one row. */
-  keys?: string;
   icon?: VNode;
   /** Extra words nobody sees, matched by the filter. The point is that
    *  "dark" finds the theme switch and "font" finds zoom. */
@@ -736,7 +733,7 @@ export function commands(): Command[] {
  */
 export function worksInTerminal(e: KeyboardEvent): boolean {
   const mod = e.ctrlKey || e.metaKey;
-  return globalBindings({ openPalette: noop, openHelp: noop }).some((b) =>
+  return globalBindings().some((b) =>
     b.everywhere === true &&
     b.key.toLowerCase() === e.key.toLowerCase() &&
     !!b.chord.mod === mod &&
@@ -744,8 +741,6 @@ export function worksInTerminal(e: KeyboardEvent): boolean {
     !!b.chord.shift === e.shiftKey
   );
 }
-
-const noop = () => {};
 
 /**
  * One global key binding.
@@ -790,16 +785,10 @@ export type Binding = {
 /**
  * Every global shortcut, in help order.
  *
- * The palette and the help panel both read this, so a key that is listed is a
- * key that works. Two callbacks come from the shell because they toggle
- * something the shell owns rather than something in a cell.
+ * The shortcut list in Settings reads this, so a key that is listed is a key
+ * that works.
  */
-export function globalBindings(
-  _ui: { openPalette: () => void; openHelp: () => void } = {
-    openPalette: () => {},
-    openHelp: () => {},
-  },
-): Binding[] {
+export function globalBindings(): Binding[] {
   // This list and no more, by request — none of them on Ctrl, which belongs
   // to the page and the shell. Alt ↑/↓ walk the conversations and shells,
   // Alt PgUp/PgDn the projects, and Alt N / C / W make and close panes. The
@@ -974,11 +963,9 @@ export function backToChat(): void {
  * plus key arrives as "=" or "+" depending on the shift state and the keyboard,
  * and a help panel that listed "Ctrl +" twice would look like a bug.
  */
-export function helpRows(
-  ui: { openPalette: () => void; openHelp: () => void },
-): Binding[] {
+export function helpRows(): Binding[] {
   const seen = new Set<string>();
-  return globalBindings(ui).filter((b) => {
+  return globalBindings().filter((b) => {
     if (b.label === "" || seen.has(b.keys)) return false;
     seen.add(b.keys);
     return true;

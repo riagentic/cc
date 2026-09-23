@@ -12,7 +12,7 @@
  * that opens it is global and the bar it opens belongs to whichever transcript
  * is on screen. Neither engine's page owns it.
  */
-import { signal, type VNode } from "aio/air";
+import { afterRender, signal, useRef, type VNode } from "aio/air";
 import { IconChevron, IconSearch, IconX } from "./icons.tsx";
 
 const open = signal(false);
@@ -42,6 +42,39 @@ export function stepFind(by: number, total: number): void {
   index.set(((index.peek() + by) % total + total) % total);
 }
 
+/**
+ * Bring the current match into view — centred, not scrolled to the edge,
+ * because a match at the very bottom of the pane has no context above it.
+ *
+ * Only when the match MOVES. Asked on every render, a streaming reply (ten
+ * renders a second) restarted the smooth scroll each time and the pane shook,
+ * and reading anywhere else with the bar open was impossible.
+ */
+export function useScrollToMatch(
+  pane: { current: HTMLElement | null },
+  current: string,
+): void {
+  const shown = useRef("");
+  afterRender(() => {
+    if (current === shown.current) return;
+    const el = current === "" ? null : pane.current?.querySelector<HTMLElement>(
+      `[data-msg="${CSS.escape(current)}"]`,
+    );
+    // Not rendered yet (a transcript still loading): try again next render.
+    if (current !== "" && !el) return;
+    shown.current = current;
+    el?.scrollIntoView({ block: "center", behavior: "smooth" });
+  });
+}
+
+/**
+ * One function for the life of the module, so it runs when the input is
+ * created and never again. A ref written inline is a new function on every
+ * render, and the renderer re-attaches a changed ref — so the bar pulled focus
+ * back from the message box on each streamed token.
+ */
+const focusOnMount = (el: HTMLElement | null): void => el?.focus();
+
 /** The bar itself. `total` is how many messages the page matched — it is the
  *  page that knows what a "match" is, not this. */
 export function FindBar(props: { total: number }): VNode | null {
@@ -62,8 +95,8 @@ export function FindBar(props: { total: number }): VNode | null {
         spellcheck={false}
         // Focused as soon as it exists: the bar appears because somebody
         // pressed a key asking for it, so the caret belongs here and nowhere
-        // else.
-        ref={(el: HTMLElement | null) => el?.focus()}
+        // else. Once — see focusOnMount.
+        ref={focusOnMount}
         onInput={(e) => {
           query.set((e.target as HTMLInputElement).value);
           index.set(0);

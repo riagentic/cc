@@ -16,7 +16,7 @@ import type {
   Project,
   ProjectSettings,
 } from "../type/claude.ts";
-import { baseName } from "../lib/format.ts";
+import { baseName, parentOf } from "../lib/format.ts";
 import { EFFORTS, MODELS, PERMISSION_MODES } from "../lib/stream.ts";
 import { launches } from "../lib/launch.ts";
 
@@ -67,7 +67,7 @@ type WorkspaceState = {
    *  declaration on the cell for what "really" means here. */
   autoForget: boolean;
   /** This session's undo buffer for removed projects. */
-  forgotten: Project[];
+  forgotten: Forgotten[];
   /**
    * What each project has open: its conversations and its shells, in the order
    * they were made.
@@ -89,6 +89,13 @@ type WorkspaceState = {
    */
   absentPath: string;
 };
+
+/** A removed project, and where it stood in the list — so an undo puts it
+ *  back in the user's order rather than in the order things were added. */
+export type Forgotten = Project & { formerIndex: number };
+
+/** Removals kept for undo. This is an undo, not a history. */
+const MAX_FORGOTTEN = 20;
 
 /** What a project falls back to before anything has configured it. */
 const FALLBACK: ProjectSettings = {
@@ -149,7 +156,8 @@ function ensurePanes(s: WorkspaceState, projectId: string): Pane[] {
  *
  * Every function below re-reads the disk and then compares what it found with
  * what the list says. Two of those passes overlap by construction — boot runs
- * one, the 20-second folder watch runs another, the Refresh button a third —
+ * one, a switch or the folder watch (when a session's folder vanishes) runs
+ * another, the Refresh button a third —
  * and under snapshot isolation the second one to commit is REFUSED, with
  * "`missing` was changed by another action while this method awaited". Which
  * means the honesty check for every project fails because another honesty
@@ -188,13 +196,13 @@ async function probe(s: Draft, id: string): Promise<void> {
     target.missing = !exists;
     // Warn on the *transition* to missing, not on every probe: a project the
     // user was told is gone and chose to keep would otherwise log a warning
-    // every 20 seconds, forever.
+    // on every switch and every Refresh, forever.
     if (!exists) log.warn("workspace", "project directory is gone", { path });
   }
   if (target.branch !== git.branch) target.branch = git.branch;
   if (target.dirty !== git.dirty) target.dirty = git.dirty;
-  // Compared before writing, like everything else here: this runs every twenty
-  // seconds, and an unchanged value written anyway is a full-state broadcast.
+  // Compared before writing, like everything else here: this runs on every
+  // switch, and an unchanged value written anyway is a full-state broadcast.
   if (JSON.stringify(target.launch) !== JSON.stringify(run)) {
     target.launch = run;
   }
@@ -214,10 +222,14 @@ async function probe(s: Draft, id: string): Promise<void> {
  */
 async function probeAll(s: Draft): Promise<void> {
   const io = await import("./claude.server.ts");
-  const targets = s.projects.map((p) => ({ id: p.id, path: p.path }));
-  const activeId = s.activeId;
+  // Read through `$live`, like the writes below: a pinned read of `projects`
+  // would put it in this pass's read set, and any add or probe committing
+  // during the gather could then get the whole pass refused.
+  const start = now(s);
+  const targets = start.projects.map((p) => ({ id: p.id, path: p.path }));
+  const activeId = start.activeId;
 
-  const autoForget = s.autoForget;
+  const autoForget = start.autoForget;
 
   // ── gather ──
   const checks = await Promise.all(
@@ -233,7 +245,9 @@ async function probeAll(s: Draft): Promise<void> {
       targets
         .filter((t) => gone.get(t.id) === false)
         .map(async (t) =>
-          [t.id, await io.isDirectory(parentOf(t.path))] as const
+          // Lexical on purpose: the path no longer exists, so there is
+          // nothing to resolve.
+          [t.id, await io.isDirectory(parentOf(t.path) ?? "/")] as const
         ),
     ),
   );
@@ -269,9 +283,9 @@ async function probeAll(s: Draft): Promise<void> {
   for (const p of live.projects) {
     const exists = gone.get(p.id);
     if (exists === undefined) continue; // added while we were gathering
-    // Compared before writing, like everything else on this pass: it runs
-    // every twenty seconds, and an unchanged value written anyway is a
-    // full-state broadcast to every client.
+    // Compared before writing, like everything else on this pass: it runs at
+    // boot, on Refresh and whenever a session's folder vanishes, and an
+    // unchanged value written anyway is a full-state broadcast to every client.
     const run = runs.get(p.id);
     if (run && JSON.stringify(p.launch) !== JSON.stringify(run)) {
       p.launch = run;
@@ -304,22 +318,6 @@ async function probeAll(s: Draft): Promise<void> {
   }
 }
 
-/** The directory one level up. Lexical on purpose: it is asked about a path
- *  that no longer exists, so there is nothing to resolve. */
-function parentOf(path: string): string {
-  const cut = path.replace(/[/\\]+$/, "").lastIndexOf("/");
-  return cut > 0 ? path.slice(0, cut) : "/";
-}
-
-/**
- * Remove projects, keeping them where the user can get them back.
- *
- * Every removal in this cell goes through here — the sweep, the button on a
- * tab, "Remove gone" — so there is exactly one place that decides what happens
- * to the selection afterwards, and exactly one undo buffer. Removing a project
- * never touches the folder or Claude Code's transcripts for it; it forgets a
- * row, which is why one click is enough and a confirmation would be theatre.
- */
 /**
  * Drop the panes of projects nothing can reach any more.
  *
@@ -351,24 +349,37 @@ function prunePanes(s: WorkspaceState): number {
   return dropped;
 }
 
+/**
+ * Remove projects, keeping them where the user can get them back.
+ *
+ * Every removal in this cell goes through here — the sweep, the button on a
+ * tab, "Remove gone" — so there is exactly one place that decides what happens
+ * to the selection afterwards, and exactly one undo buffer. Removing a project
+ * never touches the folder or Claude Code's transcripts for it; it forgets a
+ * row, which is why one click is enough and a confirmation would be theatre.
+ */
 function forget(s: WorkspaceState, ids: string[]): void {
   // Snapshotted, not referenced. `s.projects` is overwritten two lines down,
   // and a live draft reference taken before that silently resolves to the NEW
   // array — which the runtime refuses outright rather than let it read as a
   // project that is still there (cell-impl.ts `throwStaleCapture`).
-  const doomed = s.projects.filter((p) => ids.includes(p.id)).map((p) => ({
-    ...p,
-    allowedDirs: [...p.allowedDirs],
-  }));
+  const doomed: Forgotten[] = [];
+  s.projects.forEach((p, formerIndex) => {
+    if (!ids.includes(p.id)) return;
+    doomed.push({ ...p, allowedDirs: [...p.allowedDirs], formerIndex });
+  });
   if (doomed.length === 0) return;
-  // Newest first, and capped: this is an undo, not a history.
-  s.forgotten = [...doomed, ...s.forgotten].slice(0, 20);
+  // Newest first, and capped. What falls off the end can never come back, so
+  // only now is what it left in other cells deleted — see `discarded`.
+  const kept = keepForgotten(doomed, s.forgotten);
+  s.forgotten = kept.kept;
   s.projects = s.projects.filter((p) => !ids.includes(p.id));
   log.info("workspace", "projects forgotten", {
     count: doomed.length,
     paths: doomed.map((p) => p.path),
   });
   released(doomed.map((p) => p.id));
+  discarded(kept.dropped.map((p) => p.id));
   if (ids.includes(s.activeId)) {
     // Prefer a project that is actually there — moving to another dead one
     // would just carry the dead end along the list.
@@ -394,6 +405,7 @@ function forget(s: WorkspaceState, ids: string[]): void {
 async function applyAddProject(
   s: Draft,
   path: string,
+  whenEmpty = false,
 ): Promise<string | null> {
   const io = await import("./claude.server.ts");
   const typed = tidy(path);
@@ -430,6 +442,10 @@ async function applyAddProject(
   // it writes — long enough that another action routinely touches `error` in
   // between, which the commit guard then refuses. Found by the fuzzer, twice.
   const live0 = now(s);
+  // Boot's fallback ("no projects? open the launch folder") is decided HERE,
+  // at write time. Decided before the gather, a project the user added while
+  // it ran gained a second, unasked-for tab.
+  if (whenEmpty && live0.projects.length > 0) return null;
   if (!exists) {
     live0.error = `There is no folder at ${clean}.`;
     // Named, so the page can offer to make it. A path somebody typed that does
@@ -509,28 +525,83 @@ const activeDraft = (s: WorkspaceState): Project | null =>
   s.projects.find((p) => p.id === s.activeId) ?? null;
 
 /**
- * Tell the panels that read the project's *contents* — the file tree and the
- * configuration catalog — that they are now about somewhere else.
+ * The report for a fire-and-forget call into another cell that failed.
  *
- * Dynamic imports, so the dependency runs one way statically: both of those
- * cells read `activeProject()` from here. Fire-and-forget, because a slow disk
- * must not hold up the switch itself, and each cell reports its own failure on
- * its own page.
- *
- * `reproject`, not `refresh`: it is debounced, so clicking through three
- * projects to find the right one starts one walk of the last of them rather
- * than three walks of all of them. The session swap is not debounced — it is a
- * pure move between two slots, and the transcript must land immediately.
+ * A cell that is not running is not a failure: an app, or a test, that boots
+ * the workspace without the session or the console has nothing to tell, and
+ * a warning per click about it buried the ones that mean something. Anything
+ * else is a real failure and says so.
  */
+const failed = (what: string) => (e: unknown): void => {
+  const error = e instanceof Error ? e.message : String(e);
+  if (error.includes("called before the cell's runtime is booted")) {
+    log.debug("workspace", `${what}: that cell is not running`, {});
+  } else log.warn("workspace", what, { error });
+};
+
 /**
- * A project has left the list — tell every cell that keeps state keyed by it.
+ * Put the newest removals in front of the undo buffer, and say what fell off
+ * its end. Pure: the cap decides what can never come back, and that decision
+ * is what {@link discarded} acts on.
+ */
+export function keepForgotten(
+  fresh: Forgotten[],
+  before: Forgotten[],
+  cap = MAX_FORGOTTEN,
+): { kept: Forgotten[]; dropped: Forgotten[] } {
+  const all = [...fresh, ...before];
+  return { kept: all.slice(0, cap), dropped: all.slice(cap) };
+}
+
+/**
+ * Where the undo buffer's projects go back, in the user's order.
  *
- * Three separate leaks, all of them found by looking at a running app's state
- * rather than at the code: a removed project's `claude` kept running with
- * nothing left that could reach it; its local-engine configuration stayed in
- * persisted state forever; and its loops became rows that could never fire and
- * were not shown on any page, because the loops page only lists the *active*
- * project's.
+ * The buffer is newest removal first, and within one removal in list order —
+ * so walking it front to back and splicing each at the index it left from
+ * undoes the removals in reverse, which is the only order that puts every row
+ * exactly where it was. A path already in the list (added again by hand) is
+ * skipped and reported, because that copy is the one the user chose.
+ */
+export function restoreOrder(
+  projects: Project[],
+  forgotten: Forgotten[],
+): { projects: Project[]; skipped: string[] } {
+  const out = [...projects];
+  const skipped: string[] = [];
+  const known = new Set(out.map((p) => p.path));
+  for (const { formerIndex, ...p } of forgotten) {
+    if (known.has(p.path)) {
+      skipped.push(p.id);
+      continue;
+    }
+    known.add(p.path);
+    out.splice(Math.min(Math.max(0, formerIndex), out.length), 0, p);
+  }
+  return { projects: out, skipped };
+}
+
+/** Every conversation key a project has: its own id, and every chat pane's.
+ *  Read from the committed cell when the dispatch lands, never snapshotted. */
+const sessionKeysOf = (ids: string[]): string[] => [
+  ...new Set(
+    ids.flatMap((id) => [
+      id,
+      ...panesOf(id).filter((p) => p.kind === "session").map((p) => p.id),
+    ]),
+  ),
+];
+
+/**
+ * A project has left the list — end everything it had RUNNING.
+ *
+ * Every `claude` it had open, one per chat pane and not just the first; every
+ * shell in its Console; any local turn in flight. A process this app started
+ * is this app's to end, and a removed project has nothing left that could
+ * reach one.
+ *
+ * What it had STORED — its loops, its local-engine settings — stays while the
+ * removal can be undone, and goes in {@link discarded}. Deleting it here made
+ * Undo bring back a project with its loops and its engine silently gone.
  *
  * Fire-and-forget, and dynamic, for the same reason as {@link reprojected}: the
  * dependency runs one way statically, and a slow teardown must not hold up the
@@ -538,11 +609,34 @@ const activeDraft = (s: WorkspaceState): Project | null =>
  */
 function released(ids: string[]): void {
   if (ids.length === 0) return;
-  void import("./session.ts").then((m) => m.session.release(ids)).catch((e) => {
-    log.warn("workspace", "could not end a removed project's session", {
-      error: e instanceof Error ? e.message : String(e),
-    });
-  });
+  void import("./session.ts").then((m) => m.session.release(sessionKeysOf(ids)))
+    .catch(failed("could not end a removed project's session"));
+  void import("./local.ts").then((m) => {
+    for (const key of sessionKeysOf(ids)) {
+      if (m.localChat(key).status !== "working") continue;
+      m.local.stop(key).catch(failed("could not stop a removed chat's turn"));
+    }
+  }).catch(() => {});
+  void import("./console.ts").then((m) => {
+    for (const id of ids) {
+      for (const [term] of m.terminalsOf(id)) {
+        m.consoleCell.remove(term).catch(failed("could not end a shell"));
+      }
+    }
+  }).catch(failed("could not end a removed project's shells"));
+}
+
+/**
+ * Projects that can no longer come back — off the end of the undo buffer, the
+ * buffer cleared, or skipped by an undo — lose what they left in other cells.
+ *
+ * Two leaks this closes, both found by looking at a running app's state: a
+ * removed project's local-engine configuration stayed in persisted state
+ * forever, and its loops became rows that could never fire and were not shown
+ * on any page, because the loops page only lists the *active* project's.
+ */
+function discarded(ids: string[]): void {
+  if (ids.length === 0) return;
   void import("./local.ts").then((m) => m.local.forgetProjects(ids)).catch(
     () => {},
   );
@@ -553,15 +647,21 @@ function released(ids: string[]): void {
 
 /**
  * One conversation has been closed — the same courtesy as {@link released}
- * gives a removed project, for a single tab.
+ * gives a removed project, for a single tab. A shell's tab needs none: the
+ * console cell ends the shell and closes the tab, in that order.
  *
- * Closing a tab used to leave everything the conversation held: its background
+ * Closing a tab used to leave everything the conversation held: its `claude`
+ * process, its background
  * programs still running, its undo history and its temp directory still there,
  * its engine settings and its transcript waiting in persisted state for
  * somebody to press the prune button on the Settings page. What was said is
  * written to the saved history first — closing a tab is not deleting the past.
  */
-function paneReleased(id: string): void {
+function paneReleased(id: string, kind: Pane["kind"]): void {
+  if (kind !== "session") return;
+  void import("./session.ts").then((m) => m.session.release([id])).catch(
+    failed("could not end a closed conversation"),
+  );
   void import("./local.ts").then((m) => m.local.closeChat(id)).catch(() => {});
 }
 
@@ -604,16 +704,26 @@ function sessionKeyIn(s: WorkspaceState, projectId: string): string {
   return list.find((p) => p.kind === "session")?.id ?? projectId;
 }
 
+/**
+ * Tell the panels that read the project's *contents* — the file tree and the
+ * configuration catalog — that they are now about somewhere else.
+ *
+ * Dynamic imports, so the dependency runs one way statically: both of those
+ * cells read `activeProject()` from here. Fire-and-forget, because a slow disk
+ * must not hold up the switch itself, and each cell reports its own failure on
+ * its own page.
+ *
+ * `reproject`, not `refresh`: it is debounced, so clicking through three
+ * projects to find the right one starts one walk of the last of them rather
+ * than three walks of all of them. The session swap is not debounced — it is a
+ * pure move between two slots, and the transcript must land immediately.
+ */
 function reprojected(id: string, sessionKey = id): void {
   // The conversation first: it is the thing on screen. `view()` resolves by key
   // so nothing renders the wrong transcript while this is in flight, but the
   // top level must still come to hold the conversation you are looking at.
   void import("./session.ts").then((m) => m.session.switchTo(sessionKey)).catch(
-    (e) => {
-      log.warn("workspace", "could not switch the session", {
-        error: e instanceof Error ? e.message : String(e),
-      });
-    },
+    failed("could not switch the session"),
   );
   void import("./tree.ts").then((m) => m.tree.reproject()).catch(() => {});
   void import("./catalog.ts").then((m) => m.catalog.reproject()).catch(
@@ -652,7 +762,7 @@ export const workspace = cell("workspace", {
      * Not persisted: an undo offer that survives a restart is an offer nobody
      * asked for about a decision they made last week.
      */
-    forgotten: [] as Project[],
+    forgotten: [] as Forgotten[],
     /** What each project has open — see the type above. */
     panes: {} as Record<string, Pane[]>,
     /** Which pane each project is showing. */
@@ -797,7 +907,9 @@ export const workspace = cell("workspace", {
       // launcher gives us.
       const requested = io.projectArg();
       if (requested.explicit || workspace.projects.length === 0) {
-        await workspace.addProject(requested.path); // aiol-ok: orchestration
+        // Not explicit → only while the list is STILL empty when the add
+        // commits; see `applyAddProject`.
+        await workspace.addProject(requested.path, !requested.explicit); // aiol-ok: orchestration
       }
 
       await workspace.selectUsable(); // aiol-ok: orchestration
@@ -845,8 +957,12 @@ export const workspace = cell("workspace", {
      *  `~/code/x` and `./sub` are resolved the same way the command-line
      *  argument is: a path typed into the field and a path passed on launch mean
      *  the same thing, and the field used to reject both outright. */
-    async addProject(s: WorkspaceState, path: string): Promise<string | null> {
-      const id = await applyAddProject(s, path);
+    async addProject(
+      s: WorkspaceState,
+      path: string,
+      whenEmpty = false,
+    ): Promise<string | null> {
+      const id = await applyAddProject(s, path, whenEmpty);
       if (id !== null) reprojected(s.activeId); // aiol-ok
       return id;
     },
@@ -933,9 +1049,9 @@ export const workspace = cell("workspace", {
       kind: unknown,
       // Minted by the caller when the thing the pane points at has to exist
       // first — see the dock's `openConsole`.
-      id?: unknown,
+      id: unknown = undefined,
       /** For a launcher's console: what it runs. See `Pane.command`. */
-      command?: unknown,
+      command: unknown = undefined,
     ): string {
       if (kind !== "session" && kind !== "console") return "";
       const pid = typeof projectId === "string" && projectId
@@ -1027,11 +1143,11 @@ export const workspace = cell("workspace", {
           list[at].kind === "session" &&
           list.filter((p) => p.kind === "session").length === 1
         ) return;
-        list.splice(at, 1);
+        const [gone] = list.splice(at, 1);
         if (s.activePane[pid] === id) {
           s.activePane[pid] = (list[at] ?? list[at - 1] ?? list[0])?.id ?? "";
         }
-        paneReleased(id);
+        paneReleased(id, gone.kind);
         return;
       }
     },
@@ -1101,15 +1217,13 @@ export const workspace = cell("workspace", {
      */
     undoForget(s: WorkspaceState) {
       if (s.forgotten.length === 0) return;
-      const back = [...s.forgotten].reverse();
+      const count = s.forgotten.length;
+      const back = restoreOrder(s.projects, s.forgotten);
       s.forgotten = [];
-      const known = new Set(s.projects.map((p) => p.path));
-      for (const p of back) {
-        if (known.has(p.path)) continue;
-        known.add(p.path);
-        s.projects.push(p);
-      }
-      s.projects.sort((a, b) => a.addedAt - b.addedAt);
+      s.projects = back.projects;
+      // Added again by hand while it sat here: that copy is the user's, and
+      // this one's leftovers belong to nothing.
+      discarded(back.skipped);
       if (!s.projects.some((p) => p.id === s.activeId)) {
         s.activeId = (s.projects.find((p) =>
           !p.missing
@@ -1118,25 +1232,23 @@ export const workspace = cell("workspace", {
         reprojected(s.activeId); // aiol-ok: read of the line above, by design
       }
       log.info("workspace", "forgotten projects restored", {
-        count: back.length,
+        count: count - back.skipped.length,
       });
     },
 
-    /** Stop offering the undo — the removals are accepted. */
+    /** Stop offering the undo — the removals are accepted, and what they left
+     *  in other cells can go with them. */
     clearForgotten(s: WorkspaceState) {
+      discarded(s.forgotten.map((p) => p.id));
       s.forgotten = [];
     },
 
     /**
-     * Open a file with the desktop's own opener.
+     * Hand a path to the desktop to open.
      *
      * On `workspace` because it is the cell that already owns the process side
      * of the app, and because every page that needs it — Skills, Commands,
-     * Hooks, MCP, Memory, Tree — reads a different cell. A failure lands in the
-     * same error banner as everything else here rather than in a console.
-     */
-    /**
-     * Hand a path to the desktop to open.
+     * Hooks, MCP, Memory, Tree — reads a different cell.
      *
      * The reason is *returned* as well as stored: the callers are spread
      * across the app — a row in the tree, a path inside an answer — and the
@@ -1321,14 +1433,14 @@ export const workspace = cell("workspace", {
   },
 });
 
+/** Projects removed since the app started, newest first — the undo offer. */
+export const forgottenProjects = (): Project[] => workspace.forgotten;
+
 /** The active project, or `null` — never store what you can derive.
  *
  *  A plain accessor rather than a `selectors:` entry on purpose: bound
  *  selectors are a server-side surface, while this reads the cell's reactive
  *  getters and so auto-tracks in the UI too. One definition, both sides. */
-/** Projects removed since the app started, newest first — the undo offer. */
-export const forgottenProjects = (): Project[] => workspace.forgotten;
-
 export const activeProject = (): Project | null =>
   workspace.projects.find((p) => p.id === workspace.activeId) ?? null;
 

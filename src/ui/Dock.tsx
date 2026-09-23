@@ -311,10 +311,6 @@ function ProjectTab(
   props: { project: Project; active: boolean; index: number },
 ): VNode {
   const p = props.project;
-  // The first nine get a number, because that is what Mod+1…9 reaches. Stated
-  // in the tooltip rather than printed on the tab: it is a fact about the
-  // keyboard, not about the project.
-  const chord = props.index < 9 ? `\nCtrl/Cmd+${props.index + 1}` : "";
   // This project's own conversation, whether or not it is the one on screen.
   const s = sessionOf(p.id);
   // Both kinds are counted, because a project can hold both: a Claude chat and
@@ -365,7 +361,7 @@ function ProjectTab(
       class={`ptab${props.active ? " active" : ""}${
         p.missing ? " ptab--missing" : ""
       }`}
-      // Drag to reorder. The order decides which tab Ctrl+1 reaches, so it is
+      // Drag to reorder. The order decides where Alt PgUp/PgDn walk, so it is
       // the user's to set — the order things happened to be added in is not a
       // decision anybody made.
       draggable
@@ -400,7 +396,7 @@ function ProjectTab(
             p.missing
               ? "\nFolder is gone"
               : `\n${STATUS_TEXT[s.status] ?? s.status}`
-          }${chord}`}
+          }`}
           onClick={() => workspace.select(p.id)}
         >
           {
@@ -565,7 +561,12 @@ function AddProject(): VNode {
               onInput={(e) => setPath((e.target as HTMLInputElement).value)}
               onKeyDown={(e: KeyboardEvent) => {
                 if (e.key === "Enter") submit();
-                if (e.key === "Escape") setOpen(false);
+                // preventDefault: backing out of the field must not also be
+                // the global Escape, which on the chat page stops the turn.
+                if (e.key === "Escape") {
+                  e.preventDefault();
+                  setOpen(false);
+                }
               }}
             />
             <div style={{ display: "flex", gap: "6px" }}>

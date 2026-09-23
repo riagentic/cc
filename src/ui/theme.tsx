@@ -23,8 +23,7 @@ import { XTERM_CSS } from "./xterm-css.ts";
 const LIGHT = `
   color-scheme: light;
   --bg: #eef1f6;
-  --bg-grad: radial-gradient(1100px 620px at 78% -12%, #e7edfa 0%, transparent 62%),
-             radial-gradient(760px 480px at -8% 8%, color-mix(in srgb, var(--accent) 16%, #ffffff) 0%, transparent 58%);
+  --bg-grad: radial-gradient(1400px 760px at 50% -34%, color-mix(in srgb, var(--accent) 9%, transparent) 0%, transparent 72%);
   --panel: #ffffff;
   --panel-2: #f5f7fa;
   --raise: #e7ebf3;
@@ -41,6 +40,7 @@ const LIGHT = `
   --warn: #926406;
   --danger: #c8392e;
   --violet: #7a4fd0;
+  --cyan: #0a7268;
   --shadow: 0 1px 2px rgba(16,24,40,.06), 0 10px 28px -14px rgba(16,24,40,.28);
 `;
 
@@ -125,17 +125,20 @@ const CSS = `
 
 :root {
   color-scheme: dark;
-  --bg: #0a0c11;
-  --bg-grad: radial-gradient(1100px 620px at 78% -12%, #1b2436 0%, transparent 62%),
-             radial-gradient(760px 480px at -8% 8%, color-mix(in srgb, var(--accent) 14%, #0a0c11) 0%, transparent 58%);
-  --panel: #11141c;
-  --panel-2: #161a24;
-  --raise: #1c2130;
-  --line: #242a37;
-  --line-soft: #1a1f2a;
-  --ink: #e9edf6;
-  --ink-soft: #99a3b8;
-  --ink-dim: #798397;
+  --bg: #07090d;
+  /* One faint wash from the top, tinted by the accent, and nothing else. The
+     two big radial gradients this replaces read as a marketing page; a tool
+     that sits open all day wants a flat ground with the contrast spent on the
+     text. */
+  --bg-grad: radial-gradient(1400px 760px at 50% -34%, color-mix(in srgb, var(--accent) 7%, transparent) 0%, transparent 72%);
+  --panel: #0c0f15;
+  --panel-2: #12151d;
+  --raise: #1a1e28;
+  --line: #232834;
+  --line-soft: #161a22;
+  --ink: #e6eaf2;
+  --ink-soft: #97a0b3;
+  --ink-dim: #78829a;
   --accent: #e07a58;
   --accent-ink: #1a0f0a;
   --accent-soft: color-mix(in srgb, var(--accent) 14%, transparent);
@@ -144,14 +147,28 @@ const CSS = `
   --warn: #e3b341;
   --danger: #f6685e;
   --violet: #a982f5;
-  --radius: 12px;
-  --radius-sm: 8px;
+  /* The terminal's cyan. Nothing else in the chrome is cyan; it is a token so
+     the Console's ANSI colours follow the theme like every other colour. */
+  --cyan: #4fd6c8;
+  /* Corners a terminal would recognise. Twelve pixels is a consumer app; four
+     to six is a tool window, and the difference is most of what "pro" means
+     on a screen. Round stays only where round is a signal: the status LEDs. */
+  --radius: 6px;
+  --radius-sm: 4px;
   --font: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
-  --mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
-  --shadow: 0 1px 2px rgba(0,0,0,.4), 0 12px 32px -12px rgba(0,0,0,.6);
+  --mono: "SF Mono", ui-monospace, "JetBrains Mono", "IBM Plex Mono", Menlo, Consolas, monospace;
+  /* The chrome's own typeface. Every machine fact — a path, a model id, a
+     token count, a mode, a key label — is set in it, and prose (the
+     transcript, a hint under a field) stays in --font. Mixing the two on
+     purpose is the whole look: the app reads like a terminal, the answers
+     read like writing. */
+  --ui: var(--mono);
+  /* Depth by hairline, not by cloud: a 1px ring the same colour as every other
+     structural line, then one soft drop so a popover still floats. */
+  --shadow: 0 0 0 1px var(--line), 0 10px 30px -12px rgba(0,0,0,.72);
   --ease: cubic-bezier(.22,.61,.36,1);
-  --rail: 248px;
-  --dock: 212px;
+  --rail: 232px;
+  --dock: 198px;
 
   /* The reading measure: how wide a column of prose is allowed to grow. Used
      by the transcript and the composer together, so the text you read and the
@@ -204,23 +221,39 @@ body {
   background-attachment: fixed;
   color: var(--ink);
   font-family: var(--font);
-  font-size: 14px;
-  line-height: 1.55;
+  font-size: 13px;
+  line-height: 1.5;
+  /* Numbers line up in a column wherever they land. A status strip whose
+     figures jitter as they change is the tell of a page that was never meant
+     to be watched. */
+  font-variant-numeric: tabular-nums;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
 }
 
 ::selection { background: var(--accent-soft); }
 
-::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar { width: 9px; height: 9px; }
 ::-webkit-scrollbar-thumb {
   background: color-mix(in srgb, var(--ink-dim) 34%, transparent);
-  border-radius: 99px; border: 3px solid transparent; background-clip: padding-box;
+  border-radius: 2px; border: 3px solid transparent; background-clip: padding-box;
 }
 ::-webkit-scrollbar-thumb:hover { background: color-mix(in srgb, var(--ink-dim) 55%, transparent); background-clip: padding-box; }
 ::-webkit-scrollbar-track { background: transparent; }
 
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+
+/* ── the chrome's voice ─────────────────────────────────────────────────────
+   One rule for every label that names a thing rather than saying something:
+   the strip's keys, the rail's groups, a field's label, a panel's title. Small,
+   monospaced, upper, widely tracked — the way a terminal writes a column
+   header. Everything that uses it says so by class, so the size and tracking
+   are set in one place and cannot drift apart. */
+.ukey {
+  font-family: var(--ui); font-size: 9.5px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: .13em;
+  color: var(--ink-dim);
+}
 
 /* ── shell ──────────────────────────────────────────────────────────────── */
 
@@ -243,17 +276,25 @@ body {
   background: color-mix(in srgb, var(--panel) 78%, transparent);
   backdrop-filter: blur(12px);
 }
-.rail__head { padding: 16px 16px 12px; }
-.rail__nav { flex: 1; overflow-y: auto; padding: 4px 10px 10px; display: flex; flex-direction: column; gap: 3px; }
-.rail__foot { padding: 10px; border-top: 1px solid var(--line-soft); display: grid; gap: 8px; }
+.rail__head { padding: 12px 12px 10px; border-bottom: 1px solid var(--line-soft); }
+.rail__nav { flex: 1; overflow-y: auto; padding: 4px 8px 8px; display: flex; flex-direction: column; gap: 1px; }
+.rail__foot { padding: 9px 10px; border-top: 1px solid var(--line-soft); display: grid; gap: 7px; }
 
 /* A heading inside the rail. Fourteen destinations is too many to scan as one
    list; four short groups is not. */
 .rail__group {
-  font-size: 9.5px; text-transform: uppercase; letter-spacing: .1em; font-weight: 700;
-  color: var(--ink-dim); padding: 12px 12px 4px;
+  font-family: var(--ui); font-size: 9.5px; text-transform: uppercase;
+  letter-spacing: .13em; font-weight: 600;
+  color: var(--ink-dim); padding: 13px 10px 5px;
+  display: flex; align-items: center; gap: 8px;
 }
-.rail__group:first-child { padding-top: 2px; }
+/* The hairline that runs out from the heading to the edge of the column. It is
+   the one piece of pure decoration here and it earns its place: four groups in
+   a narrow column read as four sections instead of one long list. */
+.rail__group::after {
+  content: ""; flex: 1; height: 1px; background: var(--line-soft);
+}
+.rail__group:first-child { padding-top: 3px; }
 
 /* ── panes: what a project has open ─────────────────────────────────────────
    Child rows under the selected tab. Indented under the project's badge, so
@@ -271,7 +312,8 @@ body {
   flex: 1; min-width: 0;
   display: flex; align-items: center; gap: 6px;
   padding: 3px 4px; border: 0; background: none; color: inherit;
-  font: inherit; font-size: 11.5px; text-align: left; cursor: pointer;
+  font: inherit; font-family: var(--ui); font-size: 11px; letter-spacing: -.01em;
+  text-align: left; cursor: pointer;
   border-radius: inherit;
 }
 .pane__icon { display: grid; place-items: center; opacity: .8; flex: none; }
@@ -289,8 +331,9 @@ body {
    the text is nearly the hue itself. */
 .pane__tag {
   --tag: var(--ink-dim);
-  flex: none; font-size: 9.5px; line-height: 1.6; letter-spacing: .02em;
-  padding: 0 4px; border-radius: 4px;
+  flex: none; font-family: var(--ui); font-size: 9.5px; line-height: 1.6;
+  letter-spacing: .02em;
+  padding: 0 4px; border-radius: 3px;
   color: color-mix(in srgb, var(--tag) 88%, var(--ink));
   background: color-mix(in srgb, var(--tag) 15%, transparent);
   max-width: 62px; overflow: hidden; text-overflow: ellipsis;
@@ -458,7 +501,7 @@ body {
   font-size: 9.5px; text-transform: uppercase; letter-spacing: .1em; font-weight: 700;
   color: var(--ink-dim);
 }
-.dock__list { flex: 1; overflow-y: auto; padding: 2px 8px 8px; display: flex; flex-direction: column; gap: 3px; }
+.dock__list { flex: 1; overflow-y: auto; padding: 2px 7px 8px; display: flex; flex-direction: column; gap: 1px; }
 .dock__foot { padding: 8px; border-top: 1px solid var(--line-soft); display: grid; gap: 6px; }
 
 /* One project. A tab, not a list row: the accent bar on the leading edge is
@@ -508,7 +551,8 @@ body {
    and takes the accent: exactly one tab is the current one, and that has to be
    unmistakable. */
 .ptab__mark {
-  width: 26px; height: 26px; border-radius: 7px; display: grid; place-items: center;
+  width: 22px; height: 22px; border-radius: 3px; display: grid; place-items: center;
+  font-family: var(--ui);
   background: hsl(var(--hue, 0) 34% 42% / .22);
   color: hsl(var(--hue, 0) 46% 72%);
   font-size: 11.5px; font-weight: 700; letter-spacing: -.02em; text-transform: uppercase;
@@ -525,8 +569,8 @@ body {
   );
 }
 .ptab.active .ptab__mark { background: color-mix(in srgb, var(--accent) 22%, transparent); color: var(--accent); }
-.ptab__name { font-size: 12.5px; font-weight: 560; letter-spacing: -.005em; }
-.ptab__sub { font-size: 10.5px; color: var(--ink-dim); display: flex; align-items: center; gap: 4px; }
+.ptab__name { font-family: var(--ui); font-size: 12px; font-weight: 550; letter-spacing: -.01em; }
+.ptab__sub { font-family: var(--ui); font-size: 10px; color: var(--ink-dim); display: flex; align-items: center; gap: 4px; letter-spacing: -.01em; }
 /* Each project's own session, at a glance. The dock is the only place that
    reports a conversation you are NOT looking at, so this is the whole signal
    for a turn that finished — or stopped to ask something — in another project. */
@@ -609,14 +653,14 @@ body {
   background: linear-gradient(150deg, var(--accent), color-mix(in srgb, var(--accent) 55%, var(--violet)));
   color: var(--accent-ink); box-shadow: var(--shadow); flex: none;
 }
-.brand__name { font-weight: 640; letter-spacing: -.01em; line-height: 1.15; }
-.brand__sub { font-size: 11px; color: var(--ink-dim); letter-spacing: .02em; }
+.brand__name { display: block; font-family: var(--ui); font-size: 13px; font-weight: 650; letter-spacing: -.01em; line-height: 1.2; }
+.brand__sub { display: block; font-family: var(--ui); font-size: 10px; color: var(--ink-dim); letter-spacing: .04em; }
 
 /* ── nav cards ──────────────────────────────────────────────────────────── */
 
 .navcard {
-  display: grid; grid-template-columns: 30px minmax(0,1fr) auto; align-items: center; gap: 10px;
-  padding: 9px 10px; border-radius: var(--radius-sm);
+  display: grid; grid-template-columns: 24px minmax(0,1fr) auto; align-items: center; gap: 9px;
+  padding: 7px 9px; border-radius: var(--radius-sm);
   color: var(--ink-soft); text-decoration: none; border: 1px solid transparent;
   transition: background .16s var(--ease), color .16s var(--ease), border-color .16s var(--ease), transform .16s var(--ease);
 }
@@ -624,10 +668,10 @@ body {
 .navcard:active { transform: scale(.985); }
 .navcard.active { background: var(--accent-soft); color: var(--ink); border-color: color-mix(in srgb, var(--accent) 32%, transparent); }
 .navcard.active .navcard__icon { color: var(--accent); }
-.navcard__icon { display: grid; place-items: center; width: 30px; height: 30px; border-radius: 8px; background: var(--panel-2); color: var(--ink-soft); transition: color .16s var(--ease); }
+.navcard__icon { display: grid; place-items: center; width: 24px; height: 24px; border-radius: 4px; background: var(--panel-2); color: var(--ink-soft); transition: color .16s var(--ease); }
 .navcard.active .navcard__icon { background: color-mix(in srgb, var(--accent) 20%, transparent); }
-.navcard__label { font-size: 13px; font-weight: 560; letter-spacing: -.005em; }
-.navcard__hint { font-size: 11px; color: var(--ink-dim); }
+.navcard__label { font-family: var(--ui); font-size: 12px; font-weight: 520; letter-spacing: 0; }
+.navcard__hint { font-family: var(--ui); font-size: 10px; color: var(--ink-dim); letter-spacing: -.01em; }
 /* Machine-wide, in the one place the choice is made. Same hue as the page's
    scope tag, so the two read as one idea rather than two decorations. */
 .navcard__machine {
@@ -658,15 +702,18 @@ body {
    between two dark pages is the single worst thing a dark app can do. */
 .page { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: hidden; animation: pageIn .2s var(--ease); }
 @keyframes pageIn { from { opacity: 0; transform: translateY(4px); } }
-.page__body { flex: 1; min-height: 0; overflow-y: auto; padding: 18px 22px 26px; }
+.page__body { flex: 1; min-height: 0; overflow-y: auto; padding: 14px 18px 24px; }
 /* A settings page is a single column, and a single column on a wide screen is
    its own ergonomic problem: a row 1900px wide puts the label at one edge and
    the control at the other. Capped to the same measure the chat uses, so the
    two read at the same width and neither sprawls. */
 .page--measured .page__body > .grid { max-width: var(--measure); }
-.page__head { padding: 16px 22px 10px; display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
-.page__title { font-size: 17px; font-weight: 640; letter-spacing: -.015em; margin: 0; }
-.page__sub { font-size: 12.5px; color: var(--ink-dim); }
+.page__head { padding: 13px 18px 9px; display: flex; align-items: baseline; gap: 11px; flex-wrap: wrap; border-bottom: 1px solid var(--line-soft); }
+.page__title { font-family: var(--ui); font-size: 14px; font-weight: 650; letter-spacing: -.01em; margin: 0; }
+/* A page subtitle is a sentence, not a reading — it keeps the reading face.
+   The line between the two is the whole rule: machine facts in --ui, words
+   about them in --font. */
+.page__sub { font-size: 11.5px; color: var(--ink-dim); }
 
 /* The scope tag beside a page title. Muted by default — it is a label, not a
    status — with the machine-wide one given a distinct hue, because that is the
@@ -686,10 +733,10 @@ body {
 /* ── status strip ───────────────────────────────────────────────────────── */
 
 .strip {
-  display: flex; align-items: stretch; gap: 2px; flex-wrap: wrap;
-  padding: 8px 12px; border-bottom: 1px solid var(--line);
-  background: color-mix(in srgb, var(--panel) 62%, transparent);
-  backdrop-filter: blur(12px); position: sticky; top: 0; z-index: 5;
+  display: flex; align-items: stretch; gap: 0; flex-wrap: wrap;
+  padding: 5px 10px; border-bottom: 1px solid var(--line);
+  background: color-mix(in srgb, var(--panel) 72%, transparent);
+  backdrop-filter: blur(14px); position: sticky; top: 0; z-index: 5;
 }
 /* flex: none, not the default 1 1 auto: the strip WRAPS, so an item that does
    not fit belongs on the next line — shrinking it instead is how a row of
@@ -697,28 +744,39 @@ body {
    status strip that has stopped reporting status. Only the context meter grows,
    and only the project path clamps (it has its own ellipsis, and a path is read
    from its tail anyway). */
-.stat { display: grid; gap: 1px; padding: 3px 11px; min-width: 0; flex: none; border-radius: var(--radius-sm); }
-.stat + .stat { border-left: 1px solid var(--line-soft); }
-.stat__k { font-size: 10px; text-transform: uppercase; letter-spacing: .08em; color: var(--ink-dim); font-weight: 600; }
-.stat__v { font-size: 13px; font-weight: 560; display: flex; align-items: center; gap: 6px; min-width: 0; }
-.stat__v code, .mono { font-family: var(--mono); font-size: 12px; }
-.stat--grow { flex: 1 1 190px; min-width: 190px; }
+.stat { display: grid; gap: 0; padding: 2px 10px; min-width: 0; flex: none; border-radius: var(--radius-sm); }
+.stat + .stat { border-left: 1px solid var(--line); }
+.stat__k {
+  font-family: var(--ui); font-size: 9px; text-transform: uppercase;
+  letter-spacing: .14em; color: var(--ink-dim); font-weight: 600; line-height: 1.5;
+}
+.stat__v {
+  font-family: var(--ui); font-size: 12px; font-weight: 500; letter-spacing: -.01em;
+  display: flex; align-items: center; gap: 6px; min-width: 0; line-height: 1.55;
+}
+.stat__v code, .mono { font-family: var(--mono); font-size: 11.5px; }
+.stat--grow { flex: 1 1 170px; min-width: 170px; }
 /* One very long value (a deep project path) must not push the whole strip onto
    a second row — clamp it and let the title attribute carry the full text. */
 /* The project path is the one value that SHOULD ellipse — it can be any length
    — but it still needs room to be worth reading. Without a floor its grid track
    collapsed to the width of the word "PROJECT" above it. */
-.stat--clamp { min-width: 190px; max-width: 300px; flex: 0 1 auto; }
+.stat--clamp { min-width: 150px; max-width: 250px; flex: 0 1 auto; }
 /* …and the floor has to be on the VALUE, not only on the stat: the value is a
    grid item whose track is sized from its own min-content, and an
    ellipsis-nowrap span's min-content is nothing. Without this the project path
    ellipsed at a dozen characters inside a box with room for twice that. */
-.stat--clamp .stat__v { min-width: 172px; }
+.stat--clamp .stat__v { min-width: 132px; }
 /* …and the switcher inside it takes the room. A flex item does not grow unless
    told to, so the trigger sat at its own content width and ellipsed inside a
    box with twice the space. */
 .stat--clamp .menu, .stat--clamp .menu__btn { flex: 1 1 auto; min-width: 0; }
 .stat--num .stat__v { font-variant-numeric: tabular-nums; }
+/* The whole row is one instrument, so the value inside a stat never carries a
+   second border or fill of its own: a picker in the strip is the text, with an
+   affordance that only appears under the pointer. */
+.strip .menu__btn { border-color: transparent; background: none; padding: 0 4px; }
+.strip .menu__btn:hover:not(:disabled), .strip .menu__btn.open { background: var(--panel-2); border-color: var(--line-soft); }
 .truncate { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 
 /* A model name is read, not glanced at. The generic .menu__btn cap is a
@@ -730,12 +788,12 @@ body {
 
 /* ── meter ──────────────────────────────────────────────────────────────── */
 
-.meter { height: 7px; border-radius: 99px; background: var(--raise); overflow: hidden; position: relative; }
+.meter { height: 4px; border-radius: 2px; background: var(--raise); overflow: hidden; position: relative; }
 /* The bar animates to its new width rather than jumping. A context meter that
    snaps looks like a redraw; one that moves reads as a measurement changing,
    which is what it is. Reduced motion turns this off with everything else. */
 .meter__fill { transition: width .32s var(--ease), background .2s var(--ease); }
-.meter__fill { height: 100%; border-radius: 99px; transition: width .45s var(--ease), background .3s var(--ease); }
+.meter__fill { height: 100%; border-radius: 2px; transition: width .45s var(--ease), background .3s var(--ease); }
 .meter__fill--ok { background: linear-gradient(90deg, var(--info), color-mix(in srgb, var(--info) 60%, var(--violet))); }
 .meter__fill--warn { background: linear-gradient(90deg, var(--warn), var(--accent)); }
 .meter__fill--hot { background: linear-gradient(90deg, var(--accent), var(--danger)); }
@@ -750,8 +808,9 @@ body {
 @keyframes pulse { 0%,100% { opacity: 1; transform: scale(1); } 50% { opacity: .45; transform: scale(.82); } }
 
 .badge {
-  min-width: 20px; height: 20px; padding: 0 6px; border-radius: 99px;
-  display: inline-grid; place-items: center; font-size: 11px; font-weight: 640;
+  font-family: var(--ui);
+  min-width: 18px; height: 18px; padding: 0 5px; border-radius: 3px;
+  display: inline-grid; place-items: center; font-size: 10.5px; font-weight: 620;
   font-variant-numeric: tabular-nums;
   background: var(--raise); color: var(--ink-soft);
 }
@@ -760,9 +819,11 @@ body {
 .badge--danger { background: color-mix(in srgb, var(--danger) 20%, transparent); color: var(--danger); }
 
 .pill {
-  display: inline-flex; align-items: center; gap: 6px; padding: 3px 9px;
-  border-radius: 99px; border: 1px solid var(--line); background: var(--panel-2);
-  font-size: 11.5px; color: var(--ink-soft); font-weight: 550;
+  font-family: var(--ui);
+  display: inline-flex; align-items: center; gap: 5px; padding: 1px 7px;
+  border-radius: 3px; border: 1px solid var(--line); background: var(--panel-2);
+  font-size: 10.5px; color: var(--ink-soft); font-weight: 520;
+  letter-spacing: .01em;
 }
 .pill--accent { border-color: color-mix(in srgb, var(--accent) 40%, transparent); color: var(--accent); background: var(--accent-soft); }
 .pill--ok { border-color: color-mix(in srgb, var(--ok) 40%, transparent); color: var(--ok); background: color-mix(in srgb, var(--ok) 12%, transparent); }
@@ -772,9 +833,12 @@ body {
 /* ── panel ──────────────────────────────────────────────────────────────── */
 
 .panel { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
-.panel__head { display: flex; align-items: center; gap: 10px; padding: 11px 14px; border-bottom: 1px solid var(--line-soft); }
-.panel__title { font-size: 13px; font-weight: 620; letter-spacing: -.005em; }
-.panel__body { padding: 14px; }
+.panel__head { display: flex; align-items: center; gap: 10px; padding: 9px 12px; border-bottom: 1px solid var(--line-soft); background: color-mix(in srgb, var(--panel-2) 55%, transparent); }
+.panel__title {
+  font-family: var(--ui); font-size: 10px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: .13em; color: var(--ink-soft);
+}
+.panel__body { padding: 12px; }
 .panel--flush .panel__body { padding: 0; }
 .split { display: grid; grid-template-columns: minmax(260px, 360px) minmax(0, 1fr); gap: 14px; align-items: start; align-content: start; grid-auto-rows: max-content; }
 @media (max-width: 1040px) { .split { grid-template-columns: minmax(0, 1fr); } }
@@ -800,10 +864,10 @@ body {
 button.rowitem { cursor: pointer; }
 button.rowitem:hover { background: var(--panel-2); }
 .rowitem.selected { background: var(--accent-soft); }
-.rowitem__icon { width: 28px; height: 28px; border-radius: 8px; display: grid; place-items: center; background: var(--panel-2); color: var(--ink-soft); flex: none; }
-.rowitem__title { font-size: 13px; font-weight: 560; }
-.rowitem__detail { font-size: 12px; color: var(--ink-dim); font-family: var(--mono); }
-.rowitem__meta { font-size: 11px; color: var(--ink-dim); font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
+.rowitem__icon { width: 24px; height: 24px; border-radius: 4px; display: grid; place-items: center; background: var(--panel-2); color: var(--ink-soft); flex: none; }
+.rowitem__title { font-family: var(--ui); font-size: 12px; font-weight: 530; letter-spacing: -.01em; }
+.rowitem__detail { font-size: 11px; color: var(--ink-dim); font-family: var(--mono); }
+.rowitem__meta { font-family: var(--ui); font-size: 10.5px; color: var(--ink-dim); font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
 
 /* ── file tree ──────────────────────────────────────────────────────────── */
 
@@ -825,7 +889,7 @@ button.rowitem:hover { background: var(--panel-2); }
 .treerow.selected { background: var(--accent-soft); color: var(--ink); }
 .treerow__icon { display: grid; place-items: center; color: var(--ink-dim); }
 .treerow.selected .treerow__icon, .treerow--dir .treerow__icon { color: var(--ink-soft); }
-.treerow__name { font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.treerow__name { font-family: var(--mono); font-size: 11.5px; letter-spacing: -.01em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .treerow--dir .treerow__name { font-weight: 560; }
 /* One letter, in the margin, in git's own vocabulary: M for modified, A for a
    file git has not seen before. Colour AND a letter, so it survives a
@@ -867,18 +931,18 @@ button.rowitem:hover { background: var(--panel-2); }
    is still typing. The one place smoothness belongs is the jump button, which
    asks for it by name. */
 .chat { flex: 1; min-height: 0; overflow-y: auto; padding: 20px 22px 8px; }
-.thread { max-width: var(--measure); margin: 0 auto; display: flex; flex-direction: column; gap: 18px; }
+.thread { max-width: var(--measure); margin: 0 auto; display: flex; flex-direction: column; gap: 15px; }
 
-.msg { display: grid; grid-template-columns: 30px minmax(0,1fr); gap: 12px; animation: rise .22s var(--ease); }
+.msg { display: grid; grid-template-columns: 24px minmax(0,1fr); gap: 11px; animation: rise .22s var(--ease); }
 @keyframes rise { from { opacity: 0; transform: translateY(6px); } }
-.msg__avatar { width: 30px; height: 30px; border-radius: 9px; display: grid; place-items: center; flex: none; }
+.msg__avatar { width: 24px; height: 24px; border-radius: 4px; display: grid; place-items: center; flex: none; }
 .msg__avatar--user { background: var(--raise); color: var(--ink-soft); }
-.msg__avatar--assistant { background: linear-gradient(150deg, var(--accent), color-mix(in srgb, var(--accent) 50%, var(--violet))); color: var(--accent-ink); }
-.msg__who { font-size: 11px; font-weight: 640; letter-spacing: .05em; text-transform: uppercase; color: var(--ink-dim); margin-bottom: 4px; }
+.msg__avatar--assistant { background: var(--accent); color: var(--accent-ink); }
+.msg__who { font-family: var(--ui); font-size: 9.5px; font-weight: 600; letter-spacing: .14em; text-transform: uppercase; color: var(--ink-dim); margin-bottom: 4px; }
 .msg__body { min-width: 0; display: grid; gap: 9px; }
 .bubble {
   background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
-  padding: 11px 14px; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.6;
+  padding: 10px 13px; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.62;
 }
 .bubble--user { background: var(--panel-2); }
 
@@ -887,18 +951,18 @@ button.rowitem:hover { background: var(--panel-2); }
   color: var(--ink-dim); font-size: 12.5px; white-space: pre-wrap; overflow-wrap: anywhere;
   background: color-mix(in srgb, var(--violet) 6%, transparent);
 }
-.think__k { font-size: 10px; letter-spacing: .08em; text-transform: uppercase; color: var(--violet); font-weight: 640; display: flex; align-items: center; gap: 6px; margin-bottom: 4px; }
+.think__k { font-family: var(--ui); font-size: 9.5px; letter-spacing: .14em; text-transform: uppercase; color: var(--violet); font-weight: 600; display: flex; align-items: center; gap: 6px; margin-bottom: 4px; }
 
 .toolchip {
-  display: grid; grid-template-columns: 26px minmax(0,1fr) auto; gap: 10px; align-items: center;
-  border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 8px 11px;
+  display: grid; grid-template-columns: 22px minmax(0,1fr) auto; gap: 9px; align-items: center;
+  border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 6px 10px;
   background: var(--panel-2); width: 100%; text-align: left; color: inherit; font: inherit; cursor: pointer;
   transition: border-color .16s var(--ease), background .16s var(--ease);
 }
 .toolchip:hover { border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
-.toolchip__icon { width: 26px; height: 26px; border-radius: 7px; display: grid; place-items: center; background: var(--raise); color: var(--ink-soft); }
-.toolchip__name { font-size: 12px; font-weight: 620; }
-.toolchip__title { font-size: 12px; color: var(--ink-dim); font-family: var(--mono); }
+.toolchip__icon { width: 22px; height: 22px; border-radius: 3px; display: grid; place-items: center; background: var(--raise); color: var(--ink-soft); }
+.toolchip__name { font-family: var(--ui); font-size: 11.5px; font-weight: 600; }
+.toolchip__title { font-size: 11.5px; color: var(--ink-dim); font-family: var(--mono); }
 
 .caret { display: inline-block; width: 7px; height: 15px; margin-left: 2px; vertical-align: -2px; background: var(--accent); border-radius: 2px; animation: blink 1.05s steps(2, start) infinite; }
 @keyframes blink { 50% { opacity: 0; } }
@@ -915,7 +979,7 @@ button.rowitem:hover { background: var(--panel-2); }
 .md__quote { margin: 0 0 .7em; padding: .1em 0 .1em .9em; border-left: 3px solid var(--line); color: var(--ink-soft); }
 .md__hr { border: 0; border-top: 1px solid var(--line-soft); margin: 1.1em 0; }
 .md__a { color: var(--accent); text-underline-offset: 2px; }
-.md__code { font-family: var(--mono); font-size: .88em; background: var(--panel-2); border: 1px solid var(--line-soft); border-radius: 5px; padding: .08em .35em; }
+.md__code { font-family: var(--mono); font-size: .88em; background: var(--panel-2); border: 1px solid var(--line-soft); border-radius: 3px; padding: .08em .35em; }
 .md__pre {
   position: relative; margin: 0 0 .7em; padding: .8em .9em; overflow-x: auto;
   background: var(--panel-2); border: 1px solid var(--line-soft); border-radius: var(--radius-sm);
@@ -1080,45 +1144,63 @@ button.rowitem:hover { background: var(--panel-2); }
   box-shadow: var(--shadow); transition: border-color .16s var(--ease), box-shadow .16s var(--ease);
 }
 .composer__inner:focus-within { border-color: color-mix(in srgb, var(--accent) 55%, transparent); }
+/* The prompt. One glyph, in the accent, on the first line of the box — the
+   oldest affordance there is for "type here", and the one piece of terminal
+   grammar this app can borrow without dressing up as something it is not. It
+   is decoration in the strict sense (aria-hidden, not selectable), so the
+   textarea keeps its own label and its own placeholder. */
+.composer__inner { position: relative; }
+.composer__prompt {
+  position: absolute; left: 13px; top: 10px;
+  font-family: var(--ui); font-size: 12.5px; line-height: 1.6; font-weight: 600;
+  color: color-mix(in srgb, var(--accent) 75%, var(--ink-dim));
+  pointer-events: none; user-select: none;
+  transition: color .16s var(--ease);
+}
+.composer__inner:focus-within .composer__prompt { color: var(--accent); }
 .composer textarea {
-  width: 100%; border: 0; background: none; color: var(--ink); font: inherit; line-height: 1.6;
-  padding: 12px 14px 4px; resize: none; outline: none; max-height: 260px; min-height: 52px;
+  width: 100%; border: 0; background: none; color: var(--ink);
+  font: inherit; font-family: var(--ui); font-size: 12.5px; line-height: 1.6;
+  /* The left inset is the prompt glyph's room (.composer__prompt sits in it),
+     so the first character you type lines up with every line after it. */
+  padding: 10px 13px 4px 30px; resize: none; outline: none; max-height: 260px; min-height: 48px;
 }
 .composer textarea::placeholder { color: var(--ink-dim); }
 .composer__bar { display: flex; align-items: center; gap: 8px; padding: 6px 8px 8px 14px; }
-.composer__hint { flex: 1; font-size: 11px; color: var(--ink-dim); }
-.kbd { font-family: var(--mono); font-size: 10.5px; border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 5px; padding: 1px 5px; color: var(--ink-soft); }
+.composer__hint { flex: 1; font-family: var(--ui); font-size: 10.5px; color: var(--ink-dim); }
+.kbd { font-family: var(--mono); font-size: 10px; border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 3px; padding: 0 4px; color: var(--ink-soft); }
 
 /* ── buttons ────────────────────────────────────────────────────────────── */
 
 .btn {
   display: inline-flex; align-items: center; justify-content: center; gap: 7px;
-  font: inherit; font-size: 13px; font-weight: 560; line-height: 1;
-  padding: 8px 13px; border-radius: var(--radius-sm); cursor: pointer;
+  font: inherit; font-family: var(--ui); font-size: 12px; font-weight: 520;
+  letter-spacing: -.005em; line-height: 1;
+  padding: 7px 12px; border-radius: var(--radius-sm); cursor: pointer;
   border: 1px solid var(--line); background: var(--panel-2); color: var(--ink);
   transition: background .15s var(--ease), border-color .15s var(--ease), transform .12s var(--ease), opacity .15s var(--ease);
   white-space: nowrap;
 }
 .btn:hover:not(:disabled) { background: var(--raise); border-color: color-mix(in srgb, var(--ink-dim) 40%, transparent); }
-.btn:active:not(:disabled) { transform: scale(.97); }
+.btn:active:not(:disabled) { transform: translateY(.5px); }
 .btn:disabled { opacity: .45; cursor: not-allowed; }
-.btn--primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: 620; }
+.btn--primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: 600; }
 .btn--primary:hover:not(:disabled) { filter: brightness(1.08); background: var(--accent); border-color: var(--accent); }
 .btn--danger { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 35%, transparent); background: color-mix(in srgb, var(--danger) 10%, transparent); }
 .btn--danger:hover:not(:disabled) { background: color-mix(in srgb, var(--danger) 18%, transparent); border-color: var(--danger); }
 .btn--ghost { background: transparent; border-color: transparent; color: var(--ink-soft); }
 .btn--ghost:hover:not(:disabled) { background: var(--panel-2); color: var(--ink); }
-.btn--sm { padding: 5px 9px; font-size: 12px; }
-.btn--icon { padding: 7px; }
+.btn--sm { padding: 4px 8px; font-size: 11px; }
+.btn--icon { padding: 6px; }
 
 /* ── inputs ─────────────────────────────────────────────────────────────── */
 
 .input {
-  width: 100%; font: inherit; font-size: 13px; color: var(--ink);
+  width: 100%; font: inherit; font-family: var(--ui); font-size: 12px; color: var(--ink);
   background: var(--panel-2); border: 1px solid var(--line); border-radius: var(--radius-sm);
-  padding: 8px 11px; outline: none; transition: border-color .15s var(--ease), box-shadow .15s var(--ease);
+  padding: 7px 10px; outline: none; transition: border-color .15s var(--ease), box-shadow .15s var(--ease);
 }
-.input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+.input:focus { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
 .input::placeholder { color: var(--ink-dim); }
 
 /* Filter box. Sits in a page header beside the segmented control, so it is
@@ -1142,8 +1224,13 @@ button.rowitem:hover { background: var(--panel-2); }
    under the control it explains AND directly above the next field's label, and
    the reader has to work out which one it belongs to. */
 .field + .field, .field + .stack, .stack + .field { margin-top: 14px; }
-.field__label { font-size: 12px; font-weight: 600; color: var(--ink-soft); }
-.field__hint { font-size: 11.5px; color: var(--ink-dim); }
+.field__label {
+  font-family: var(--ui); font-size: 9.5px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: .13em; color: var(--ink-dim);
+}
+/* The hint is prose — a sentence explaining a choice — so it keeps the reading
+   face. Only the label above it is chrome. */
+.field__hint { font-size: 11.5px; color: var(--ink-dim); line-height: 1.45; }
 
 .choices { display: grid; gap: 7px; }
 .choice {
@@ -1154,7 +1241,7 @@ button.rowitem:hover { background: var(--panel-2); }
 }
 .choice:hover { border-color: color-mix(in srgb, var(--accent) 40%, transparent); }
 .choice.selected { border-color: var(--accent); background: var(--accent-soft); }
-.choice__label { font-size: 13px; font-weight: 560; }
+.choice__label { font-family: var(--ui); font-size: 12px; font-weight: 530; letter-spacing: -.005em; }
 /* One line, always. A hint is a subtitle, and a long one — a project path
    outside the home directory is the usual culprit — wrapped a row to four lines
    and pushed everything under it off the panel. */
@@ -1163,11 +1250,25 @@ button.rowitem:hover { background: var(--panel-2); }
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .choice__tick { color: var(--accent); }
+/* A row with its own remove control. The control is a sibling laid over the
+   row's right edge, never a child: the row is a button already. The padding
+   keeps the row's tick clear of it. */
+.choice-row { position: relative; }
+.choice-row > .choice { width: 100%; padding-right: 44px; }
+.choice-row__x { position: absolute; right: 8px; top: 50%; transform: translateY(-50%); }
 
-.seg { display: inline-flex; padding: 3px; gap: 2px; background: var(--panel-2); border: 1px solid var(--line); border-radius: 99px; }
-.seg__btn { border: 0; background: none; color: var(--ink-soft); font: inherit; font-size: 12px; font-weight: 560; padding: 4px 12px; border-radius: 99px; cursor: pointer; transition: background .15s var(--ease), color .15s var(--ease); }
+.seg { display: inline-flex; padding: 2px; gap: 1px; background: var(--panel-2); border: 1px solid var(--line); border-radius: var(--radius-sm); }
+.seg__btn {
+  border: 0; background: none; color: var(--ink-soft);
+  font: inherit; font-family: var(--ui); font-size: 11px; font-weight: 520;
+  letter-spacing: -.005em;
+  padding: 3px 10px; border-radius: 2px; cursor: pointer;
+  transition: background .15s var(--ease), color .15s var(--ease);
+}
 .seg__btn:hover { color: var(--ink); }
-.seg__btn.selected { background: var(--raise); color: var(--ink); }
+/* The chosen key is lit, not merely lighter: an instrument row read at a
+   glance needs the current setting to be the brightest thing in its cell. */
+.seg__btn.selected { background: var(--raise); color: var(--ink); box-shadow: inset 0 0 0 1px var(--line); }
 
 /* Menu — the switcher behind every value the status strip names. The popover
    is positioned, not portalled: it hangs off its own trigger, so it follows a
@@ -1216,10 +1317,10 @@ button.rowitem:hover { background: var(--panel-2); }
 /* Inline, like every other label in this app that is followed by a <br>. As a
    block it produced its own line break AND kept the <br>, so every option in
    an open menu was double-spaced and a six-option list filled half the window. */
-.menu__label { font-weight: 560; }
+.menu__label { font-family: var(--ui); font-size: 12px; font-weight: 520; letter-spacing: -.005em; }
 /* Always rendered, so the row keeps one shape; a block so it still sits
    under the label rather than beside it. */
-.menu__hint { display: block; font-size: 11.5px; color: var(--ink-dim); font-weight: 500; }
+.menu__hint { display: block; font-size: 11px; color: var(--ink-dim); font-weight: 400; }
 .menu__foot {
   margin-top: 3px; padding: 7px 8px 3px; border-top: 1px solid var(--line-soft);
   font-size: 11.5px; color: var(--ink-dim);
@@ -1228,8 +1329,8 @@ button.rowitem:hover { background: var(--panel-2); }
 /* ── misc ───────────────────────────────────────────────────────────────── */
 
 .empty { display: grid; place-items: center; gap: 10px; padding: 46px 20px; text-align: center; color: var(--ink-dim); }
-.empty__icon { width: 46px; height: 46px; border-radius: 14px; display: grid; place-items: center; background: var(--panel-2); color: var(--ink-dim); }
-.empty__title { font-size: 14px; font-weight: 600; color: var(--ink-soft); }
+.empty__icon { width: 40px; height: 40px; border-radius: 6px; display: grid; place-items: center; background: var(--panel-2); color: var(--ink-dim); }
+.empty__title { font-family: var(--ui); font-size: 12.5px; font-weight: 600; color: var(--ink-soft); letter-spacing: -.005em; }
 .empty__hint { font-size: 12.5px; max-width: 42ch; }
 
 .banner {
@@ -1248,7 +1349,7 @@ button.rowitem:hover { background: var(--panel-2); }
   border-radius: var(--radius-sm); padding: 10px 12px; max-height: 320px; overflow: auto; color: var(--ink-soft);
 }
 .tags { display: flex; flex-wrap: wrap; gap: 5px; }
-.tag { font-family: var(--mono); font-size: 11px; padding: 2px 7px; border-radius: 6px; background: var(--panel-2); border: 1px solid var(--line-soft); color: var(--ink-soft); }
+.tag { font-family: var(--mono); font-size: 10.5px; padding: 1px 6px; border-radius: 3px; background: var(--panel-2); border: 1px solid var(--line-soft); color: var(--ink-soft); }
 .kv { display: grid; grid-template-columns: minmax(90px, auto) minmax(0,1fr); gap: 6px 14px; font-size: 12.5px; }
 .kv__k { color: var(--ink-dim); }
 .kv__v { overflow-wrap: anywhere; }
@@ -1318,7 +1419,7 @@ button.rowitem:hover { background: var(--panel-2); }
 .toggle:hover:not(:disabled) { border-color: color-mix(in srgb, var(--accent) 40%, var(--line)); }
 .toggle:disabled { opacity: .5; cursor: not-allowed; }
 .toggle__text { flex: 1; min-width: 0; }
-.toggle__label { display: block; font-size: 13px; font-weight: 540; }
+.toggle__label { display: block; font-family: var(--ui); font-size: 12px; font-weight: 520; letter-spacing: -.005em; }
 .toggle__hint { display: block; font-size: 11.5px; color: var(--ink-dim); }
 .toggle__track {
   flex: none; width: 34px; height: 20px; border-radius: 99px;
@@ -1453,6 +1554,7 @@ button.rowitem:hover { background: var(--panel-2); }
   --warn: #ffd34d;
   --danger: #ff8b80;
   --violet: #c4a4ff;
+  --cyan: #6ff0e2;
   --shadow: 0 0 0 1px #4a4a55, 0 12px 32px -12px #000;
 }
 /* Borders that were decoration become structure. */
@@ -1590,10 +1692,10 @@ button.rowitem:hover { background: var(--panel-2); }
   display: inline-grid; place-items: center;
   width: 14px; height: 14px; margin-right: 7px; vertical-align: -2px;
   border: 1px solid var(--line); border-radius: 4px;
-  background: var(--panel-2); color: var(--accent-ink);
+  background: var(--panel-2); color: var(--ink);
   font-size: 10px; line-height: 1; flex: none;
 }
-.md__box.on { background: var(--accent); border-color: var(--accent); }
+.md__box.on { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
 
 /* A code span that names a file. It stays a code span — same type, same tint —
    and only picks up the hover of something you can press, because that is the
@@ -1731,9 +1833,9 @@ div:hover > .toolchip__open, .toolchip__open:focus-visible { opacity: 1; }
   display: grid; grid-template-columns: 34px minmax(0, 1fr) 34px;
   align-items: center; gap: 7px; font-size: 10.5px;
 }
-.gauge__k { color: var(--ink-dim); font-weight: 700; letter-spacing: .05em; }
-.gauge__v { color: var(--ink-soft); text-align: right; font-size: 10.5px; }
-.gauge__d { grid-column: 2 / -1; color: var(--ink-dim); font-size: 10.5px; }
+.gauge__k { font-family: var(--ui); color: var(--ink-dim); font-weight: 600; font-size: 9.5px; text-transform: uppercase; letter-spacing: .12em; }
+.gauge__v { font-family: var(--ui); color: var(--ink-soft); text-align: right; font-size: 10.5px; font-variant-numeric: tabular-nums; }
+.gauge__d { grid-column: 2 / -1; font-family: var(--ui); color: var(--ink-dim); font-size: 10px; }
 .gauge__bar .meter { height: 4px; }
 
 /* The wide version, in Settings, has room for the detail line beside the bar
@@ -1813,10 +1915,13 @@ div:hover > .toolchip__open, .toolchip__open:focus-visible { opacity: 1; }
 
 /* Compact density. Not a smaller font — that is what zoom is for — but less
    air around the furniture, for a laptop screen where the list is the point. */
+/* Compact is TIGHTER than comfortable, corners included. These were 10/7
+   against a base of 12/8; the base is 6/4 now, and left alone they quietly
+   made the denser setting the rounder one. */
 :root[data-density="compact"] {
   --air: .72;
-  --radius: 10px;
-  --radius-sm: 7px;
+  --radius: 5px;
+  --radius-sm: 3px;
 }
 [data-density="compact"] .page__body { padding: 12px 18px 18px; }
 [data-density="compact"] .page__head { padding: 11px 18px 7px; }
@@ -1829,7 +1934,9 @@ div:hover > .toolchip__open, .toolchip__open:focus-visible { opacity: 1; }
 [data-density="compact"] .composer { padding: 8px 18px 12px; }
 [data-density="compact"] .rowitem { padding: 7px 10px; }
 [data-density="compact"] .panel__body { padding: 11px 13px; }
-[data-density="compact"] .strip { padding: 6px 18px; }
+[data-density="compact"] .strip { padding: 4px 12px; }
+[data-density="compact"] .stat { padding: 1px 9px; }
+[data-density="compact"] .rail__group { padding: 10px 10px 4px; }
 [data-density="compact"] .msg { gap: 9px; }
 
 /* Motion. Three states on purpose: the OS setting is the right default, but a
@@ -1878,16 +1985,23 @@ ${TIGHT}
  *
  * Only `--accent` differs: `--accent-soft` is mixed from it, `--accent-ink` is
  * a property of the *palette* (dark ink on a bright accent, white ink on a deep
- * one) rather than of the hue. So one value per accent per palette is the whole
- * of it, and adding an accent is one row in `ACCENTS`.
+ * one) rather than of the hue. High contrast keeps its own accent — swapping
+ * the hue there used to leave black ink on a mid steel. Adding an accent is
+ * one row in `ACCENTS`.
  */
 const ACCENT_CSS = ACCENTS.map((a) =>
   [
-    ':root[data-accent="' + a.id + '"] { --accent: ' + a.dark + "; }",
+    // Dark / system-dark: bright accent, dark ink. Skip High contrast.
+    ':root[data-accent="' + a.id +
+    '"]:not([data-theme="contrast"]):not([data-theme="light"]) { --accent: ' +
+    a.dark + "; --accent-ink: #1a0f0a; }",
+    // Explicit light: deep accent, white ink.
     ':root[data-theme="light"][data-accent="' + a.id + '"] { --accent: ' +
-    a.light + "; }",
+    a.light + "; --accent-ink: #ffffff; }",
+    // System → OS light: same pair — lock ink so a deep steel never keeps
+    // the dark-theme ink.
     '@media (prefers-color-scheme: light) { :root:not([data-theme="dark"]):not([data-theme="contrast"])[data-accent="' +
-    a.id + '"] { --accent: ' + a.light + "; } }",
+    a.id + '"] { --accent: ' + a.light + "; --accent-ink: #ffffff; } }",
   ].join("\n")
 ).join("\n");
 

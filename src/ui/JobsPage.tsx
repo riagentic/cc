@@ -476,7 +476,7 @@ export function JobsPage(): VNode {
           )
           : (
             <>
-              <Panel flush title={`${sorted.length} shown`}>
+              <Panel key="list" flush title={`${sorted.length} shown`}>
                 {sorted.length === 0
                   ? (
                     <Empty
@@ -499,15 +499,21 @@ export function JobsPage(): VNode {
                   )}
               </Panel>
 
-              {current ? <JobDetail job={current} now={now} /> : (
-                <Panel>
-                  <Empty
-                    icon={IconX({ size: 20 })}
-                    title="Pick a job"
-                    hint="Its prompt, its directory, what it is waiting for, and everything it has done so far."
-                  />
-                </Panel>
-              )}
+              {
+                /* Keyed by job: the no-undo Delete it arms must not stay armed
+                  on the next job selected. */
+              }
+              {current
+                ? <JobDetail key={current.id} job={current} now={now} />
+                : (
+                  <Panel key="none">
+                    <Empty
+                      icon={IconX({ size: 20 })}
+                      title="Pick a job"
+                      hint="Its prompt, its directory, what it is waiting for, and everything it has done so far."
+                    />
+                  </Panel>
+                )}
             </>
           )}
       </div>

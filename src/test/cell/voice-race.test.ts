@@ -18,7 +18,10 @@ import {
 Deno.test("a press shorter than the recorder takes to open still records", async () => {
   // Not awaited: this is the key going down, and the key comes up while the
   // recorder is still being spawned.
-  const started = startCapture({ device: "" }, { onLevel: () => {} });
+  const started = startCapture({ device: "" }, {
+    onLevel: () => {},
+    onFull: () => {},
+  });
   const wav = await stopCapture();
 
   await started;
@@ -40,8 +43,14 @@ Deno.test("stop is safe when nothing is recording", async () => {
 });
 
 Deno.test("two presses in a row cannot overlap", async () => {
-  const a = startCapture({ device: "" }, { onLevel: () => {} });
-  const b = startCapture({ device: "" }, { onLevel: () => {} });
+  const a = startCapture({ device: "" }, {
+    onLevel: () => {},
+    onFull: () => {},
+  });
+  const b = startCapture({ device: "" }, {
+    onLevel: () => {},
+    onFull: () => {},
+  });
   await Promise.all([a, b]);
   assertEquals(capturing(), true, "exactly one recorder is open");
   await stopCapture();

@@ -12,9 +12,9 @@ import { speech } from "../cell/speech.ts";
 import {
   fromClaude,
   fromLocal,
+  nextToSpeak,
   type Said,
   startAt,
-  toHandOver,
   type Watched,
 } from "../lib/aloud.ts";
 import { view } from "../cell/session.ts";
@@ -97,7 +97,7 @@ export function useSpokenText(): void {
     // Keyed by conversation, so the chat you just left cannot mark the chat
     // you just opened as already read.
     const from = startAt(handed.get(where), msgs);
-    const { speak, mark } = toHandOver(msgs, from, from, working);
+    const { speak, mark } = nextToSpeak(msgs, from, working);
     // Written before anything async, and that is the whole guard: a streaming
     // reply causes dozens of renders, and any marker that only moved when a
     // dispatch committed would let every one of them say it again.

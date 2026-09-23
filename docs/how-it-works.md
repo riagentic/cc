@@ -28,6 +28,32 @@ Before the first request of a turn the agent learns what it is talking to: the
 window the model is _really_ loaded at (loading a cold model first), whether it
 takes tools natively, and the project it works in.
 
+## ⏱️ Pace: Draft / Normal / Quality
+
+How thoroughly one turn works — orthogonal to tools and permissions.
+
+| Pace        | Intent                         | Rounds | Wall   | Verify nudge | Docs nudge |
+| ----------- | ------------------------------ | ------ | ------ | ------------ | ---------- |
+| **Draft**   | Something that runs, very fast | 48     | 4 min  | no           | no         |
+| **Normal**  | Decent quality, still quick    | 160    | 10 min | yes          | no         |
+| **Quality** | Today's full thorough pass     | 1024   | 20 min | yes          | yes        |
+
+The wall-clock column is a _share_ of the turn budget, not a second clock: the
+tunable `CC_TURN_MS` (twenty minutes by default) stays the whole of Quality, and
+Draft and Normal take a fifth and a half of whatever it is set to.
+
+Draft always uses the terse working method. Normal uses a lighter method on
+large windows. Quality keeps the window-sized method unchanged. Sticky packing,
+loop detection and tool repair stay on in every pace — those make Quality faster
+without cutting corners.
+
+## 🛡️ Capabilities & run-as
+
+- **Read → Write → Execute → Allow all** replace per-command shell prompts.
+  Execute is today's sandboxed "Don't ask"; Allow all is Bypass.
+- **Run as:** Auto / cc-agent / You — explicit switch over the old ACL-only auto
+  pick.
+
 ## 🧭 Main principles
 
 - 📏 **The window decides everything.** 8k → short instructions, small results,
@@ -74,6 +100,26 @@ takes tools natively, and the project it works in.
 - **Continue nudge and empty-reply retry** — weak models stall mid-task.
 - **bubblewrap sandbox** idea — unattended commands cannot escape the project.
 
+### From Hermes 🟪
+
+- **Nested instruction files** — an `AGENTS.md`/`CLAUDE.md` in a subdirectory is
+  loaded when a tool first enters that directory, and appended to the **tool
+  result** (never the system prompt), so a monorepo's per-package rules arrive
+  without breaking the cached prompt prefix. Deduped by content.
+- **Full tool-result hygiene** — one pass over every result strips ESC/CSI/OSC
+  sequences, bare control characters, invisible plane-14 Unicode TAG chars (an
+  ASCII-smuggling channel), and flattens `\r` overwrite spoofing to newlines.
+  The pass is linear in the text: string escapes are bounded by the byte that
+  could start their terminator, because the obvious lazy scan is quadratic on
+  openers that never get one — and this runs over text somebody else wrote.
+- **Call-cycle detection** — an `A,B,A,B,…` loop with identical results, which
+  resets the "same call three times" streak on every alternation, is named as a
+  cycle instead of running to the budget.
+- **Boundary-aware think scrubbing** — an unterminated `thinking` only opens a
+  block at a line boundary, so prose that merely mentions the tag is not eaten.
+- **Non-code verify skip** — a turn that only touched `.md`/`LICENSE`/docs has
+  nothing to run, so "you changed files and ran nothing" never fires on prose.
+
 ### Our own 🟩
 
 - **The real window, from the server** — llama.cpp `/props` (per slot), LM
@@ -94,10 +140,11 @@ takes tools natively, and the project it works in.
 - **Project awareness** — `AGENTS.md`/`CLAUDE.md` (else the README's start),
   toolchain from manifests (`deno.json` tasks, `package.json` scripts, cargo,
   go, python, make), git state, and where the docs are (`docs/`,
-  `dep/<name>/docs/`, up to four levels, nearest first). The rule that goes with
-  it: read a framework's docs before its source — never experiment blind, never
-  borrow binaries from other folders, and never lift the sandbox just to read a
-  file.
+  `dep/<name>/docs/`, up to four levels, nearest first) — plus per-directory
+  instruction files discovered as the agent navigates (see Hermes above). The
+  rule that goes with it: read a framework's docs before its source — never
+  experiment blind, never borrow binaries from other folders, and never lift the
+  sandbox just to read a file.
 - **Bounded storage** — stored tool output is capped per conversation, so the
   app stays light.
 
@@ -112,8 +159,9 @@ takes tools natively, and the project it works in.
   sandbox does the safety job more simply.
 
 **💡 Why this mix:** opencode is strongest at editing and memory, openclaude at
-understanding messy local models. We added what both miss: the real window,
-speed from the prompt cache, and data safety.
+understanding messy local models, Hermes at hardening an agent against untrusted
+output and per-directory project context. We added what all miss: the real
+window, speed from the prompt cache, and data safety.
 
 ## 🧮 When the window fills up
 

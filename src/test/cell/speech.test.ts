@@ -86,12 +86,12 @@ testCell(
     // the first is still playing. With a flag instead of a count, the first to
     // finish declared silence while the speakers were still going.
     t.init({ config: setUp(), status: "idle" });
-    t.send.began("what you said");
-    t.send.began("what came back");
+    t.send.began("what you said", 0);
+    t.send.began("what came back", 0);
     t.expect.state((s) => s.busy === 2 && s.status === "speaking");
-    t.send.ended("");
+    t.send.ended("", 0, false);
     t.expect.state((s) => s.busy === 1 && s.status === "speaking");
-    t.send.ended("");
+    t.send.ended("", 0, false);
     t.expect.state((s) =>
       s.busy === 0 && s.status === "idle" && s.saying === ""
     );
@@ -102,16 +102,16 @@ testCell(speech, "switched off, nothing can talk it back on", (t) => {
   // `began` arrives from an orchestrator that started before the switch was
   // flipped. It must not resurrect the speaker.
   t.init({ status: "off" });
-  t.send.began("late arrival");
+  t.send.began("late arrival", 0);
   t.expect.state((s) => s.status === "off" && s.busy === 0);
-  t.send.ended("");
+  t.send.ended("", 0, false);
   t.expect.state((s) => s.status === "off");
 });
 
 testCell(speech, "a failure is reported once, at the end", (t) => {
   t.init({ config: setUp(), status: "idle" });
-  t.send.began("hello");
-  t.send.ended("the speakers refused it");
+  t.send.began("hello", 0);
+  t.send.ended("the speakers refused it", 0, false);
   t.expect.state((s) => s.status === "error");
   t.expect.state((s) => s.error === "the speakers refused it");
 });
@@ -429,4 +429,72 @@ testCell(speech, "being switched off does not lose the setup", async (t) => {
   t.expect.state((s) => s.config.voiceOut === "bf_emma");
   t.expect.state((s) => s.config.speed === 1.25);
   t.expect.state((s) => s.config.enabled === true);
+});
+
+testCell(
+  speech,
+  "a reading from before Stop cannot end the one after it",
+  async (t) => {
+    // Stop zeroes the count, but the reading it stopped still ends a moment
+    // later. Its `ended` used to take the NEXT reading's count to zero and
+    // call the speaker idle while it was talking.
+    t.init({ config: setUp(), status: "idle" });
+    t.send.began("stopped halfway", 0);
+    await t.send.hush();
+    t.expect.state((s) => s.busy === 0 && s.gen === 1);
+    t.send.began("the next reply", 1);
+    t.send.ended("", 0, false); // the stopped one, late
+    t.expect.state((s) => s.busy === 1 && s.status === "speaking");
+    // A late `began` from the old stint cannot count itself in either.
+    t.send.began("queued before Stop", 0);
+    t.expect.state((s) => s.busy === 1);
+    t.send.ended("", 1, false);
+    t.expect.state((s) => s.busy === 0 && s.status === "idle");
+  },
+);
+
+testCell(
+  speech,
+  "switching off makes every reading in flight stale",
+  async (t) => {
+    t.init({ config: setUp(), status: "speaking", busy: 1 });
+    await t.send.off();
+    t.send.ended("the speakers refused it", 0, false);
+    t.expect.state((s) => s.status === "off" && s.error === null);
+  },
+);
+
+testCell(
+  speech,
+  "a server that is not there pauses reading until it is looked for",
+  async (t) => {
+    // Every line of every reply used to knock on the closed port and log its
+    // own copy of the refusal.
+    t.init({ config: setUp(), status: "idle" });
+    t.send.began("hello", 0);
+    t.send.ended("No voice server is answering", 0, true);
+    t.expect.state((s) => s.down === true && s.status === "error");
+    // Paused: handed over (so it is not read later) but never sent.
+    await t.send.say("And another.", "claude", "msg_b");
+    t.expect.state((s) => s.said.includes("msg_b") && s.busy === 0);
+    // A Find that gets an answer resumes it…
+    t.send.found("http://x", true, []);
+    t.expect.state((s) => s.down === false);
+    // …and so does switching the speaker on again.
+    t.init({ config: setUp(), down: true });
+    t.send.on();
+    t.expect.state((s) => s.down === false && s.status === "idle");
+  },
+);
+
+testCell(speech, "dismissing an error puts the speaker back on", (t) => {
+  // It was on — only a speaker that is on can fail to read. Dismissing used
+  // to decide on/off from the "at start" setting, which switched it off.
+  t.init({
+    config: setUp(),
+    status: "error",
+    error: "the speakers refused it",
+  });
+  t.send.dismissError();
+  t.expect.state((s) => s.status === "idle" && s.error === null);
 });

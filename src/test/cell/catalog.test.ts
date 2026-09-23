@@ -10,10 +10,12 @@ import { assert, assertEquals } from "@std/assert";
 import { join } from "@std/path";
 import { bootCells } from "aio/testing";
 import {
+  readManifests,
   scanDefinitionDirs,
   scanHooks,
   scanMcp,
   scanPlugins,
+  stripJsonc,
 } from "../../cell/catalog.server.ts";
 import {
   catalog,
@@ -314,6 +316,7 @@ Deno.test("the cell scans the active project", async () => {
       assertEquals(catalog.hooks.length, 1);
       assertEquals(catalog.error, null);
     } finally {
+      await h.settle();
       h.dispose();
       await Deno.remove(project, { recursive: true });
     }
@@ -340,6 +343,7 @@ Deno.test("a skill on disk that the session did not load says so", async () => {
       assertEquals(entry.live, false);
       assertEquals(entry.description, "written after the session started");
     } finally {
+      await h.settle();
       h.dispose();
       await Deno.remove(project, { recursive: true });
     }
@@ -386,6 +390,7 @@ Deno.test("a capability the session loaded with no file behind it is a built-in"
       const fs = mcpEntries().find((m) => m.name === "fs")!;
       assertEquals(fs.status, "connected");
     } finally {
+      await h.settle();
       h.dispose();
       await Deno.remove(project, { recursive: true });
     }
@@ -419,6 +424,7 @@ Deno.test("memory is measured for a project you merely selected", async () => {
       assert(catalog.memoryScannedAt !== null);
       assert(memoryBytes() > 0);
     } finally {
+      await h.settle();
       h.dispose();
       await Deno.remove(project, { recursive: true });
     }
@@ -454,6 +460,7 @@ Deno.test("switching project re-measures at once, but a repeat is paced", async 
         false,
       );
     } finally {
+      await h.settle();
       h.dispose();
       await Deno.remove(a, { recursive: true });
       await Deno.remove(b, { recursive: true });
@@ -476,8 +483,85 @@ Deno.test("Rescan never waits for the pacing interval", async () => {
       await catalog.refreshMemory();
       assertEquals(catalog.memory.length, before + 1);
     } finally {
+      await h.settle();
       h.dispose();
       await Deno.remove(project, { recursive: true });
     }
+  });
+});
+
+Deno.test("a commented deno.json still names its tasks", async () => {
+  // Deno reads its config as JSONC. A strict parse found no tasks in a
+  // commented `deno.json` or in any `deno.jsonc`, and the Dev button vanished.
+  const dir = await Deno.makeTempDir();
+  try {
+    await Deno.writeTextFile(
+      join(dir, "deno.jsonc"),
+      `{
+  // what runs it
+  "tasks": {
+    "dev": "deno run -A https://x.test/a.ts", /* not a comment: // in a string */
+    "build": "deno compile",
+  },
+}
+`,
+    );
+    const found = await readManifests(dir);
+    assertEquals(found.denoTasks, ["dev", "build"]);
+  } finally {
+    await Deno.remove(dir, { recursive: true });
+  }
+});
+
+Deno.test("JSONC is stripped without touching strings", () => {
+  assertEquals(
+    JSON.parse(stripJsonc('{"a": "x // y", /* c */ "b": [1, 2,], }')),
+    { a: "x // y", b: [1, 2] },
+  );
+  assertEquals(JSON.parse(stripJsonc('{"q": "say \\"hi\\"" // end\n}')), {
+    q: 'say "hi"',
+  });
+});
+
+Deno.test("MCP servers from ~/.claude.json are this project's, not every project's", async () => {
+  await withHome(async (home) => {
+    const mine = join(home, "mine");
+    await Deno.writeTextFile(
+      join(home, ".claude.json"),
+      JSON.stringify({
+        mcpServers: { global: { command: "g" } },
+        projects: {
+          [mine]: { mcpServers: { local: { command: "l" } } },
+          [join(home, "other")]: { mcpServers: { foreign: { command: "f" } } },
+        },
+      }),
+    );
+    const names = (await scanMcp(mine)).map((m) => m.name);
+    assertEquals(names, ["global", "local"]);
+    // No project: the user's own servers, and nothing from any project.
+    assertEquals((await scanMcp("")).map((m) => m.name), ["global"]);
+  });
+});
+
+Deno.test("with no project, nothing is read from the app's own directory", async () => {
+  await withHome(async (home) => {
+    const cwd = Deno.cwd();
+    const here = await Deno.makeTempDir();
+    try {
+      await Deno.mkdir(join(here, ".claude", "commands"), { recursive: true });
+      await Deno.writeTextFile(join(here, ".claude", "commands", "x.md"), "x");
+      await Deno.writeTextFile(
+        join(here, ".mcp.json"),
+        JSON.stringify({ mcpServers: { stray: { command: "s" } } }),
+      );
+      Deno.chdir(here);
+      assertEquals(await scanDefinitionDirs("", "command"), []);
+      assertEquals(await scanMcp(""), []);
+      assertEquals(await scanHooks(""), []);
+    } finally {
+      Deno.chdir(cwd);
+      await Deno.remove(here, { recursive: true });
+    }
+    void home;
   });
 });

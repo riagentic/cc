@@ -37,6 +37,7 @@ async function twoProjects() {
     b,
     tmp,
     async done() {
+      await h.settle();
       h.dispose();
       await Deno.remove(tmp, { recursive: true });
     },
@@ -223,6 +224,7 @@ Deno.test("an empty effort survives; an empty model does not", async () => {
     assert(typeof s.permissionMode === "string" && s.permissionMode.length > 0);
     assert(Array.isArray(s.allowedDirs));
   } finally {
+    await h.settle();
     h.dispose();
     await Deno.remove(dir, { recursive: true });
   }
@@ -255,6 +257,7 @@ Deno.test("a new project starts where the CLI is configured to start", async () 
     assertEquals(p.allowedDirs, []);
     assertEquals(p.skipPermissions, false);
   } finally {
+    await h.settle();
     h.dispose();
     await Deno.remove(dir, { recursive: true });
   }
@@ -356,6 +359,7 @@ cat > /dev/null
     }
     assertEquals(alive(pid), false);
   } finally {
+    await h.settle();
     h.dispose();
     if (previous === undefined) Deno.env.delete("CLAUDE_BIN");
     else Deno.env.set("CLAUDE_BIN", previous);
@@ -427,7 +431,7 @@ Deno.test("a switch survives the project list changing under it", async () => {
   }
 });
 
-Deno.test("removing a project takes its process, its engine config and its loops with it", async () => {
+Deno.test("removing a project takes its process at once, and its engine config and loops once the undo lapses", async () => {
   const { bootCells } = await import("aio/testing");
   const { local, localConfig } = await import("../../cell/local.ts");
   const { loops } = await import("../../cell/loops.ts");
@@ -454,6 +458,14 @@ Deno.test("removing a project takes its process, its engine config and its loops
 
     assertEquals(workspace.projects.length, 1);
     assertEquals(workspace.activeId, keepId);
+    // Stored state waits while the removal can still be undone: Undo brings
+    // the project back with its engine and its loops, not without them.
+    assertEquals(localConfig(id).engine, "ollama");
+    assertEquals(loops.loops.some((l) => l.projectId === id), true);
+
+    // Accepted — the undo offer dropped — and now it all goes.
+    workspace.clearForgotten();
+    await h.settle();
     // Engine configuration is PERSISTED, so leaving it behind meant every
     // project ever removed stayed in the stored state forever.
     assertEquals(local.configs[id], undefined);
@@ -464,6 +476,7 @@ Deno.test("removing a project takes its process, its engine config and its loops
     // …and nothing of the removed project's conversation is parked.
     assertEquals(session.parked[id], undefined);
   } finally {
+    await h.settle();
     h.dispose();
     await Deno.remove(dir, { recursive: true });
     await Deno.remove(keep, { recursive: true });
@@ -500,6 +513,7 @@ Deno.test("the leftover sweep drops state keyed by a project that is not there",
     assertEquals(local.configs[real]?.engine, "lmstudio");
     assertEquals(strayConfigs(), []);
   } finally {
+    await h.settle();
     h.dispose();
     await Deno.remove(dir, { recursive: true });
   }

@@ -131,3 +131,21 @@ Deno.test("a miss says where it came closest, so no re-read is needed", () => {
   // Nothing to anchor on: nothing invented.
   assertEquals(nearMiss(file, "no such line\nat all"), "");
 });
+
+Deno.test("line endings are kept per line, not decided for the whole file", () => {
+  // One CRLF line in a Unix file used to turn every line into CRLF.
+  const mixed = "a\nb\r\nc\nd\n";
+  const r = replaceIn(mixed, "c\n", "C1\nC2\n");
+  assert(r.ok);
+  assertEquals(r.content, "a\nb\r\nC1\nC2\nd\n");
+
+  // An edit on a CRLF line writes CRLF, and leaves the LF lines alone.
+  const r2 = replaceIn(mixed, "b\n", "B1\nB2\n");
+  assert(r2.ok);
+  assertEquals(r2.content, "a\nB1\r\nB2\r\nc\nd\n");
+
+  // A whole-CRLF file stays whole-CRLF.
+  const r3 = replaceIn("x\r\ny\r\nz", "y", "Y1\nY2");
+  assert(r3.ok);
+  assertEquals(r3.content, "x\r\nY1\r\nY2\r\nz");
+});

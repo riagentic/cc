@@ -135,7 +135,8 @@ export const catalog = cell("catalog", {
     async refresh(s: CatalogState) {
       const project = activeProject();
       // No project yet: the user-scope halves are still real and still worth
-      // showing, so this scans against home rather than showing nothing.
+      // showing. `""` asks for those alone — the server skips every project
+      // file rather than resolving it against the app's own directory.
       const root = project?.path ?? "";
       s.loading = true;
       try {

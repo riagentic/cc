@@ -26,16 +26,24 @@ import { basename, dirname, join, normalize, relative } from "@std/path";
 import {
   allowedTools,
   clip,
+  commandHeads,
+  CONFIG_SHOWN,
   emptyResult,
   harnessNoteIn,
+  HIDDEN_DIRS,
+  HIDDEN_FILES,
   isCloudModel,
   isUnreachable,
   mayLeaveUnasked,
   parseTodos,
   safePattern,
+  sanitizeToolOutput,
+  secretPath,
+  stripEscapes,
   tierOf,
   TOOL_NAMES,
   toolBudget,
+  wireId,
 } from "../lib/agent.ts";
 import type { LookEnv, WireMsg } from "../lib/agent.ts";
 import { replaceIn, snippet } from "../lib/replace.ts";
@@ -57,10 +65,12 @@ import {
 } from "../lib/history.ts";
 import type {
   EngineProbe,
+  LocalCapability,
   LocalEngine,
   LocalMode,
   LocalMsg,
   LocalPermission,
+  LocalRunAs,
   PromptEnv,
 } from "../type/local.ts";
 
@@ -517,9 +527,6 @@ const STREAM_FIRST_MS = () => tunable("CC_STREAM_FIRST_MS", 900_000);
  */
 export const turnMs = (): number => tunable("CC_TURN_MS", 20 * 60_000);
 
-/** A watchdog nobody can wait a real minute for in a test is a watchdog with
- *  no test — these are env-tunable for exactly that reason, defaults
- *  unchanged in real runs. */
 /**
  * Tokens of thinking a reply may spend before it has to act — or `undefined`
  * for no cap (`CC_THINK_BUDGET=0`; a number there is a fixed cap).
@@ -654,6 +661,9 @@ function noteTimings(req: ChatRequest, t: ReplyTimings): void {
   });
 }
 
+/** A watchdog nobody can wait a real minute for in a test is a watchdog with
+ *  no test — these are env-tunable for exactly that reason, defaults
+ *  unchanged in real runs. */
 function tunable(name: string, fallback: number): number {
   const v = Number(Deno.env.get(name));
   return Number.isFinite(v) && v > 0 ? v : fallback;
@@ -846,10 +856,10 @@ export function endRun(key: string, signal: AbortSignal): void {
 
 /** Stop one conversation's run. Safe when idle. `early`: a turn is known to
  *  be starting, so a Stop that finds no run yet is kept for it — and only
- *  then; one recorded with no turn coming would cut the NEXT turn short. */
-/** Ends the run, and says whether there was one to end — a "working" flag with
- *  no run behind it is a lost write or a throw in the turn's prologue, and the
- *  Stop button is what has to clean it up. */
+ *  then; one recorded with no turn coming would cut the NEXT turn short.
+ *  Says whether there was a run to end — a "working" flag with no run behind
+ *  it is a lost write or a throw in the turn's prologue, and the Stop button
+ *  is what has to clean it up. */
 export function stopRun(key: string, early = false): boolean {
   const run = RUNNING.get(key);
   if (run) run.abort();
@@ -924,12 +934,130 @@ export function answerApproval(
 const INSTRUCTION_FILES = ["AGENTS.md", "CLAUDE.md", "CONTEXT.md"];
 
 /**
- * Everything the system prompt says about the project: date, OS, git state,
- * top-level entries, and the project's own instructions for agents — each
- * sized to the window. Gathered once per conversation (see `local.ts`), so
- * none of it costs a request, and all of it is best-effort: a missing git or
- * an unreadable file leaves that line out, never the turn.
+ * Per-conversation memory of which directories' instruction files the model
+ * has already been shown. The root's file rides the system prompt; a file in a
+ * subdirectory is discovered as the agent navigates there and appended to the
+ * *tool result* that took it there — never the system prompt, so the cached
+ * prompt prefix stays byte-identical. A monorepo with `packages/api/AGENTS.md`
+ * then gets that package's rules at the moment it starts working in it, instead
+ * of never.
+ *
+ * The digest set means the same content reached through a symlink or a copy is
+ * never sent twice.
  */
+type HintState = { dirs: Set<string>; digests: Set<string> };
+const HINTS = new Map<string, HintState>();
+
+/** Forget a conversation's discovered-hint state — Clear and tab close both
+ *  drop everything the conversation held. */
+export function forgetHints(key: string): void {
+  HINTS.delete(key);
+}
+
+/**
+ * Directories a tool call touches, as real paths inside the project: the
+ * `path`/`file_path`/`dir` argument's directory and its ancestors (so reading
+ * `app/src/main.ts` still finds `app/AGENTS.md`), and any path-like token in a
+ * `sh` command — including the operand of a leading `cd`. Bounded, deduped,
+ * and a miss never throws.
+ */
+async function touchedDirs(
+  root: string,
+  name: string,
+  args: Record<string, unknown>,
+): Promise<string[]> {
+  const cands = new Set<string>();
+  const real = await Deno.realPath(root).catch(() => root);
+  const consider = async (raw: unknown) => {
+    if (typeof raw !== "string" || raw.trim() === "") return;
+    // A token carrying a fragment or a URL is not a directory here.
+    if (/^https?:|^git@/.test(raw) || raw.includes("::")) return;
+    // Only directories inside the project have instruction files to offer,
+    // so the boundary's own exceptions (a declared dependency, found by
+    // walking the project) are not asked about: `2>/dev/null` in a command
+    // used to cost a fresh walk of the whole project.
+    const abs = await realish(
+      normalize(raw.startsWith("/") ? raw : join(real, raw)),
+    );
+    if (!abs.startsWith(real + "/")) return;
+    const info = await Deno.stat(abs).catch(() => null);
+    let dir = info && info.isDirectory ? abs : dirname(abs);
+    for (let up = 0; up < 6; up++) {
+      if (dir === real || !dir.startsWith(real + "/")) break;
+      cands.add(dir);
+      dir = dirname(dir);
+    }
+  };
+  await consider(args.path ?? args.file_path ?? args.dir);
+  if (name === "sh" && typeof args.cmd === "string") {
+    for (const token of String(args.cmd).split(/[\s;&|()<>]+/)) {
+      if (
+        token.startsWith("-") || (!token.includes("/") && !token.includes("."))
+      ) {
+        continue;
+      }
+      await consider(token);
+    }
+  }
+  return [...cands];
+}
+
+/**
+ * The instruction files for directories just entered, as text to append to the
+ * tool result — `""` when there is nothing new. Capped to the same size as the
+ * root's instructions, and only ever files *inside* the project.
+ */
+export async function subdirHints(
+  key: string | undefined,
+  root: string,
+  name: string,
+  args: Record<string, unknown>,
+  max: number,
+): Promise<string> {
+  if (!key) return "";
+  let state = HINTS.get(key);
+  if (!state) {
+    state = { dirs: new Set(), digests: new Set() };
+    HINTS.set(key, state);
+  }
+  const real = await Deno.realPath(root).catch(() => root);
+  state.dirs.add(real);
+  const out: string[] = [];
+  for (const dir of await touchedDirs(real, name, args)) {
+    if (state.dirs.has(dir)) continue;
+    state.dirs.add(dir);
+    for (const file of INSTRUCTION_FILES) {
+      const path = join(dir, file);
+      const info = await Deno.stat(path).catch(() => null);
+      if (!info?.isFile) continue;
+      let text: string;
+      try {
+        text = (await readCapped(path)).text.trim();
+      } catch {
+        continue;
+      }
+      if (!text) break;
+      const digest = await crypto.subtle.digest(
+        "SHA-256",
+        new TextEncoder().encode(text),
+      ).then((b) =>
+        [...new Uint8Array(b)].map((x) => x.toString(16).padStart(2, "0")).join(
+          "",
+        )
+      );
+      if (state.digests.has(digest)) break;
+      state.digests.add(digest);
+      out.push(
+        `[Project instructions discovered at ${
+          rel(real, path)
+        } — follow these in this directory]\n${clip(text, max, 0.6)}`,
+      );
+      break; // first match wins per directory
+    }
+  }
+  return out.join("\n\n");
+}
+
 /** Folder names that hold a project's — or a dependency's — documentation. */
 const DOC_DIRS = new Set(["docs", "doc", "documentation"]);
 
@@ -1038,6 +1166,29 @@ export async function frameworkDocs(
   return null;
 }
 
+/**
+ * What every git this app runs itself is started with. The project's
+ * `.git` is writable from inside the sandbox, and the app's own git runs
+ * outside it, as the user: a `core.fsmonitor` or a hook planted there would
+ * run the moment the prompt's facts were gathered. Nothing that ends up
+ * executing config is used (see `projectEnv`), and these switch off the two
+ * that any command would reach.
+ */
+export const GIT_SAFE: readonly string[] = [
+  "-c",
+  "core.fsmonitor=false",
+  "-c",
+  "core.hooksPath=/dev/null",
+  "--no-optional-locks",
+];
+
+/**
+ * Everything the system prompt says about the project: date, OS, git state,
+ * top-level entries, and the project's own instructions for agents — each
+ * sized to the window. Gathered once per conversation (see `local.ts`), so
+ * none of it costs a request, and all of it is best-effort: a missing git or
+ * an unreadable file leaves that line out, never the turn.
+ */
 export async function projectEnv(cwd: string, ctx: number): Promise<PromptEnv> {
   const tier = tierOf(ctx);
   const env: PromptEnv = {
@@ -1048,7 +1199,7 @@ export async function projectEnv(cwd: string, ctx: number): Promise<PromptEnv> {
   try {
     const run = async (args: string[]) => {
       const out = await new Deno.Command("git", {
-        args: ["-C", cwd, ...args],
+        args: [...GIT_SAFE, "-C", cwd, ...args],
         stdin: "null",
         stdout: "piped",
         stderr: "null",
@@ -1058,8 +1209,14 @@ export async function projectEnv(cwd: string, ctx: number): Promise<PromptEnv> {
     };
     const branch = await run(["rev-parse", "--abbrev-ref", "HEAD"]);
     if (branch !== null) {
-      const status = await run(["status", "--porcelain"]);
-      const dirty = status ? status.split("\n").filter(Boolean).length : 0;
+      // Not `git status`: it runs the clean filter of any file whose stat
+      // changed, and `filter.*.clean` is in a config the box can write.
+      // Changed-by-stat and untracked compare no contents, so run nothing.
+      const changed = await run(["diff-files", "--name-only"]);
+      const fresh = await run(["ls-files", "--others", "--exclude-standard"]);
+      const dirty = new Set(
+        `${changed ?? ""}\n${fresh ?? ""}`.split("\n").filter(Boolean),
+      ).size;
       env.git = `branch ${branch}, ${
         dirty ? `${dirty} uncommitted change${dirty === 1 ? "" : "s"}` : "clean"
       }`;
@@ -1196,6 +1353,25 @@ async function toolchainOf(cwd: string): Promise<string> {
  *  60s cap killed exactly the verification the prompt asks for. */
 const SH_DEFAULT_MS = () => tunable("CC_SH_TIMEOUT_MS", 120_000);
 const SH_MAX_MS = 600_000;
+/**
+ * The limit a command runs under, from the `timeout` a call asked for.
+ * Seconds, as the schema says — a model that thinks in milliseconds sends
+ * something no one means as seconds (over an hour), and that is read as
+ * milliseconds. `capped` when the ask was cut to `maxMs`, so the note that
+ * the command was killed can say "the most there is", not "ask for more".
+ */
+export function shTimeout(
+  asked: number,
+  defMs: number,
+  maxMs: number,
+): { ms: number; capped: boolean } {
+  if (!(asked > 0)) return { ms: Math.min(defMs, maxMs), capped: false };
+  const ms = asked > 3_600 ? asked : asked * 1_000;
+  return ms > maxMs
+    ? { ms: maxMs, capped: true }
+    : { ms: Math.max(Math.round(ms), 1), capped: false };
+}
+
 /** Bytes of command output kept per stream. Enforced while reading — a
  *  `yes`-style firehose costs this much memory, not everything until the
  *  timeout. */
@@ -1377,7 +1553,7 @@ async function inside(
     convTmp !== "" && forRead && p.startsWith(convTmp + "/") &&
     !p.slice(convTmp.length).includes("..")
   ) {
-    return p;
+    return await inTemp(convTmp, p);
   }
   // …or by the name the sandbox gives it (only the sandbox renames /tmp: an
   // account's temp is a real folder under it, by its real name).
@@ -1386,66 +1562,92 @@ async function inside(
     convTmp.startsWith(tmpRoot() + "/") &&
     !p.slice(5).includes("..") && p.length > 5
   ) {
-    return join(convTmp, p.slice(5));
+    return await inTemp(convTmp, join(convTmp, p.slice(5)));
   }
   const root = await Deno.realPath(cwd);
   const lexical = normalize(p.startsWith("/") ? p : join(cwd, p || "."));
   const within = (a: string, base: string) =>
     a === base || a.startsWith(base + "/");
-  let existing = lexical;
+  const abs = await realish(lexical);
+  if (within(abs, root)) return abs;
+  const written = within(lexical, normalize(cwd)) || within(lexical, root);
+  if (!written) {
+    // Written as an absolute path, but landing in a dependency this project
+    // declares: the same bytes the in-project spelling reads, so refusing it
+    // teaches nothing except that spellings are a guessing game. A live
+    // session, refused `clock/dep/aio/...`, went for
+    // `/home/dev/.local/lib/aio-versions/...` next and was refused again.
+    if (forRead && !isSecret(abs) && await declaredDep(root, abs)) return abs;
+    throw new Error(
+      `Path is outside the project: ${p} — the project is ${root}; use a` +
+        ` path inside it.`,
+    );
+  }
+  if (forRead && !isSecret(abs)) {
+    if (!isPrivateArea(abs)) return abs;
+    // Private by its path, but the project's own configuration says this is
+    // part of how it is built. See `declaredDeps`.
+    if (await declaredDep(root, abs)) return abs;
+  }
+  // Writing into a framework the project depends on is the one refusal a
+  // model has to be told the way round: a live session hit a bug in it and
+  // went to patch the framework's own export list.
+  const framework = !forRead && await declaredDep(root, abs);
+  throw new Error(
+    `${p} is a link that leads outside the project (to ${abs}) — ` +
+      (forRead
+        ? "that location is private and cannot be read."
+        : framework
+        ? "it is the framework this project depends on, shared by every" +
+          " app on that version, and it is not yours to change. Work" +
+          " around the problem in your own code (another API, a simpler" +
+          " approach), or tell the user what in the framework blocks you."
+        : "reading through it is fine, writing through it is not."),
+  );
+}
+
+/** `p` by its real name: the deepest part of it that exists is resolved —
+ *  links and all — and the rest is kept as written. */
+async function realish(p: string): Promise<string> {
+  let existing = p;
   let tail = "";
   for (;;) {
-    let real: string;
     try {
-      real = await Deno.realPath(existing);
+      const real = await Deno.realPath(existing);
+      return tail ? join(real, tail) : real;
     } catch {
       const parent = dirname(existing);
-      if (parent === existing) {
-        throw new Error(`Path is outside the project: ${p}`);
-      }
+      if (parent === existing) return p;
       tail = tail
         ? join(existing.slice(parent.length + 1), tail)
         : existing.slice(parent.length + 1);
       existing = parent;
-      continue;
     }
-    const abs = tail ? join(real, tail) : real;
-    if (within(abs, root)) return abs;
-    const written = within(lexical, normalize(cwd)) || within(lexical, root);
-    if (!written) {
-      // Written as an absolute path, but landing in a dependency this project
-      // declares: the same bytes the in-project spelling reads, so refusing it
-      // teaches nothing except that spellings are a guessing game. A live
-      // session, refused `clock/dep/aio/...`, went for
-      // `/home/dev/.local/lib/aio-versions/...` next and was refused again.
-      if (forRead && !isSecret(abs) && await declaredDep(root, abs)) return abs;
-      throw new Error(
-        `Path is outside the project: ${p} — the project is ${root}; use a` +
-          ` path inside it.`,
-      );
-    }
-    if (forRead && !isSecret(abs)) {
-      if (!isPrivateArea(abs)) return abs;
-      // Private by its path, but the project's own configuration says this is
-      // part of how it is built. See `declaredDeps`.
-      if (await declaredDep(root, abs)) return abs;
-    }
-    // Writing into a framework the project depends on is the one refusal a
-    // model has to be told the way round: a live session hit a bug in it and
-    // went to patch the framework's own export list.
-    const framework = !forRead && await declaredDep(root, abs);
-    throw new Error(
-      `${p} is a link that leads outside the project (to ${abs}) — ` +
-        (forRead
-          ? "that location is private and cannot be read."
-          : framework
-          ? "it is the framework this project depends on, shared by every" +
-            " app on that version, and it is not yours to change. Work" +
-            " around the problem in your own code (another API, a simpler" +
-            " approach), or tell the user what in the framework blocks you."
-          : "reading through it is fine, writing through it is not."),
-    );
   }
+}
+
+/**
+ * A path in this conversation's temp, by its real name — or a refusal.
+ *
+ * The temp is the model's own to write, so a link in it is the model's too:
+ * `ln -s ~/.ssh/id_ed25519 /tmp/k` and a `read` of `/tmp/k` must not be the
+ * way round the boundary — nor, when commands run as the agent account, a
+ * way for that account to read this user's files through this app. So the
+ * path is resolved and has to stay in the temp, and a credential's name is
+ * refused there as it is anywhere.
+ */
+async function inTemp(convTmp: string, p: string): Promise<string> {
+  const base = await Deno.realPath(convTmp).catch(() => normalize(convTmp));
+  const abs = await realish(normalize(p));
+  if (
+    (abs === base || abs.startsWith(base + "/")) && !secretPath(basename(abs))
+  ) {
+    return abs;
+  }
+  throw new Error(
+    `${p} leads out of this conversation's temp (to ${abs}) — that location` +
+      ` is private and cannot be read.`,
+  );
 }
 
 /**
@@ -1474,9 +1676,17 @@ async function declaredDep(root: string, abs: string): Promise<boolean> {
   // six times over the next ten seconds, because the walk it was refused by
   // was taken before the app existed. It fell back to `sh cat | head`, and
   // read the framework's docs in 150-line slices from then on.
-  return under(await projectDeps(root)) ||
-    under(await projectDeps(root, true));
+  if (under(await projectDeps(root))) return true;
+  // At most one fresh walk a second per project: a command that names ten
+  // paths outside it is one question about the disk, not ten walks.
+  const last = FRESH_AT.get(root) ?? 0;
+  if (Date.now() - last < FRESH_EVERY_MS) return false;
+  FRESH_AT.set(root, Date.now());
+  return under(await projectDeps(root, true));
 }
+
+const FRESH_AT = new Map<string, number>();
+const FRESH_EVERY_MS = 1_000;
 
 /**
  * Every dependency link this project declares, from every config inside it.
@@ -1622,19 +1832,11 @@ async function depRoots(root: string, fresh = false): Promise<DepLink[]> {
   return list;
 }
 
-/** Places no tool reads, whatever path leads there: the same credential
- *  stores the sandbox hides, this app's own data, and the places apps keep
- *  their tokens (`~/.config`, flatpak's `~/.var`) — a link planted in a
- *  cloned repo must not become a way to read them. */
-function isSecret(abs: string): boolean {
-  if (SECRET_NAMES.test(basename(abs))) return true;
-  const home = Deno.env.get("HOME") ?? "";
-  if (!home) return false;
-  return [...HIDDEN_DIRS, ...HIDDEN_FILES, ".config", ".var"].some((d) => {
-    const p = join(home, d);
-    return abs === p || abs.startsWith(p + "/");
-  });
-}
+/** Places no tool reads, whatever path leads there: the same places the
+ *  sandbox hides — one predicate, `secretPath` — so a link planted in a
+ *  cloned repo is not a way to read them. */
+const isSecret = (abs: string): boolean =>
+  secretPath(abs, Deno.env.get("HOME") ?? "");
 
 /**
  * Places a link out of the project may not lead, even for reading.
@@ -1658,15 +1860,6 @@ function isPrivateArea(abs: string): boolean {
   }
   return false;
 }
-
-/** Files that are credentials by their name alone. This applies only where a
- *  path has already left the project — a link out of it, another checkout,
- *  another user's home — because reading another project's `.env` is how one
- *  conversation's transcript ends up holding a key that belongs to a different
- *  piece of work entirely. Inside the project the agent reads what the project
- *  contains; that is the job. */
-const SECRET_NAMES =
-  /^(\.env(\..+)?|\.netrc|\.npmrc|\.pypirc|\.git-credentials|credentials|id_[a-z0-9]+|.*\.pem|.*\.p12|.*\.pfx|.*\.kdbx|.*\.key)$/i;
 
 const str = (v: unknown): string => (typeof v === "string" ? v : "");
 const num = (v: unknown, d: number): number =>
@@ -2130,6 +2323,7 @@ export function forgetFiles(key: string): void {
   FULL.delete(key);
   SH_RUNS.delete(key);
   UNDO.delete(key);
+  forgetHints(key);
   stopJobs(key);
   void dropConvDirs(key);
 }
@@ -2145,6 +2339,8 @@ type Ctx = {
   /** Characters the result may take (from the window). */
   budget: number;
   permission: LocalPermission;
+  /** Who shell runs as — forwarded into projectAccount. */
+  runAs?: LocalRunAs;
   /** Sandboxed commands may use the network (the conversation's setting). */
   net: boolean;
   /** The user approved THIS command to run outside the sandbox. */
@@ -2782,52 +2978,6 @@ export function scrubbedEnv(
   return out;
 }
 
-/** Directories under $HOME a sandboxed command may not see at all, and files
- *  it may not read: credential stores, browser profiles, shell histories, and
- *  this app's own data (the transcripts of every other conversation). */
-const HIDDEN_DIRS = [
-  ".ssh",
-  ".gnupg",
-  ".aws",
-  ".azure",
-  ".kube",
-  ".docker",
-  ".password-store",
-  ".mozilla",
-  ".claude",
-  ".claude-control",
-  ".config/gcloud",
-  ".config/gh",
-  ".config/google-chrome",
-  ".config/chromium",
-  ".config/BraveSoftware",
-  ".local/share/keyrings",
-  ".pki",
-  ".thunderbird",
-  ".var",
-  ".config/op",
-  ".config/Slack",
-  ".config/discord",
-  ".config/Signal",
-];
-const HIDDEN_FILES = [
-  // The keys to the user's own screen: with these a command inside the box
-  // could open a window on the real display, read the clipboard, or watch
-  // what is typed — the one wall the box is most obviously supposed to be.
-  ".Xauthority",
-  ".ICEauthority",
-  ".netrc",
-  ".git-credentials",
-  // The file, not the folder: hiding all of `.config/git` would take the
-  // user's own name and email with it, and a commit made in the box would
-  // then be signed by nobody.
-  ".config/git/credentials",
-  ".npmrc",
-  ".pypirc",
-  ".bash_history",
-  ".zsh_history",
-  ".python_history",
-];
 /** Caches a build or test legitimately writes — regenerable by definition, so
  *  letting a sandboxed command write them costs nothing worth protecting.
  *  Download caches only: directories holding tools the user RUNS (`~/.deno/
@@ -2961,9 +3111,16 @@ const ACCOUNT_DIRS = new Map<string, { at: number; ok: Promise<boolean> }>();
  * Where the project lives is the choice, made once by whoever put it there: a
  * project in the account's reach is the agent's to run as itself; the user's
  * own projects (under a home the account cannot enter) keep the old rules.
- * The permission mode only decides who is asked.
+ * The permission mode only decides who is asked. `runAs` narrows it:
+ *  - `user`  — never the agent account
+ *  - `agent` — agent account when set up and the project is reachable; else null
+ *  - `auto`  — agent when reachable, else null (same as before)
  */
-export async function projectAccount(cwd: string): Promise<Account | null> {
+export async function projectAccount(
+  cwd: string,
+  runAs: LocalRunAs = "auto",
+): Promise<Account | null> {
+  if (runAs === "user") return null;
   const a = await agentAccount();
   if (!a) return null;
   const root = await Deno.realPath(cwd).catch(() => null);
@@ -2974,7 +3131,9 @@ export async function projectAccount(cwd: string): Promise<Account | null> {
     hit = { at: Date.now(), ok: reachable(a, root) };
     ACCOUNT_DIRS.set(k, hit);
   }
-  return await hit.ok ? a : null;
+  const ok = await hit.ok;
+  if (runAs === "agent" && !ok) return null;
+  return ok ? a : null;
 }
 
 async function reachable(a: Account, root: string): Promise<boolean> {
@@ -3073,35 +3232,24 @@ const APP_ID = "claude-control";
  *  `~/.<id>`) rather than imported: `aio/server` pulls the whole runtime in
  *  with it, and loading that from a cell's server module broke other cells'
  *  actions in the UI harness. `CC_TMP_ROOT` points it elsewhere for tests. */
-const tmpRoot = (): string => {
-  const override = Deno.env.get("CC_TMP_ROOT");
-  if (override) return override;
+const tmpRoot = (): string =>
+  Deno.env.get("CC_TMP_ROOT") || join(appHome(), "tmp");
+
+/** The app's home, by aio's rule — see `tmpRoot`. */
+const appHome = (): string => {
   const apps = Deno.env.get("AIO_APPS_DIR");
-  const home = Deno.env.get("HOME") ?? "/tmp";
-  return join(apps ? join(apps, APP_ID) : join(home, `.${APP_ID}`), "tmp");
+  return apps
+    ? join(apps, APP_ID)
+    : join(Deno.env.get("HOME") ?? "/tmp", `.${APP_ID}`);
 };
 
 /** A key as a directory name: conversation keys are UUIDs, but nothing from
  *  outside becomes a path without being checked. */
 const dirName = (key: string): string =>
-  /^[A-Za-z0-9_-]{1,80}$/.test(key) ? key : `k${wireIdOf(key)}`;
-const wireIdOf = (key: string): string => {
-  let h = 2166136261;
-  for (let i = 0; i < key.length; i++) {
-    h = Math.imul(h ^ key.charCodeAt(i), 16777619);
-  }
-  return (h >>> 0).toString(36);
-};
+  /^[A-Za-z0-9_-]{1,80}$/.test(key) ? key : `k${wireId(key)}`;
 
 let SWEPT = false;
 
-/**
- * One conversation's temp: `tmp/` (the sandbox's `/tmp`, and `TMPDIR`
- * outside it) and `run/` (the sandbox's `XDG_RUNTIME_DIR`). Kept for the
- * life of the conversation, so a file made in one command is there in the
- * next — a fresh `/tmp` per command cost one session forty rounds of
- * restarting an app to look at a screenshot it had just taken.
- */
 /** Where this conversation's scratch lives, without creating anything — the
  *  read tools ask on every path and must not make directories to answer. */
 function convTmpPath(key: string): string {
@@ -3111,20 +3259,72 @@ function convTmpPath(key: string): string {
 /** What the shell will expand a look's words to, outside the sandbox: the
  *  home directory, the plain variables whose values are no secret, and this
  *  conversation's own scratch — see `mayLeaveUnasked`. */
-export function lookEnv(key: string): LookEnv {
+export async function lookEnv(
+  key: string,
+  cwd = "",
+  /** The command about to be judged: its programs are looked up on `PATH`
+   *  here, so the check itself stays synchronous and pure. */
+  cmd = "",
+): Promise<LookEnv> {
   const env = scrubbedEnv();
   const vars = Object.fromEntries(
     ["USER", "LOGNAME", "PWD", "XDG_RUNTIME_DIR", "SHELL", "LANG"]
       .filter((k) => env[k] !== undefined).map((k) => [k, env[k]]),
   );
+  const home = Deno.env.get("HOME") ?? "";
+  const real = (p: string) => Deno.realPath(p).catch(() => p);
+  const tmp = convTmpPath(key);
+  const progs = [...new Set((commandHeads(cmd) ?? []).map((h) => h.prog))];
+  const found = new Map(
+    await Promise.all(
+      progs.map(async (p) =>
+        [p, await whichIn(p, env.PATH ?? "", cwd)] as const
+      ),
+    ),
+  );
   return {
-    home: Deno.env.get("HOME") ?? "",
-    vars: { ...vars, TMPDIR: convTmpPath(key) },
-    own: [convTmpPath(key)],
+    home,
+    vars: { ...vars, TMPDIR: tmp },
+    own: [tmp],
     hidden: [tmpRoot()],
+    where: (prog) => found.get(prog) ?? null,
+    // What the box can write (`sandboxArgs`): the project, the conversation's
+    // temp, and the download caches.
+    writable: await Promise.all([
+      ...(cwd ? [real(cwd)] : []),
+      real(join(tmpRoot(), dirName(key))),
+      real(tmp),
+      ...(home ? CACHE_DIRS.map((d) => real(join(home, d))) : []),
+    ]),
   };
 }
 
+/** Where a shell with this `PATH` finds `prog` — its real path, or `null`
+ *  (a builtin, or nothing). An empty or relative entry is searched from
+ *  `cwd`, which is how the shell reads it. */
+export async function whichIn(
+  prog: string,
+  path: string,
+  cwd: string,
+): Promise<string | null> {
+  if (prog === "" || prog.includes("/")) return null;
+  for (const dir of path.split(":")) {
+    const at = join(dir.startsWith("/") ? dir : join(cwd || ".", dir), prog);
+    const st = await Deno.stat(at).catch(() => null);
+    if (st?.isFile && ((st.mode ?? 0o111) & 0o111) !== 0) {
+      return await Deno.realPath(at).catch(() => at);
+    }
+  }
+  return null;
+}
+
+/**
+ * One conversation's temp: `tmp/` (the sandbox's `/tmp`, and `TMPDIR`
+ * outside it) and `run/` (the sandbox's `XDG_RUNTIME_DIR`). Kept for the
+ * life of the conversation, so a file made in one command is there in the
+ * next — a fresh `/tmp` per command cost one session forty rounds of
+ * restarting an app to look at a screenshot it had just taken.
+ */
 async function convDirs(key: string): Promise<{ tmp: string; run: string }> {
   const base = join(tmpRoot(), dirName(key));
   const tmp = join(base, "tmp");
@@ -3332,26 +3532,53 @@ async function procStart(pid: number): Promise<number | null> {
 
 /** Live (not zombie) processes in a process group. `[]` where there is no
  *  /proc to ask. */
-async function groupMembers(pgid: number): Promise<number[]> {
-  const found: number[] = [];
-  try {
-    for await (const e of Deno.readDir("/proc")) {
-      if (!/^\d+$/.test(e.name)) continue;
-      const stat = await Deno.readTextFile(`/proc/${e.name}/stat`)
-        .catch(() => "");
-      const f = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
-      if (f[0] !== "Z" && Number(f[2]) === pgid) found.push(Number(e.name));
-    }
-  } catch { /* no /proc */ }
-  return found;
+async function groupMembers(pgid: number, maxAgeMs = 0): Promise<number[]> {
+  return (await processGroups(maxAgeMs)).get(pgid) ?? [];
 }
+
+/** Every live process by its group, from one walk of /proc — shared with
+ *  whoever asks while it is under `maxAgeMs` old. Only the job watchers
+ *  share (every job's asks every few seconds, and a walk is a read per
+ *  process on the machine); a command that just returned needs a walk taken
+ *  after it did. */
+function processGroups(maxAgeMs: number): Promise<Map<number, number[]>> {
+  if (GROUPS && Date.now() - GROUPS.at < maxAgeMs) return GROUPS.got;
+  const got = (async () => {
+    const groups = new Map<number, number[]>();
+    try {
+      for await (const e of Deno.readDir("/proc")) {
+        if (!/^\d+$/.test(e.name)) continue;
+        const f = statFields(
+          await Deno.readTextFile(`/proc/${e.name}/stat`).catch(() => ""),
+        );
+        if (f[0] === "Z" || f[2] === undefined) continue;
+        const g = Number(f[2]);
+        groups.set(g, [...(groups.get(g) ?? []), Number(e.name)]);
+      }
+    } catch { /* no /proc */ }
+    return groups;
+  })();
+  GROUPS = { at: Date.now(), got };
+  return got;
+}
+let GROUPS: { at: number; got: Promise<Map<number, number[]>> } | null = null;
+
+/** The fields of a `/proc/<pid>/stat` after the program's own name, which
+ *  may itself contain spaces: state, ppid, pgrp, … */
+const statFields = (stat: string): string[] =>
+  stat ? stat.slice(stat.lastIndexOf(")") + 2).split(" ") : [];
 
 /** A job's first process may be gone while what it started runs on — `am
  *  start`, `docker compose up -d`, `cmd &`. Still running is anything left in
- *  its scope, or in its process group. */
-async function jobAlive(j: Job): Promise<boolean> {
+ *  its scope, or in its process group. The group's leader still in it says
+ *  so with one read; only once it has gone is the rest looked for. */
+async function jobAlive(j: Job, maxAgeMs = 0): Promise<boolean> {
   if (j.scope) return await scopeActive(j.scope.account, j.scope.unit);
-  return (await groupMembers(j.pid)).length > 0;
+  const lead = statFields(
+    await Deno.readTextFile(`/proc/${j.pid}/stat`).catch(() => ""),
+  );
+  if (lead.length && lead[0] !== "Z" && Number(lead[2]) === j.pid) return true;
+  return (await groupMembers(j.pid, maxAgeMs)).length > 0;
 }
 
 function endJob(key: string, j: Job, code: number): void {
@@ -3366,7 +3593,7 @@ function endJob(key: string, j: Job, code: number): void {
 function followJob(key: string, j: Job): void {
   const tick = async () => {
     if (j.code !== undefined) return;
-    if (await jobAlive(j)) setTimeout(tick, 3_000);
+    if (await jobAlive(j, 1_000)) setTimeout(tick, 3_000);
     else endJob(key, j, j.first ?? 0);
   };
   setTimeout(tick, 3_000);
@@ -3462,7 +3689,7 @@ async function reapJobs(): Promise<void> {
 
 /* ── the way out ──────────────────────────────────────────────────────────── */
 
-let guard: { sigint: () => void; sigterm: () => void } | null = null;
+let guarded = false;
 
 /** No async on the way out of the process: the group, at once. */
 const onUnload = () => {
@@ -3487,35 +3714,30 @@ const onUnload = () => {
   }
 };
 
-/** Held while any job is running, and only then: taking over SIGINT means
- *  nothing else will handle it, so it is given back as soon as there is
- *  nothing to protect. */
+/**
+ * Held while any job is running: whatever way the process ends, the jobs'
+ * process groups end with it.
+ *
+ * `unload`, not signal listeners. aio owns SIGINT/SIGTERM for the whole
+ * process (`installProcessSignals`): its handler runs every cell's
+ * `onDestroy` — ours stops the jobs — writes the final snapshots, and only
+ * then calls `Deno.exit`, which fires `unload`. A listener of our own that
+ * called `Deno.exit` straight away ended the process in the middle of that,
+ * before the transcripts were written.
+ */
 function installExitGuard(): void {
-  if (guard) return;
-  const bye = (code: number) => () => {
-    stopAllJobs();
-    onUnload();
-    Deno.exit(code);
-  };
-  guard = { sigint: bye(130), sigterm: bye(143) };
-  try {
-    Deno.addSignalListener("SIGINT", guard.sigint);
-    Deno.addSignalListener("SIGTERM", guard.sigterm);
-  } catch { /* no signals on this platform */ }
+  if (guarded) return;
+  guarded = true;
   globalThis.addEventListener("unload", onUnload);
 }
 
 function releaseExitGuardIfIdle(): void {
-  if (!guard) return;
+  if (!guarded) return;
   for (const jobs of JOBS.values()) {
     for (const j of jobs.values()) if (j.code === undefined) return;
   }
-  try {
-    Deno.removeSignalListener("SIGINT", guard.sigint);
-    Deno.removeSignalListener("SIGTERM", guard.sigterm);
-  } catch { /* never registered */ }
   globalThis.removeEventListener("unload", onUnload);
-  guard = null;
+  guarded = false;
 }
 
 /** Copy a stream to a file, keeping at most `cap` bytes and draining the
@@ -3669,7 +3891,7 @@ async function startJob(
       ` the user is to check, start it without timeout; stop-job ends it.]`
     : "";
   return `${state} First output:\n${
-    clip(stripAnsi(first).trim() || "(nothing yet)", 1_500, 0.3)
+    clip(stripEscapes(first).trim() || "(nothing yet)", 1_500, 0.3)
   }${boxedNote}${outsideNote}${deadlineNote}\nIts output keeps going to ${shown} — read it with: cat ${shown}.` +
     ` Stop it with the command "stop-job ${id}". It keeps running until` +
     ` stopped or until the conversation is cleared.`;
@@ -3871,6 +4093,19 @@ async function sandboxArgs(
       const p = join(home, d);
       if (await exists(p, true)) args.push("--bind", p, p);
     }
+    // `~/.config` goes whole and the few entries tools need come back
+    // read-only — see `CONFIG_SHOWN`. Bind sources are the host's, so they
+    // are still there under the fresh tmpfs.
+    const config = join(home, ".config");
+    if (await exists(config, true)) {
+      args.push("--tmpfs", config);
+      for (const name of CONFIG_SHOWN) {
+        const p = join(config, name);
+        if (await exists(p, true) || await exists(p, false)) {
+          args.push("--ro-bind", p, p);
+        }
+      }
+    }
     for (const d of HIDDEN_DIRS) {
       const p = join(home, d);
       if (await exists(p, true)) args.push("--tmpfs", p);
@@ -3901,17 +4136,32 @@ async function sh(args: Record<string, unknown>, c: Ctx) {
   const key = c.key ?? "default";
   const handled = jobCommand(key, cmd);
   if (handled !== null) return handled;
-  // Seconds, as the schema says — but a value only a model thinking in
-  // milliseconds would send is read as milliseconds.
-  const asked = num(args.timeout, 0);
-  const limit = asked > 0
-    ? Math.min(asked > 600 ? asked : asked * 1_000, SH_MAX_MS)
-    : SH_DEFAULT_MS();
+  const { ms: limit, capped } = shTimeout(
+    num(args.timeout, 0),
+    SH_DEFAULT_MS(),
+    SH_MAX_MS,
+  );
   const root = await Deno.realPath(c.cwd);
   // A project the agent account can reach runs as that account, in every
   // permission mode: it is a whole machine of the agent's own, so there is no
   // box to put round it and nothing to leave. The mode only decides asking.
-  const account = await projectAccount(root);
+  const account = await projectAccount(root, c.runAs ?? "auto");
+  // "Run as: cc-agent" is a wall, not a preference. Quietly running as this
+  // user instead would put the command in reach of the whole home directory
+  // of somebody who asked for the opposite, so it says so and runs nothing.
+  if (!account && c.runAs === "agent") {
+    const a = await agentAccount();
+    throw new Error(
+      a
+        ? `Run as is set to the agent account (${a.user}), but that account` +
+          ` cannot reach this project, so the command was not run. Move the` +
+          ` project somewhere ${a.user} can read, or set Run as to You.`
+        : `Run as is set to the agent account, but this machine has none` +
+          ` (no cc-agent user, or CC_AGENT_USER names one that cannot be` +
+          ` used), so the command was not run. Set Run as to You, or set the` +
+          ` account up.`,
+    );
+  }
   // Otherwise unattended means sandboxed, unless the user just approved this
   // one command to run outside it (the cell asked; the model cannot say so).
   const unattended = c.permission === "dontAsk" && !c.outside;
@@ -4121,7 +4371,7 @@ async function sh(args: Record<string, unknown>, c: Ctx) {
       await Promise.all([out.done, err.done]);
     }
     // …and whatever colour a tool emits anyway is taken out.
-    const text = foldInstallNoise(stripAnsi(
+    const text = foldInstallNoise(stripEscapes(
       out.text() + (out.text() && err.text() ? "\n" : "") + err.text(),
     ));
     const trunc = out.truncated() || err.truncated()
@@ -4131,13 +4381,19 @@ async function sh(args: Record<string, unknown>, c: Ctx) {
       ? String(Math.round(limit / 100) / 10)
       : String(Math.round(limit / 1000));
     const fate = timedOut
-      ? `\n[killed after ${secs}s — pass a larger timeout, or run it with` +
-        ` background: true if it is meant to keep running]`
+      ? `\n[killed after ${secs}s — ` +
+        (capped
+          ? `the most a command may run in the foreground; run it with` +
+            ` background: true if it needs longer`
+          : `pass a larger timeout, or run it with background: true if it is` +
+            ` meant to keep running`) +
+        "]"
       : status.success
       ? ""
       : `\n[exit ${status.code}]`;
     const hit = (boxed ? sandboxHit(text, c.net) : "") + limitHit(text) +
-      (boxed && WENT_OUTSIDE.has(key) && mayLeaveUnasked(cmd, [], lookEnv(key))
+      (boxed && WENT_OUTSIDE.has(key) &&
+          mayLeaveUnasked(cmd, [], await lookEnv(key, root, cmd))
         ? BLIND_NOTE
         : "");
     // Command output keeps more of its end: the error, the failing test and
@@ -4301,12 +4557,6 @@ export function foldInstallNoise(text: string): string {
   return out.join("\n");
 }
 
-/** Terminal escape sequences (colour, cursor movement) out of tool output. */
-export const stripAnsi = (text: string): string =>
-  // The escape character is the whole point of this pattern.
-  // deno-lint-ignore no-control-regex
-  text.replace(/\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07]*(\x07|\x1b\\)/g, "");
-
 /** The result a call gets when Stop came first. It still needs one: every
  *  call in the transcript is answered, or the next request is malformed. */
 export const STOPPED_RESULT = "Not run: the user pressed Stop.";
@@ -4323,6 +4573,8 @@ export type RunOpts = {
   /** The model's window — sizes the result. */
   ctx?: number;
   permission?: LocalPermission;
+  runAs?: LocalRunAs;
+  capability?: LocalCapability;
   /** Sandboxed commands may use the network. Off unless the user allowed it. */
   net?: boolean;
   /** The user approved this one call to run outside the sandbox. */
@@ -4343,16 +4595,22 @@ export async function runTool(
   rawArgs: string,
   opts: RunOpts = {},
 ): Promise<string> {
-  if (!allowedTools(mode).includes(name)) {
+  const cap = opts.capability ?? "execute";
+  if (!allowedTools(mode, cap).includes(name)) {
     // Refusals go back to the model, so they are written for the model: a
-    // "no" it cannot act on is answered by inventing another wrong name.
-    const usable = allowedTools(mode);
+    // "no" it cannot act on is answered by inventing another wrong name — and
+    // a "no" that blames the wrong setting is answered by switching the right
+    // one back and forth. The mode would have allowed it, so the tier is why.
+    const usable = allowedTools(mode, cap);
+    const byCap = allowedTools(mode, "all").includes(name);
     const offer = usable.length
       ? ` Use one of: ${usable.join(", ")}.`
-      : ` There are no tools in this mode — answer in words.`;
-    log.warn("local", "tool refused by mode", { tool: name, mode });
+      : ` There are no tools available — answer in words.`;
+    log.warn("local", "tool refused", { tool: name, mode, cap });
     return TOOL_NAMES.includes(name)
-      ? `Error: "${name}" is not available in ${mode} mode.${offer}`
+      ? `Error: "${name}" is not available ${
+        byCap ? `at the "${cap}" capability` : `in ${mode} mode`
+      }.${offer}`
       : `Error: there is no tool called "${name}".${offer}`;
   }
   let args: Record<string, unknown>;
@@ -4378,11 +4636,28 @@ export async function runTool(
       key: opts.key,
       budget,
       permission: opts.permission ?? "ask",
+      runAs: opts.runAs ?? "auto",
       net: opts.net ?? false,
       outside: opts.outside ?? false,
       recall: opts.recall,
     });
-    return clip(result === "" ? emptyResult(name) : result, budget);
+    // Instruction files in a directory the model just entered ride the result
+    // that took it there — the cache-safe half of project awareness. Best
+    // effort: a missing file, an unreadable one or a broken path adds nothing.
+    let hint = "";
+    try {
+      hint = await subdirHints(
+        opts.key,
+        cwd,
+        name,
+        args,
+        toolBudget(opts.ctx ?? 32_768) / 4,
+      );
+    } catch { /* hints are a bonus, never the turn */ }
+    const body = sanitizeToolOutput(
+      result === "" ? emptyResult(name) : result,
+    );
+    return clip(hint ? `${body}\n\n${sanitizeToolOutput(hint)}` : body, budget);
   } catch (e) {
     const why = e instanceof Error ? e.message : String(e);
     // A refused boundary is worth a trace — a confused model or an attempted
@@ -4412,13 +4687,8 @@ export async function runTool(
 
 /** Where conversations go when they leave the app's state: the app's home,
  *  0700, beside its temp — never anywhere another user can list. */
-const historyRoot = (): string => {
-  const override = Deno.env.get("CC_HISTORY_ROOT");
-  if (override) return override;
-  const apps = Deno.env.get("AIO_APPS_DIR");
-  const home = Deno.env.get("HOME") ?? "/tmp";
-  return join(apps ? join(apps, APP_ID) : join(home, `.${APP_ID}`), "history");
-};
+const historyRoot = (): string =>
+  Deno.env.get("CC_HISTORY_ROOT") || join(appHome(), "history");
 
 /** One saved file per conversation stays under this; past it the oldest half
  *  goes. A conversation that long has said everything twice. */

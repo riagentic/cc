@@ -20,9 +20,15 @@ import { Speaker } from "./Speaker.tsx";
 import { ClearChat } from "./ClearChat.tsx";
 import { Markdown } from "./Markdown.tsx";
 import { JumpToLatest, MsgMeta, useStickToBottom } from "./thread.tsx";
-import { FindBar, findIndex, findQuery } from "./find.tsx";
+import { FindBar, findIndex, findQuery, useScrollToMatch } from "./find.tsx";
 import { hits } from "../lib/transcript.ts";
-import { dropDraft, loadDraft, saveDraft, swapDraft } from "./compose.ts";
+import {
+  dropDraft,
+  fitComposer,
+  loadDraft,
+  saveDraft,
+  swapDraft,
+} from "./compose.ts";
 import { BranchStat, ContextStat, EngineStat, ProjectStat } from "./strip.tsx";
 import {
   DEFAULT_URLS,
@@ -33,10 +39,15 @@ import {
   localSpeed,
 } from "../cell/local.ts";
 import {
+  capabilityOf,
   isCloudModel,
-  LOCAL_PERMISSIONS,
+  LOCAL_CAPABILITIES,
+  LOCAL_PACES,
+  LOCAL_RUN_AS,
+  paceOf,
   permissionOf,
   programsToAllow,
+  runAsOf,
 } from "../lib/agent.ts";
 import { activeSessionKey, workspace } from "../cell/workspace.ts";
 import { modelLabel, tailPath, tokens } from "../lib/format.ts";
@@ -133,13 +144,7 @@ export function LocalChatPage(): VNode {
     if (chat.parked) void local.unpark(id);
   });
 
-  afterRender(() => {
-    if (current === "") return;
-    const el = scroll.ref.current?.querySelector<HTMLElement>(
-      `[data-msg="${CSS.escape(current)}"]`,
-    );
-    el?.scrollIntoView({ block: "center", behavior: "smooth" });
-  });
+  useScrollToMatch(scroll.ref, current);
 
   return (
     <div class="page">
@@ -363,7 +368,17 @@ function CommandPrompt(): VNode | null {
   // never a button. A blocked turn a keyboard user has to Tab across the page
   // to reach is a blocked turn — and focusing "Run it" would arm Enter to say
   // yes, which is the one thing an approval must never do.
-  onMount(() => card.current?.focus());
+  //
+  // On each NEW question, not on mount: this component is always mounted and
+  // renders nothing until a command waits, so a mount-time focus found no
+  // card and the one that later appeared was never focused.
+  const focused = useRef("");
+  const pendingId = pending?.id ?? "";
+  afterRender(() => {
+    if (pendingId === focused.current) return;
+    focused.current = pendingId;
+    if (pendingId !== "") card.current?.focus();
+  });
   if (!pending) return null;
 
   return (
@@ -413,10 +428,14 @@ function CommandPrompt(): VNode | null {
               Run it
             </button>
             {(() => {
-              // Outside the sandbox in "Don't ask", "stop asking" means stop
-              // asking about these programs in this chat — not a mode change.
-              const progs = pending.outside ? programsToAllow(pending.cmd) : [];
-              return pending.outside
+              // In "Don't ask" a command is only asked about when it runs
+              // unconfined — outside the box, or with no box at all — and
+              // "always" then allows these programs in this chat, not a mode
+              // change. The label says so, matching `local.answer`.
+              const byProgram = pending.outside ||
+                permissionOf(localConfig(id)) === "dontAsk";
+              const progs = byProgram ? programsToAllow(pending.cmd) : [];
+              return byProgram
                 ? progs.length > 0 && (
                   <button
                     type="button"
@@ -425,7 +444,8 @@ function CommandPrompt(): VNode | null {
                     onClick={() =>
                       void local.answer(id, true, true, pending.id)}
                   >
-                    Run it, and allow {progs.join(", ")} outside
+                    Run it, and allow {progs.join(", ")}
+                    {pending.outside ? " outside" : ""}
                   </button>
                 )
                 : (
@@ -533,6 +553,22 @@ function LocalStrip(): VNode {
       </Stat>
 
       {
+        /* How thoroughly a turn works, beside what it may work ON. It belongs
+          on the row and not only in Settings: pace is the setting a turn in
+          progress makes you want — "this is taking forever" — and the loop
+          re-reads it every round. */
+      }
+      {cfg.mode !== "chat" && (
+        <Stat label="Pace">
+          <Segmented
+            value={paceOf(cfg)}
+            options={LOCAL_PACES.map((p) => ({ id: p.id, label: p.label }))}
+            onChange={(v) => local.setPace(id, v)}
+          />
+        </Stat>
+      )}
+
+      {
         /* Agent mode is one click: what it may do without asking is the
           checkbox beside it, not a second confirmation of the first click. */
       }
@@ -561,7 +597,7 @@ function LocalStrip(): VNode {
  * cards, no sandbox, no refusals. Off, it goes back to the mode it was on.
  */
 function AutoApprove(props: { id: string }): VNode {
-  const on = permissionOf(localConfig(props.id)) === "bypass";
+  const on = capabilityOf(localConfig(props.id)) === "all";
   return (
     <label
       class={"check" + (on ? " check--on" : "")}
@@ -590,24 +626,31 @@ function AutoApprove(props: { id: string }): VNode {
  * where you read about it — so both unasked modes are a button, not a label.
  */
 function PermissionBadge(props: { id: string }): VNode | null {
-  const perm = permissionOf(localConfig(props.id));
-  if (perm === "ask") {
+  const cap = capabilityOf(localConfig(props.id));
+  if (cap === "read") {
     return (
-      <span title="Writes files itself; asks before running a command">
+      <span title="Read-only — no edits, no shell">
+        <Pill>read only</Pill>
+      </span>
+    );
+  }
+  if (cap === "write") {
+    return (
+      <span title="Can edit files; shell tools are off">
         <Pill tone="warn">can write files</Pill>
       </span>
     );
   }
-  // Bypass is said by the ticked Auto-approve box beside this.
-  if (perm === "bypass") return null;
+  // Allow all is said by the ticked Auto-approve box beside this.
+  if (cap === "all") return null;
   return (
     <button
       type="button"
       class="btn btn--ghost btn--sm"
       title={local.sandbox === false
-        ? "Commands run without asking; destructive ones are refused (no sandbox on this machine). Click to be asked again."
-        : "Commands run without asking, in a sandbox; destructive ones are refused. Click to be asked again."}
-      onClick={() => local.setPermission(props.id, "ask")}
+        ? "Execute: commands run unasked; destructive ones refused (no sandbox). Click for Write (no shell)."
+        : "Execute: sandboxed commands unasked; destructive ones refused. Click for Write (no shell)."}
+      onClick={() => local.setCapability(props.id, "write")}
     >
       <Pill tone="warn">
         {IconAlert({ size: 11 })} runs commands unasked
@@ -867,6 +910,7 @@ function LocalComposer(): VNode {
     el.value = "";
     dropDraft(id);
     setHasText(false);
+    fitComposer(el);
     void local.send(text, id).then((taken) => {
       // Refused before it started — no model chosen, the wrong engine. What
       // somebody typed is theirs: it goes back in the box, not nowhere.
@@ -876,6 +920,7 @@ function LocalComposer(): VNode {
       if (box && box.value === "") {
         box.value = text;
         setHasText(true);
+        fitComposer(box);
       }
     });
   };
@@ -893,6 +938,7 @@ function LocalComposer(): VNode {
     if (kept === "") return;
     el.value = kept;
     setHasText(kept.trim().length > 0);
+    fitComposer(el);
   });
 
   onCleanup(() => saveDraft(shownFor.current, ref.current?.value ?? ""));
@@ -903,11 +949,13 @@ function LocalComposer(): VNode {
     el.value = swapDraft(shownFor.current, id, el.value);
     shownFor.current = id;
     setHasText(el.value.trim().length > 0);
+    fitComposer(el);
   });
 
   return (
     <div class="composer">
       <div class="composer__inner">
+        <span class="composer__prompt" aria-hidden="true">&gt;</span>
         <textarea
           ref={ref}
           rows={1}
@@ -915,8 +963,10 @@ function LocalComposer(): VNode {
             ? "Add to the running task — a correction, a question, or “stop”…"
             : "Message the local model…"}
           aria-label="Message the local model"
-          onInput={() =>
-            setHasText((ref.current?.value.trim().length ?? 0) > 0)}
+          onInput={() => {
+            setHasText((ref.current?.value.trim().length ?? 0) > 0);
+            fitComposer(ref.current);
+          }}
           onKeyDown={(e: KeyboardEvent) => {
             if (e.key !== "Enter") return;
             // Ctrl+Enter sends too — the habit people arrive with from every
@@ -1234,20 +1284,53 @@ export function EnginePanel(): VNode {
             onChange={(e: Event) =>
               local.setCtx(id, Number((e.target as HTMLInputElement).value))}
           />
-          {cfg.mode === "agent" && (
+          {cfg.mode !== "chat" && (
             <>
               <span class="field__label" style={{ marginTop: "10px" }}>
-                Running commands
+                Pace
               </span>
               <Segmented
-                value={permissionOf(cfg)}
-                options={LOCAL_PERMISSIONS.map((p) => ({
+                value={paceOf(cfg)}
+                options={LOCAL_PACES.map((p) => ({
                   id: p.id,
                   label: p.label,
                 }))}
-                onChange={(v) => local.setPermission(id, v)}
+                onChange={(v) => local.setPace(id, v)}
               />
-              {permissionOf(cfg) === "dontAsk" && local.sandbox === true && (
+              <span class="field__hint">
+                Draft: something that runs, very fast. Normal: checked and still
+                quick. Quality: thorough (slower).
+              </span>
+              <span class="field__label" style={{ marginTop: "10px" }}>
+                Run as
+              </span>
+              <Segmented
+                value={runAsOf(cfg)}
+                options={LOCAL_RUN_AS.map((p) => ({
+                  id: p.id,
+                  label: p.label,
+                }))}
+                onChange={(v) => local.setRunAs(id, v)}
+              />
+              <span class="field__hint">
+                {local.accounts[id]
+                  ? `Shell runs as ${local.accounts[id]}.`
+                  : runAsOf(cfg) === "agent"
+                  ? "No agent account can reach this project, and cc-agent is a wall, not a preference — commands are refused until you pick You."
+                  : "Shell runs as you for this project."}
+              </span>
+              <span class="field__label" style={{ marginTop: "10px" }}>
+                Permissions
+              </span>
+              <Segmented
+                value={capabilityOf(cfg)}
+                options={LOCAL_CAPABILITIES.map((p) => ({
+                  id: p.id,
+                  label: p.label,
+                }))}
+                onChange={(v) => local.setCapability(id, v)}
+              />
+              {capabilityOf(cfg) === "execute" && local.sandbox === true && (
                 <Toggle
                   label="Sandboxed commands may use the network"
                   hint="Off: no downloads, no internet — and no access to your screen. On: downloads work, but the X display becomes reachable too. Either way the model can ask to run one command outside the sandbox."
@@ -1256,31 +1339,16 @@ export function EnginePanel(): VNode {
                 />
               )}
               <span class="field__hint">
-                The file tools are confined to the project — every path they
-                resolve, symlinks included, has to be inside it — and every file
-                a turn changes can be put back with one click. A shell command
-                is bounded differently. <b>Ask</b>{" "}
-                shows the exact command before it runs. <b>Don't ask</b>{" "}
-                runs commands unasked but refuses the ones that cannot be undone
-                — deleting, publishing,{" "}
-                <code>sudo</code>, piping a download into a shell — and takes
-                credentials out of their environment.
-                {local.sandbox === true
-                  ? " It also runs them in a sandbox: the disk is read-only except this project, the conversation's own /tmp (kept in ~/.claude-control/tmp) and download caches; credential stores are hidden; there is no display, and no network unless you allow it below. The model can ask you to run one command outside the sandbox."
-                  : local.sandbox === false
-                  ? " No sandbox is available on this machine (bubblewrap is missing or blocked), so that list of dangerous words is the only guard: it stops an accident, not a determined model."
-                  : ""} <b>Bypass</b>{" "}
-                turns every check off. Commands time out after 2 minutes unless
-                the model asks for longer (10 at most). A program a command
-                leaves running is kept as a background job, which runs until
-                stopped or the conversation is cleared (in the sandbox, it ends
-                with the command). <b>Agent account:</b>{" "}
-                when the machine has one — the Linux user{" "}
-                <code>cc-agent</code>, or the one <code>CC_AGENT_USER</code>
+                <b>Read</b> lists and searches only. <b>Write</b>{" "}
+                can edit files. <b>Execute</b>{" "}
+                also runs commands with a sandbox and a destructive deny-list.
                 {" "}
-                names — and it can write the project, commands run as that user
-                in every mode — no sandbox, no refused words; the account's own
-                rights are the wall.
+                <b>Allow all</b>{" "}
+                turns every check off. File tools stay inside the project.
+                Prefer <b>Run as → cc-agent</b> when that account is set up.
+                {local.sandbox === false
+                  ? " No bubblewrap here — Execute still refuses destructive commands by word list."
+                  : ""}
               </span>
             </>
           )}

@@ -11,6 +11,7 @@
  */
 import { log } from "aio";
 import { isLanguage } from "../lib/languages.ts";
+import { complaint, lastLine, serial } from "../lib/sound.ts";
 
 /** What whisper is trained on. Anything else has to be resampled, and this is
  *  free to ask for at the source. */
@@ -34,6 +35,17 @@ const MAX_BYTES = RATE * CHANNELS * BYTES_PER_SAMPLE * MAX_SECONDS;
  *  key press must not put words in your mouth. */
 const MIN_BYTES = RATE * CHANNELS * BYTES_PER_SAMPLE * 0.25;
 
+/**
+ * Below this loudness, on the meter's own scale, nothing was said.
+ *
+ * About −56 dBFS: under a quiet room, far under the quietest speech. The
+ * press it catches is Right-Ctrl held for a shortcut, or a microphone that is
+ * muted — both a second or more of near-silence, both long enough to pass
+ * `MIN_BYTES`, and both turned by whisper into a confident sentence nobody
+ * said, which auto-send then sent.
+ */
+const MIN_PEAK = 0.04;
+
 export type CaptureOpts = {
   /** The input to record from, or "" for the system default. */
   device: string;
@@ -42,6 +54,10 @@ export type CaptureOpts = {
 export type CaptureEvents = {
   /** Loudness of the last chunk, 0…1, for the meter. */
   onLevel: (level: number) => void;
+  /** The recording hit its length cap and the recorder was closed. The key
+   *  is presumably still held — the owner should stop the turn now rather
+   *  than sit in "recording" with nothing coming in. */
+  onFull: () => void;
 };
 
 type Capture = {
@@ -55,6 +71,11 @@ type Capture = {
    *  the two are indistinguishable without it. */
   peak: number;
   startedAt: number;
+  /** Everything the recorder said on stderr. Read the whole time — an unread
+   *  pipe can fill and stall it — and the only explanation there is when the
+   *  microphone produced nothing: a device that does not exist, no sound
+   *  server, a busy input. */
+  grumbles: Promise<string>;
 };
 
 let current: Capture | null = null;
@@ -72,14 +93,7 @@ let current: Capture | null = null;
  * Chaining them makes a short press a short RECORDING rather than a lost one,
  * and makes an orphaned recorder impossible rather than unlikely.
  */
-let chain: Promise<unknown> = Promise.resolve();
-
-function inOrder<T>(work: () => Promise<T>): Promise<T> {
-  const next = chain.then(work, work);
-  // The chain must survive a failure, or one error stops every later press.
-  chain = next.then(() => {}, () => {});
-  return next;
-}
+const inOrder = serial();
 
 /** Is the microphone open right now? */
 export const capturing = (): boolean => current !== null;
@@ -133,6 +147,7 @@ async function reallyStart(
     done: Promise.resolve(),
     peak: 0,
     startedAt: Date.now(),
+    grumbles: new Response(child.stderr).text().catch(() => ""),
   };
   cap.done = drain(cap, events);
   current = cap;
@@ -151,6 +166,13 @@ async function drain(cap: Capture, events: CaptureEvents): Promise<void> {
         log.warn("voice", "recording hit its cap, stopping", {
           seconds: MAX_SECONDS,
         });
+        // Closed HERE, not at the keyup that may never come: left running, the
+        // recorder blocks on a pipe nobody reads, and the mic sits in
+        // "recording" with nothing coming in and nothing said about it.
+        try {
+          cap.child.kill("SIGTERM");
+        } catch { /* already gone */ }
+        events.onFull();
         break;
       }
       cap.chunks.push(value);
@@ -207,16 +229,36 @@ async function reallyStop(): Promise<Uint8Array | null> {
     cap.child.kill("SIGTERM");
   } catch { /* already gone */ }
   await cap.done;
-  await cap.child.status.catch(() => {});
+  const status = await cap.child.status.catch(() => null);
 
   const seconds = +(cap.bytes / (RATE * CHANNELS * BYTES_PER_SAMPLE)).toFixed(
     2,
   );
   const heldFor = +((Date.now() - cap.startedAt) / 1000).toFixed(2);
   if (cap.bytes < MIN_BYTES) {
+    // Too little audio, and there are two very different reasons. The
+    // recorder saying why it stopped is the one that is a failure — a mic
+    // that is not there — and it is the only place that reason exists.
+    // Ended by our SIGTERM, `parecord` exits cleanly; exiting in failure on
+    // its own is what a missing device or sound server looks like.
+    const why = lastLine(await cap.grumbles);
+    const failed = status !== null && !status.success && status.signal === null;
+    if (failed && why !== "") {
+      throw new Error(`The microphone did not start: ${why.slice(0, 200)}`);
+    }
     log.info("voice", "too short to be speech, discarded", {
       seconds,
       heldFor,
+    });
+    return null;
+  }
+  if (cap.peak < MIN_PEAK) {
+    // Held, but nothing was said into it — a shortcut, or a muted input.
+    // Never transcribed: whisper answers silence with invented words.
+    log.info("voice", "only silence, discarded", {
+      seconds,
+      peak: +cap.peak.toFixed(3),
+      muted: cap.peak === 0,
     });
     return null;
   }
@@ -270,13 +312,8 @@ function wav(chunks: Uint8Array[], bytes: number): Uint8Array {
 }
 
 /**
- * Ask whisper.cpp's server what was said.
- *
- * `/inference`, which is whisper-server's own route. The OpenAI-compatible
- * path that llama.cpp and LM Studio answer on is NOT served here — measured,
- * against a build from source: it returns 404. Worth writing down, because
- * "they all speak OpenAI" is true of the text servers and led straight to the
- * wrong guess for this one.
+ * What was said: one question to whisper, and more only when its answer
+ * landed in a language you never speak.
  */
 export async function transcribe(
   wavBytes: Uint8Array,
@@ -316,10 +353,13 @@ export async function transcribe(
    * It costs nothing on the common path: this only runs when detection has
    * already gone somewhere you never speak.
    */
-  const tries = await Promise.all(
+  //
+  // Settled, not all-or-nothing: one language failing to answer must not
+  // throw away the answer already in hand, nor the ones that did arrive.
+  const tries = await Promise.allSettled(
     opts.spoken.map((code) => listen(wavBytes, opts, code, signal)),
   );
-  const best = mostConfident(tries);
+  const best = mostConfident(answered(tries));
   if (!best) return heard.text;
   log.info("voice", "that was not a language you speak — asked again", {
     detected: heard.language,
@@ -332,6 +372,10 @@ export async function transcribe(
 
 /** One answer from the speech server, and how sure it was. */
 export type Heard = { text: string; language: string; confidence: number };
+
+/** The answers that arrived, out of several asked for at once. */
+export const answered = (tries: PromiseSettledResult<Heard>[]): Heard[] =>
+  tries.flatMap((t) => t.status === "fulfilled" ? [t.value] : []);
 
 /**
  * The most confident of several answers, or `null` if none said anything.
@@ -409,9 +453,8 @@ async function listen(
   const url = `${opts.baseUrl.replace(/\/+$/, "")}/inference`;
   const at = Date.now();
   const res = await fetch(url, { method: "POST", body: form, signal });
-  if (!res.ok) {
-    throw new Error(`the speech server answered ${res.status}`);
-  }
+  // What it said, not only its status — and read, which closes the body.
+  if (!res.ok) throw new Error(await complaint(res));
   // Read as text, then parse. A 200 carrying something that is not the shape
   // we expect — an error object, an empty body, a truncated stream — used to
   // become `""` here and travel on as "the model made no words of that",

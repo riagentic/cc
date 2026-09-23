@@ -27,6 +27,11 @@
  * because you switched tabs — and the oldest output is discarded past a cap,
  * the way scrollback has always worked. The page says so on its way back in
  * rather than pretending it has the whole story.
+ *
+ * "Looking" is decided by the page's acknowledgements, not by its word alone.
+ * A renderer that reloads never sends its `unwatch`, so the count on its own
+ * would stay above zero for good and stall the shell behind a reader that is
+ * not there. See {@link readerPresent}.
  */
 import { cell, log } from "aio";
 import { panesOf, projectOfPane, workspace } from "./workspace.ts";
@@ -40,6 +45,51 @@ const MAX_UNWATCHED = 2_000;
  *  that ordinary output never stalls, shallow enough that a runaway command is
  *  throttled within a frame or two. */
 const BACKPRESSURE_AT = 96;
+
+/** How long output may wait unacknowledged before a counted watcher is taken
+ *  to be gone. A page that is there acks within a frame of drawing; five
+ *  seconds of silence over a queue is a page that reloaded or crashed. */
+const LEASE_MS = 5_000;
+
+/**
+ * Is somebody really drawing this terminal?
+ *
+ * A counted watcher, unless output has been waiting for longer than the lease
+ * with nothing acknowledged. Pure, so the rule can be pinned without a shell.
+ */
+export const readerPresent = (
+  watchers: number,
+  depth: number,
+  waitingSince: number,
+  now: number,
+): boolean => watchers > 0 && !(depth > 0 && now - waitingSince > LEASE_MS);
+
+/** Should the reader wait? Only for a reader who is there: with nobody
+ *  drawing, holding the shell would stall a dev server after a screenful. */
+export const shouldWait = (
+  watchers: number,
+  depth: number,
+  waitingSince: number,
+  now: number,
+): boolean =>
+  depth >= BACKPRESSURE_AT && readerPresent(watchers, depth, waitingSince, now);
+
+/**
+ * Since when each terminal's queue has waited for an acknowledgement.
+ *
+ * Module state, not cell state: it changes on every push and every ack, and a
+ * field would broadcast the whole cell for a number no page shows. Set when
+ * the queue stops being empty, moved on by every ack that makes progress.
+ */
+const WAITING = new Map<string, number>();
+
+const presentNow = (id: string, term: Terminal): boolean =>
+  readerPresent(
+    term.watchers,
+    term.out.length,
+    WAITING.get(id) ?? Date.now(),
+    Date.now(),
+  );
 
 export type TerminalStatus = "off" | "starting" | "live" | "exited";
 
@@ -256,7 +306,7 @@ async function startNow(
       onData: (text) => consoleCell.push(id, text, run),
       onExit: (code) => consoleCell.ended(id, code, run),
       onBusy: (busy, name) => consoleCell.setBusy(id, busy, name, run),
-      isBehind: () => queueDepth(id) >= BACKPRESSURE_AT,
+      isBehind: () => isBehind(id),
     });
   } catch (e) {
     const why = e instanceof Error ? e.message : String(e);
@@ -289,8 +339,12 @@ async function startNow(
 function closedPane(id: string): void {
   void import("./workspace.ts").then((m) => m.workspace.removePane(id)).catch(
     (e) => {
+      const error = e instanceof Error ? e.message : String(e);
+      // No workspace running — a console booted on its own — means no tab to
+      // close, which is nothing to warn about.
+      if (error.includes("called before the cell's runtime is booted")) return;
       log.warn("console", "could not close the tab of a finished shell", {
-        error: e instanceof Error ? e.message : String(e),
+        error,
       });
     },
   );
@@ -341,7 +395,9 @@ export const consoleCell = cell("console", {
       s: ConsoleState,
       id: string,
       projectId: string,
-      opts?: { title?: string; command?: string; rows?: number; cols?: number },
+      opts:
+        | { title?: string; command?: string; rows?: number; cols?: number }
+        | undefined = undefined,
     ): Promise<string> {
       if (typeof id !== "string" || id === "") return "";
       const pid = projectId || workspace.activeId;
@@ -374,7 +430,12 @@ export const consoleCell = cell("console", {
      * makes the pane — two requests for the same shell, milliseconds apart, and
      * the second used to kill the first.
      */
-    async start(s: ConsoleState, id: string, rows?: number, cols?: number) {
+    async start(
+      s: ConsoleState,
+      id: string,
+      rows: number | undefined = undefined,
+      cols: number | undefined = undefined,
+    ) {
       if (typeof id !== "string" || id === "") return;
       // A pane with no terminal behind it. Panes are remembered across
       // restarts and shells are not — a running process is not a document —
@@ -436,6 +497,7 @@ export const consoleCell = cell("console", {
       if (!term) return;
       const pid = term.projectId;
       delete s.terms[id];
+      WAITING.delete(id);
       if (s.active[pid] === id) {
         // Fall back to another of the project's terminals, newest first, so
         // closing one does not land the reader on an empty page.
@@ -455,17 +517,23 @@ export const consoleCell = cell("console", {
      * output, and putting a scheduler between the two would only add latency to
      * a terminal.
      */
-    push(s: ConsoleState, key: string, text: string, run?: number) {
+    push(
+      s: ConsoleState,
+      key: string,
+      text: string,
+      run: number | undefined = undefined,
+    ) {
       if (typeof text !== "string" || text === "") return;
       const term = peek(s, key);
       if (!term) return;
       // Output from a host that has been replaced. Dropping it is the point:
       // it belongs to a screen nobody is looking at any more.
       if (typeof run === "number" && run !== term.run) return;
+      if (term.out.length === 0) WAITING.set(key, Date.now());
       term.out.push(text);
       // Nobody watching: keep the shell running, keep the newest, and count
       // what went — which is what scrollback has always done.
-      if (term.watchers === 0 && term.out.length > MAX_UNWATCHED) {
+      if (!presentNow(key, term) && term.out.length > MAX_UNWATCHED) {
         const drop = term.out.length - MAX_UNWATCHED;
         term.out.splice(0, drop);
         term.base += drop;
@@ -486,7 +554,7 @@ export const consoleCell = cell("console", {
       key: string,
       busy: boolean,
       name: string,
-      run?: number,
+      run: number | undefined = undefined,
     ) {
       const term = peek(s, key);
       if (!term) return;
@@ -504,9 +572,10 @@ export const consoleCell = cell("console", {
       if (drop <= 0) return;
       term.out.splice(0, drop);
       term.base += drop;
+      // Progress: the reader is there. The lease restarts from now.
+      WAITING.set(key, Date.now());
     },
 
-    /** The shell finished. */
     /**
      * The shell finished — and the tab goes with it.
      *
@@ -521,7 +590,12 @@ export const consoleCell = cell("console", {
      * screen. Only ending the shell ends the tab, and that is always something
      * a person asked for.
      */
-    ended(s: ConsoleState, key: string, code: number, run?: number) {
+    ended(
+      s: ConsoleState,
+      key: string,
+      code: number,
+      run: number | undefined = undefined,
+    ) {
       const term = peek(s, key);
       if (!term) return;
       if (typeof run === "number" && run !== term.run) return;
@@ -531,6 +605,7 @@ export const consoleCell = cell("console", {
       term.busy = false;
       term.running = "";
       delete s.terms[key];
+      WAITING.delete(key);
       const pid = term.projectId;
       if (s.active[pid] === key) delete s.active[pid];
       closedPane(key); // aiol-ok: orchestration, after the write
@@ -569,33 +644,41 @@ export const consoleCell = cell("console", {
       await io.resize(key, r, c);
     },
 
-    /** End the shell. The record stays, so the page can say what happened. */
+    /**
+     * End the shell. The record stays, so the page can say what happened and
+     * offer to start it again.
+     *
+     * The run is retired BEFORE the host is killed: its exit callback then
+     * carries a run that is no longer current, and `ended` — which is what a
+     * shell leaving by itself means, and which takes the tab with it — writes
+     * nothing. Without that, End closed the tab it said it would keep.
+     */
     async stop(s: ConsoleState, key: string) {
-      const io = await import("./pty.server.ts");
-      await io.close(key);
       const term = peek(s, key);
-      if (!term) return;
-      if (term.status === "live" || term.status === "starting") {
+      if (term && (term.status === "live" || term.status === "starting")) {
+        term.run = ++RUNS;
         term.status = "exited";
         term.exitCode ??= 0;
+        term.busy = false;
+        term.running = "";
       }
-    },
-
-    /** Forget a finished terminal's output, without starting another. */
-    clear(s: ConsoleState, key: string) {
-      const term = peek(s, key);
-      if (!term) return;
-      term.out = [];
-      term.base += 0;
-      term.lost = 0;
+      const io = await import("./pty.server.ts");
+      await io.close(key);
     },
   },
 });
 
-/** How many chunks are waiting for the page. Read by the reader loop to decide
- *  whether to wait — see the module comment. */
-function queueDepth(key: string): number {
-  return consoleCell.terms[key]?.out.length ?? 0;
+/** Whether the reader loop should wait for the page — see the module
+ *  comment. A terminal with no record has nobody to wait for. */
+function isBehind(key: string): boolean {
+  const term = consoleCell.terms[key];
+  if (!term) return false;
+  return shouldWait(
+    term.watchers,
+    term.out.length,
+    WAITING.get(key) ?? Date.now(),
+    Date.now(),
+  );
 }
 
 /** One terminal by id, or a blank one. Never `undefined`, so the page has

@@ -87,6 +87,7 @@ async function withStub(
       (await Deno.readTextFile(log)).split("\n").filter(Boolean)
     );
   } finally {
+    await booted.settle();
     booted.dispose();
     if (previousBin === undefined) Deno.env.delete("CLAUDE_BIN");
     else Deno.env.set("CLAUDE_BIN", previousBin);

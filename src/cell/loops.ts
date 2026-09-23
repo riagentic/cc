@@ -18,10 +18,10 @@
  *    next tick is a few seconds away in any case.
  */
 import { cell, log, type MethodDraftMeta, schedule } from "aio";
-import type { Loop } from "../type/claude.ts";
+import type { Loop, Status } from "../type/claude.ts";
 import { oneLine } from "../lib/format.ts";
-import { session, view } from "./session.ts";
-import { workspace } from "./workspace.ts";
+import { session, sessionOf } from "./session.ts";
+import { activeSessionKey, workspace } from "./workspace.ts";
 
 /** How often due loops are checked. Not the resolution a loop is *set* at —
  *  that is `everySec` — just how sharply the due moment is noticed. */
@@ -45,6 +45,85 @@ type LoopsState = {
  *  makes "paused" a fact about the schedule rather than a flag checked later. */
 const nextFrom = (l: Pick<Loop, "paused" | "everySec">, now: number): number =>
   l.paused ? 0 : now + l.everySec * 1_000;
+
+/**
+ * Which conversation each loop's open run was sent into, by loop id.
+ *
+ * A run is settled when THAT conversation goes idle — not when whatever is on
+ * screen does. Module state because it lives exactly as long as the process
+ * the prompt went to: after a restart there is no turn left to wait for, and
+ * the project's own first conversation (its id) is the honest fallback.
+ */
+const SENT_TO = new Map<string, string>();
+
+/** What a tick needs to know about the world, as plain values. */
+export type TickWorld = {
+  now: number;
+  /** The project on screen — a loop fires only into its own. */
+  activeId: string;
+  /** The conversation on screen, which is where a prompt goes. */
+  activeKey: string;
+  statusOf: (key: string) => Status;
+  answerOf: (key: string) => string;
+  /** Where a loop's open run went; see {@link SENT_TO}. */
+  sentTo: (loop: Loop) => string;
+};
+
+/** What a tick decided. Applied by {@link loops.claim}; decided by
+ *  {@link planTick}, which is pure. */
+export type TickPlan = {
+  settle: { id: string; ok: boolean; summary: string }[];
+  /** Due, but not now: moved on by one interval. */
+  defer: string[];
+  /** The one loop to fire, or `null`. */
+  fire: string | null;
+};
+
+/**
+ * One tick's decisions, without touching anything.
+ *
+ * Each open run is settled against the conversation it was SENT to. Then at
+ * most one due loop fires — into the conversation on screen, only if it is
+ * idle, and only if it belongs to the project on screen. A second loop due in
+ * the same tick waits an interval: it would otherwise be sent into the turn
+ * the first one has just started, which is exactly the pile-up rule 2 of the
+ * module comment forbids.
+ */
+export function planTick(list: Loop[], w: TickWorld): TickPlan {
+  const plan: TickPlan = { settle: [], defer: [], fire: null };
+  for (const l of list) {
+    const run = l.runs[0];
+    if (!run || run.ok !== null) continue;
+    const key = w.sentTo(l);
+    const status = w.statusOf(key);
+    if (status === "working") continue;
+    plan.settle.push({
+      id: l.id,
+      ok: status !== "error",
+      summary: w.answerOf(key) || run.summary,
+    });
+  }
+  // Busy counts a run this very tick is leaving open, too: its turn has not
+  // ended just because the settle pass passed it by.
+  let busy = w.statusOf(w.activeKey) === "working";
+  const settled = new Set(plan.settle.map((d) => d.id));
+  for (const l of list) {
+    if (l.paused || l.nextAt === 0 || l.nextAt > w.now) continue;
+    // Not this project, or a turn is in flight: the loop is not skipped, it is
+    // simply due again at the next interval. A loop that fired the moment you
+    // switched back would deliver a prompt aimed at a session that has since
+    // moved on. Its own last run still open — in another conversation of the
+    // project — counts as in flight: one loop, at most one open run.
+    const open = l.runs[0]?.ok === null && !settled.has(l.id);
+    if (l.projectId !== w.activeId || busy || open) {
+      plan.defer.push(l.id);
+      continue;
+    }
+    plan.fire = l.id;
+    busy = true;
+  }
+  return plan;
+}
 
 export const loops = cell("loops", {
   // A loop is a standing instruction. Losing it on restart would make it the
@@ -105,15 +184,6 @@ export const loops = cell("loops", {
     },
 
     /**
-     * One pass: settle whatever finished, then fire whatever is due.
-     *
-     * Both halves are here rather than in an event handler because a loop's run
-     * ends when the *session* goes idle, and there is no turn-ended signal to
-     * subscribe to — the session cell is a reducer over a process stream, not a
-     * bus. A tick that reads "is a turn in flight now" answers the same question
-     * and cannot get stuck waiting for an event that was missed.
-     */
-    /**
      * Start the tick, once.
      *
      * Kept out of {@link tick} deliberately: re-arming `every` from inside its
@@ -130,45 +200,67 @@ export const loops = cell("loops", {
       }));
     },
 
-    async tick(s: LoopsState) {
+    /**
+     * One pass: settle whatever finished, then fire whatever is due.
+     *
+     * Both halves are here rather than in an event handler because a loop's run
+     * ends when the *session* goes idle, and there is no turn-ended signal to
+     * subscribe to — the session cell is a reducer over a process stream, not a
+     * bus. A tick that reads "is a turn in flight now" answers the same question
+     * and cannot get stuck waiting for an event that was missed.
+     *
+     * An orchestrator: the decisions are recorded by the sync {@link claim},
+     * and only then is the prompt sent. Sending from inside one transaction
+     * put a prompt on the wire and THEN had the commit refused — the run and
+     * the new due time were discarded with it, so the same prompt fired again
+     * on the next tick.
+     */
+    async tick(_s: LoopsState) {
+      const fired = await loops.claim(); // aiol-ok: orchestration, see above
+      if (fired === null) return;
+      log.info("loops", "firing", { id: fired.id });
+      await session.send(fired.prompt);
+    },
+
+    /** The write half of {@link tick}: apply one {@link planTick}, and say
+     *  which prompt to send. Sync, so it commits whole before anything goes
+     *  out. */
+    claim(s: LoopsState): { id: string; prompt: string } | null {
       const now = Date.now();
-      const idle = view().status !== "working";
-
-      // Settle first: an open run belongs to the turn that has now finished,
-      // and closing it before firing keeps one loop to at most one open run.
-      if (idle) {
-        for (const l of s.loops) {
-          const run = l.runs[0];
-          if (run && run.ok === null) {
-            run.endedAt = now;
-            run.ok = view().status !== "error";
-            run.summary = lastAnswer() || run.summary;
-          }
-        }
+      const plan = planTick(s.loops, {
+        now,
+        activeId: workspace.activeId,
+        activeKey: activeSessionKey(),
+        statusOf: (key) => sessionOf(key).status,
+        answerOf: lastAnswer,
+        sentTo: (l) => SENT_TO.get(l.id) ?? l.projectId,
+      });
+      for (const done of plan.settle) {
+        const run = s.loops.find((l) => l.id === done.id)?.runs[0];
+        if (!run) continue;
+        run.endedAt = now;
+        run.ok = done.ok;
+        run.summary = done.summary;
+        SENT_TO.delete(done.id);
       }
-
-      const activeId = workspace.activeId;
-      for (const l of s.loops) {
-        if (l.paused || l.nextAt === 0 || l.nextAt > now) continue;
-        // Not this project, or a turn is in flight: the loop is not skipped,
-        // it is simply due again at the next interval. A loop that fired the
-        // moment you switched back would deliver a prompt aimed at a session
-        // that has since moved on.
-        if (l.projectId !== activeId || !idle) {
-          l.nextAt = now + l.everySec * 1_000;
-          continue;
-        }
-        l.nextAt = now + l.everySec * 1_000;
-        l.runs.unshift({
-          at: now,
-          endedAt: null,
-          ok: null,
-          summary: oneLine(l.prompt, 90),
-        });
-        if (l.runs.length > MAX_RUNS) l.runs.length = MAX_RUNS;
-        log.info("loops", "firing", { id: l.id, everySec: l.everySec });
-        await session.send(l.prompt);
+      for (const id of plan.defer) {
+        const l = s.loops.find((x) => x.id === id);
+        if (l) l.nextAt = now + l.everySec * 1_000;
       }
+      const l = plan.fire === null
+        ? undefined
+        : s.loops.find((x) => x.id === plan.fire);
+      if (!l) return null;
+      l.nextAt = now + l.everySec * 1_000;
+      l.runs.unshift({
+        at: now,
+        endedAt: null,
+        ok: null,
+        summary: oneLine(l.prompt, 90),
+      });
+      if (l.runs.length > MAX_RUNS) l.runs.length = MAX_RUNS;
+      SENT_TO.set(l.id, activeSessionKey());
+      return { id: l.id, prompt: l.prompt };
     },
 
     /** Add a loop for the active project. */
@@ -236,10 +328,12 @@ export const loops = cell("loops", {
   },
 });
 
-/** The last thing the assistant said, for a run's summary line. */
-function lastAnswer(): string {
-  for (let i = view().messages.length - 1; i >= 0; i--) {
-    const m = view().messages[i];
+/** The last thing the assistant said in one conversation, for a run's summary
+ *  line. */
+function lastAnswer(key: string): string {
+  const messages = sessionOf(key).messages;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
     if (m.role !== "assistant") continue;
     const text = m.blocks
       .filter((b) => b.kind === "text")

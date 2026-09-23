@@ -36,7 +36,7 @@ import {
 import { Banner, codeTokens, Elapsed, Empty } from "./parts.tsx";
 import { lastSpeed } from "../cell/session.ts";
 import { JumpToLatest, MsgMeta, useStickToBottom } from "./thread.tsx";
-import { FindBar, findIndex, findQuery } from "./find.tsx";
+import { FindBar, findIndex, findQuery, useScrollToMatch } from "./find.tsx";
 import { hits } from "../lib/transcript.ts";
 import { DiffView, isEdit } from "./Diff.tsx";
 import { BrowseButton } from "./AddProject.tsx";
@@ -44,6 +44,7 @@ import { slashHits, SlashMenu, slashToken } from "./SlashMenu.tsx";
 import {
   dropDraft,
   fillComposer,
+  fitComposer,
   loadDraft,
   saveDraft,
   swapDraft,
@@ -83,15 +84,7 @@ function Thread(): VNode {
     ? found[Math.min(findIndex(), found.length - 1)]
     : "";
 
-  // Bring the current match into view — centred, not scrolled to the edge,
-  // because a match at the very bottom of the pane has no context above it.
-  afterRender(() => {
-    if (current === "") return;
-    const el = scroll.ref.current?.querySelector<HTMLElement>(
-      `[data-msg="${CSS.escape(current)}"]`,
-    );
-    el?.scrollIntoView({ block: "center", behavior: "smooth" });
-  });
+  useScrollToMatch(scroll.ref, current);
 
   return (
     // The wrapper is what the jump button is positioned against. It cannot be
@@ -566,12 +559,7 @@ function Composer(): VNode {
     resize();
   });
 
-  const resize = () => {
-    const el = ref.current;
-    if (!el) return;
-    el.style.height = "auto";
-    el.style.height = `${Math.min(el.scrollHeight, 260)}px`;
-  };
+  const resize = () => fitComposer(ref.current);
 
   const submit = () => {
     const el = ref.current;
@@ -623,7 +611,12 @@ function Composer(): VNode {
         setToken(null);
         return;
       }
-      if (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey)) {
+      // Enter on a command typed out in full sends it: completing would only
+      // add a space, and a second Enter would be needed for nothing.
+      const typedInFull = e.key === "Enter" && token === hits[at].name;
+      if (typedInFull) {
+        setToken(null);
+      } else if (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey)) {
         if (e.isComposing || e.keyCode === 229) return;
         e.preventDefault();
         complete(hits[at].name);
@@ -672,6 +665,7 @@ function Composer(): VNode {
         onHover={setPick}
       />
       <div class="composer__inner">
+        <span class="composer__prompt" aria-hidden="true">&gt;</span>
         <textarea
           ref={ref}
           rows={1}

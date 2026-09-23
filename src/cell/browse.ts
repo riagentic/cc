@@ -13,8 +13,9 @@
  * Not persisted. Where you were browsing last week is not a preference; the
  * picker opens on somewhere useful instead — see `openNear`.
  */
-import { cell, log } from "aio";
+import { cell, log, type MethodDraftMeta } from "aio";
 import type { DirEntry } from "./claude.server.ts";
+import { parentOf } from "../lib/format.ts";
 
 type BrowseState = {
   /** The folder being shown. Empty before the picker has ever opened. */
@@ -27,14 +28,10 @@ type BrowseState = {
   hidden: boolean;
 };
 
-/** The parent of a path, or `null` at the root. String work, not disk work:
- *  the picker needs it on every render. */
-export const parentOf = (path: string): string | null => {
-  if (path === "" || path === "/") return null;
-  const cut = path.replace(/\/+$/, "").lastIndexOf("/");
-  if (cut < 0) return null;
-  return cut === 0 ? "/" : path.slice(0, cut);
-};
+type Draft = BrowseState & Partial<MethodDraftMeta<BrowseState>>;
+
+/** The parent of a path — one definition, shared with the workspace. */
+export { parentOf };
 
 /** The path as breadcrumbs: every ancestor, root first. */
 export const crumbs = (path: string): { name: string; path: string }[] => {
@@ -51,17 +48,34 @@ export const crumbs = (path: string): { name: string; path: string }[] => {
 };
 
 /**
+ * Which read is the newest. Module state, so every call sees it the moment it
+ * is taken — a field would be a dispatch behind, and two clicks land inside
+ * one listing.
+ */
+let latest = 0;
+
+/**
  * Read a folder into the draft.
  *
  * A plain function taking the draft, not a method the other methods call: a
  * nested same-cell call runs as its own transaction against *committed* state,
  * so `up` calling `go` would leave two writes that cannot see each other. The
  * rest of this app makes the same choice for the same reason.
+ *
+ * Only the newest read writes. A slow folder clicked first and a fast one
+ * clicked second finish in the wrong order, and the first must not put you
+ * back where you left.
  */
-async function load(s: BrowseState, path: string): Promise<void> {
+async function load(s: Draft, path: string): Promise<void> {
+  const mine = ++latest;
+  // Published now, not at the end of the method: a transactional method's
+  // writes are otherwise invisible until it returns, and a spinner that
+  // appears only once the listing is back is no spinner at all.
   s.loading = true;
+  s.$commit?.();
   const io = await import("./claude.server.ts");
   const found = await io.listDirs(path);
+  if (mine !== latest) return;
   s.loading = false;
   if (found.error !== null) {
     s.error = found.error;
@@ -98,14 +112,14 @@ export const browse = cell("browse", {
      * list and jumping somewhere else would take away the one thing that makes
      * the error recoverable — knowing where you were.
      */
-    async go(s: BrowseState, path: unknown) {
+    async go(s: Draft, path: unknown) {
       if (typeof path !== "string" || path === "") return;
       await load(s, path);
     },
 
     /** Up one level. A no-op at the root rather than an error — there is
      *  simply nowhere further up, and the button is already disabled. */
-    async up(s: BrowseState) {
+    async up(s: Draft) {
       const parent = parentOf(s.cwd);
       if (parent === null) return;
       await load(s, parent);
@@ -119,7 +133,7 @@ export const browse = cell("browse", {
      * person adding a second project almost always keeps it beside the first,
      * and starting inside one project means going up before doing anything.
      */
-    async openNear(s: BrowseState, near: unknown) {
+    async openNear(s: Draft, near: unknown) {
       const io = await import("./claude.server.ts");
       const from = typeof near === "string" && near !== ""
         ? parentOf(io.resolvePath(near)) ?? io.homeDir()
@@ -131,7 +145,7 @@ export const browse = cell("browse", {
       s.hidden = !s.hidden;
     },
 
-    async refresh(s: BrowseState) {
+    async refresh(s: Draft) {
       if (s.cwd !== "") await load(s, s.cwd);
     },
 

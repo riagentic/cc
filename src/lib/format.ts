@@ -182,6 +182,19 @@ export function baseName(path: string): string {
 }
 
 /**
+ * The directory one level up, or `null` at the root (and for a bare name,
+ * which has no "up" to go to). Lexical: it is asked on every render of the
+ * folder picker, and about paths that may no longer exist.
+ */
+export function parentOf(path: string): string | null {
+  const trimmed = path.replace(/\/+$/, "");
+  if (trimmed === "") return null;
+  const cut = trimmed.lastIndexOf("/");
+  if (cut < 0) return null;
+  return cut === 0 ? "/" : trimmed.slice(0, cut);
+}
+
+/**
  * `/home/dev/code/cc` → `~/code/cc`, so a header never wraps on a long path.
  *
  * The prefix must end on a segment boundary. A raw `startsWith` turned

@@ -4,7 +4,7 @@ A desktop app for working with [Claude Code](https://claude.com/claude-code)
 across many projects at once, with local models (LM Studio, Ollama, llama.cpp)
 as a second engine. Built on [aio](https://github.com/riagentic/aio).
 
-> **Status: v0.1, early and unfinished.** Built and tried on one Linux machine
+> **Status: v0.2, early and unfinished.** Built and tried on one Linux machine
 > only. Expect rough edges, breaking changes and no support.
 
 ## What it does

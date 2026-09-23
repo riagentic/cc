@@ -61,6 +61,13 @@ const DIALECTS: Record<string, Dialect> = {
   json: { keywords: new Set(), line: [], block: false, hash: false },
   shell: { keywords: SHELL_KEYWORDS, line: [], block: false, hash: true },
   generic: { keywords: JS_KEYWORDS, line: ["//"], block: true, hash: true },
+  // `#` is an id selector and a colour (`#main`, `#fff`), never a comment —
+  // the generic dialect greyed out every rule from its first `#` onward. And
+  // `//` is not a comment in CSS either; only `/* */` is.
+  css: { keywords: new Set(), line: [], block: true, hash: false },
+  // The C family: `#include`, Rust's `#[derive]` — `#` starts a directive or
+  // an attribute, not a comment.
+  curly: { keywords: JS_KEYWORDS, line: ["//"], block: true, hash: false },
 };
 
 const ALIASES: Record<string, keyof typeof DIALECTS> = {
@@ -82,14 +89,14 @@ const ALIASES: Record<string, keyof typeof DIALECTS> = {
   python: "generic",
   rb: "generic",
   ruby: "generic",
-  go: "generic",
-  rust: "generic",
-  rs: "generic",
-  java: "generic",
-  c: "generic",
-  cpp: "generic",
-  h: "generic",
-  css: "generic",
+  go: "curly",
+  rust: "curly",
+  rs: "curly",
+  java: "curly",
+  c: "curly",
+  cpp: "curly",
+  h: "curly",
+  css: "css",
   yaml: "generic",
   yml: "generic",
   toml: "generic",

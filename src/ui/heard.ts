@@ -1,21 +1,43 @@
 /**
  * @module
- * Words that were spoken, put where they can be read before they are sent.
+ * Words that were spoken, put in the composer — and sent, unless auto-send
+ * is switched off.
  */
 import { afterRender } from "aio/air";
 import { voice } from "../cell/voice.ts";
 import { appendToComposer } from "./compose.ts";
 
 /**
- * Move a finished transcription into the composer.
+ * The last turn put in the composer, by THIS window.
  *
- * Appended, never sent. Speech recognition is wrong often enough about names,
- * paths and flags that a person has to see it first — and "wrong instruction,
- * already running" is a considerably worse outcome than "wrong instruction,
- * sitting in a box".
+ * The guard, and it has to be module-local. `voice.taken()` is a dispatch: it
+ * lands a render or more later, and every render in between — a streaming
+ * reply causes dozens — read the un-cleared text and pasted it again, and sent
+ * it again. Written the moment the decision is made, it cannot be a render
+ * behind.
+ */
+let pasted = 0;
+
+/**
+ * Should this render put the words in the composer?
+ *
+ * Pure, so it can be asked a hundred times with a stale cell — which is the
+ * whole bug, and the one thing a UI test cannot reproduce: its settle waits
+ * for the very dispatch whose lateness caused it. Equality rather than
+ * "newer than", so a cell that restarted its count still gets through.
+ */
+export const shouldPaste = (
+  turn: number,
+  text: string,
+  last: number,
+): boolean => turn !== 0 && text !== "" && turn !== last;
+
+/**
+ * Move a finished transcription into the composer, and send it if asked to.
  *
  * Appended rather than replacing, so speaking after typing adds to what you
- * were writing instead of throwing it away.
+ * were writing instead of throwing it away. Sending is on by default and is
+ * a setting: dictating in several takes wants it off.
  */
 export function useHeardText(): void {
   // Read HERE, in the render body of whatever called this — not inside the
@@ -33,7 +55,7 @@ export function useHeardText(): void {
   const turn = voice.turn;
   const text = voice.text;
   afterRender(() => {
-    if (turn === 0 || text === "") return;
+    if (!shouldPaste(turn, text, pasted)) return;
     if (!appendToComposer(text)) {
       // Nowhere to put it. The words are kept — the next render on a page with
       // a composer will place them — but silence here is what makes voice feel
@@ -41,27 +63,24 @@ export function useHeardText(): void {
       voice.notSent("Heard you, but this page has nowhere to type.");
       return;
     }
+    pasted = turn;
     voice.taken();
     if (voice.config.autoSend) sendIt();
   });
 }
 
+/** The send loop in flight, if any. One at a time: a newer sentence takes
+ *  over from an older one still waiting. */
+let waiting: ReturnType<typeof setInterval> | null = null;
+
 /**
- * Press the composer's own Send button.
+ * Press the composer's own Send button, as soon as sending is possible.
  *
  * Clicked rather than reimplemented: each page already knows what sending
  * means for it — one talks to a session, the other to a local model, and both
  * clear the draft on the way. Repeating that here would be two more copies to
- * keep in step.
- *
- * It also inherits the button's own judgement for free. Send is disabled while
- * a turn is running and while there is nothing to send, so speaking over a
- * reply queues nothing instead of interrupting it.
- *
- * After the render, so the value is in the box before anything reads it back.
- */
-/**
- * Send as soon as sending is possible.
+ * keep in step. After the render, so the value is in the box before anything
+ * reads it back.
  *
  * Not "try once and give up". Send is disabled for as long as a reply is
  * running, and with auto-send on that covers most of the moments you would
@@ -77,8 +96,6 @@ export function useHeardText(): void {
  * or sent them yourself. Whatever is in the box then is yours, not this
  * function's to send.
  */
-let waiting: ReturnType<typeof setInterval> | null = null;
-
 function sendIt(): void {
   if (typeof document === "undefined") return;
   const box = () =>

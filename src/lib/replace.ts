@@ -203,11 +203,65 @@ function reindent(
 }
 
 /**
+ * Line endings, per line: the text with every CRLF read as LF, a map from an
+ * offset in that text back to the original, and the ending each line had.
+ *
+ * Per line, because a file is not always one or the other. One CRLF in a Unix
+ * file — a pasted block, a generated header — used to mark the whole file as
+ * CRLF, and the edit converted every other line of it too.
+ */
+export function lineEndings(content: string): {
+  lf: string;
+  /** Offset in `lf` → offset in `content`. */
+  back: (at: number) => number;
+  /** The ending of the line holding offset `at` in `lf`. */
+  eolAt: (at: number) => "\n" | "\r\n";
+} {
+  // Where, in the LF text, each collapsed "\r\n" now has its "\n".
+  const crlf: number[] = [];
+  let lf = "";
+  let from = 0;
+  for (
+    let i = content.indexOf("\r\n");
+    i >= 0;
+    i = content.indexOf("\r\n", i + 2)
+  ) {
+    lf += content.slice(from, i);
+    crlf.push(lf.length);
+    lf += "\n";
+    from = i + 2;
+  }
+  lf += content.slice(from);
+  const wasCrlf = new Set(crlf);
+  // How many collapsed endings lie strictly before `at` — each was one byte.
+  const before = (at: number): number => {
+    let lo = 0;
+    let hi = crlf.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (crlf[mid] < at) lo = mid + 1;
+      else hi = mid;
+    }
+    return lo;
+  };
+  const eolAt = (at: number): "\n" | "\r\n" => {
+    // The line's own ending; the last line has none, so it takes the one
+    // above it — the ending the file was using where the edit landed.
+    const end = lf.indexOf("\n", at);
+    const which = end >= 0 ? end : lf.lastIndexOf("\n", at - 1);
+    return which >= 0 && wasCrlf.has(which) ? "\r\n" : "\n";
+  };
+  return { lf, back: (at) => at + before(at), eolAt };
+}
+
+/**
  * Replace `oldStr` with `newStr` in `content`.
  *
- * Line endings are the file's: the match runs on LF, and a CRLF file is
- * written back as CRLF, so a model that only ever writes `\n` can still edit
- * a Windows file without converting every line of it.
+ * Line endings are the file's, line by line: the match runs on LF, each
+ * replaced span is spliced into the ORIGINAL text, and the new lines take the
+ * ending of the line they replace — so a model that only ever writes `\n` can
+ * edit a Windows file, or a file with a few CRLF lines in it, without
+ * converting a single line it did not touch.
  */
 export function replaceIn(
   content: string,
@@ -215,8 +269,8 @@ export function replaceIn(
   newStr: string,
   all = false,
 ): Replaced {
-  const crlf = content.includes("\r\n");
-  const hay = crlf ? content.replace(/\r\n/g, "\n") : content;
+  const endings = lineEndings(content);
+  const hay = endings.lf;
   const lf = (s: string) => s.replace(/\r\n/g, "\n");
   let oldText = lf(oldStr);
   let newText = lf(newStr);
@@ -254,16 +308,19 @@ export function replaceIn(
       };
     }
     // Right to left, so earlier spans keep their offsets.
-    let out = hay;
+    let out = content;
     for (const sp of [...spans].reverse()) {
       const matched = hay.slice(sp.start, sp.end);
       const text = s.adapt ? s.adapt(newText, oldText, matched) : newText;
-      out = out.slice(0, sp.start) + text + out.slice(sp.end);
+      const eol = endings.eolAt(sp.start);
+      out = out.slice(0, endings.back(sp.start)) +
+        (eol === "\n" ? text : text.replace(/\n/g, eol)) +
+        out.slice(endings.back(sp.end));
     }
     const line = hay.slice(0, spans[0].start).split("\n").length;
     return {
       ok: true,
-      content: crlf ? out.replace(/\n/g, "\r\n") : out,
+      content: out,
       count: spans.length,
       strategy: s.name,
       line,

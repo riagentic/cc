@@ -106,13 +106,20 @@ writing files, keeping a task list, and running commands).
 inside the project directory, symlinks included. An existing file is only
 overwritten by a conversation that has read it, never after it changed on disk
 since, and every file a turn changes can be put back with **Undo**. `sh` is
-bounded by permission mode: **Ask** shows the exact command and blocks the turn
-on the answer; **Don't ask** refuses destructive commands, scrubs credentials
-from the environment and — where bubblewrap works — runs the command in a
-sandbox that can write only the project, the conversation's own `/tmp` (kept in
-`~/.claude-control/tmp`) and download caches, with credential stores hidden and
-no network or display unless allowed; the model can ask to run one command
-outside it. **Bypass** checks nothing. Stop counts as a refusal. Programs can be
+bounded by **capability** tiers instead of approving every command: **Read**
+lists and searches only; **Write** can also edit files; **Execute** runs
+commands with destructive ones refused, credentials scrubbed, and — where
+bubblewrap works — a sandbox that can write only the project, the conversation's
+own `/tmp` (kept in `~/.claude-control/tmp`) and download caches (network and
+display off unless allowed; the model can ask to leave the sandbox for one
+command); **Allow all** checks nothing. A machine with no bubblewrap has no box
+to put an unattended command in, so Execute holds every command for you there
+instead — as does any command that asks to leave the sandbox. **Pace** (Draft /
+Normal / Quality), on the chat row beside Mode, sets how thorough a turn is —
+Draft is fastest and lightly checked, Normal is tested but still quick, Quality
+is the full thorough pass. **Run as** (Settings) chooses Auto, the `cc-agent`
+Linux user, or you; picking `cc-agent` where there is none refuses the command
+rather than quietly running it as you. Stop counts as a refusal. Programs can be
 left running in the background; messages typed while the agent works are
 delivered into the task at its next step, and "stop" cuts the step short. The
 **Stop** button ends everything at once and sends nothing more.

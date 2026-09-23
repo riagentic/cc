@@ -26,12 +26,20 @@ import { activeProject } from "./workspace.ts";
  * takes the draft.
  */
 
+/**
+ * Which read is the newest. Module state, so a read started a moment ago is
+ * visible to every other at once — see `read`.
+ */
+let latest = 0;
+
 /** Re-read the tree for the active project into the draft.
  *
- *  The walk is I/O, so another switch can land while it runs. The project it
- *  was *of* is therefore checked again before the result is kept: a slower read
- *  of the project you just left must never overwrite the one you are on. */
+ *  The walk is I/O, so another switch — or another click on a folder — can
+ *  land while it runs. Only the newest read keeps its result: a slower walk of
+ *  the project you just left, or of the folders as they were before your last
+ *  click, must never overwrite the one that describes what is on screen. */
 async function read(s: TreeState): Promise<void> {
+  const mine = ++latest;
   const project = activeProject();
   if (!project) {
     s.root = "";
@@ -48,26 +56,30 @@ async function read(s: TreeState): Promise<void> {
   s.loading = true;
   try {
     const io = await import("./catalog.server.ts");
-    const nodes = await io.readTree(project.path, s.open);
+    const nodes = await io.readTree(project.path, [...s.open]);
     // What git thinks changed, gathered with the tree rather than after it:
     // both describe the same moment, and a file list where the marks are one
     // walk behind the names is worse than one with no marks.
     const claude = await import("./claude.server.ts");
     const changed = await claude.gitChanged(project.path);
-    // `activeProject()` is a live read of another cell, which is the point —
-    // it answers "is this still the project on screen *now*".
-    if (activeProject()?.path !== project.path) return;
+    // Superseded: a newer read has the newer expansion set, or the newer
+    // project. `activeProject()` is a live read of another cell, which is the
+    // point — it answers "is this still the project on screen *now*".
+    if (mine !== latest || activeProject()?.path !== project.path) return;
     s.nodes = nodes;
     s.modified = changed.modified;
     s.untracked = changed.untracked;
     s.scannedAt = Date.now();
     s.error = null;
   } catch (e) {
+    if (mine !== latest) return;
     const reason = e instanceof Error ? e.message : String(e);
     s.error = reason;
     log.warn("tree", "read failed", { error: reason });
   } finally {
-    s.loading = false;
+    // The newest read owns the spinner; an older one finishing first must not
+    // switch it off under a walk still running.
+    if (mine === latest) s.loading = false;
   }
 }
 

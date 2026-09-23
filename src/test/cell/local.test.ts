@@ -8,6 +8,7 @@ import { assert, assertEquals } from "@std/assert";
 import { bootCells } from "aio/testing";
 import {
   also,
+  capChat,
   engineOf,
   local,
   localChat,
@@ -19,7 +20,8 @@ import {
   speedOf,
 } from "../../cell/local.ts";
 import { workspace } from "../../cell/workspace.ts";
-import { mayLeaveUnasked, permissionOf, toolBudget } from "../../lib/agent.ts";
+import { capabilityOf, mayLeaveUnasked, toolBudget } from "../../lib/agent.ts";
+import type { LocalMsg } from "../../type/local.ts";
 
 // Conversation temp and saved history go to throwaway roots, not the real
 // app home.
@@ -169,6 +171,7 @@ async function withEngine(
     );
     await run(id, requests);
   } finally {
+    await h.settle();
     h.dispose();
     await server.shutdown();
     await Deno.remove(dir, { recursive: true });
@@ -291,6 +294,7 @@ Deno.test("an unreachable server becomes an error on the page, not a hang", asyn
     assertEquals(chat.status, "idle");
     assert(chat.error !== null);
   } finally {
+    await h.settle();
     h.dispose();
     await Deno.remove(dir, { recursive: true });
   }
@@ -310,6 +314,7 @@ Deno.test("engine config is closed: junk names and URLs never land", async () =>
     await local.setCtx(id, 7);
     assertEquals(localConfig(id).ctx, 4_096); // clamped, not rejected
   } finally {
+    await h.settle();
     h.dispose();
     await Deno.remove(dir, { recursive: true });
   }
@@ -746,6 +751,7 @@ Deno.test("stop aborts a stream that will never end", async () => {
       "no stopped marker",
     );
   } finally {
+    await h.settle();
     h.dispose();
     await server.shutdown();
     await Deno.remove(dir, { recursive: true });
@@ -763,6 +769,7 @@ Deno.test("a junk base URL fails out loud", async () => {
     assertEquals(localConfig(id).baseUrl, "http://localhost:11434");
     assert(localChat(id).error?.includes("Not a server address"));
   } finally {
+    await h.settle();
     h.dispose();
     await Deno.remove(dir, { recursive: true });
   }
@@ -884,6 +891,7 @@ Deno.test("a server that goes silent mid-stream fails the turn with a reason", a
     assert(chat.error !== null && /silent/i.test(chat.error), chat.error ?? "");
   } finally {
     Deno.env.delete("CC_STREAM_IDLE_MS");
+    await h.settle();
     h.dispose();
     await server.shutdown();
     await Deno.remove(dir, { recursive: true });
@@ -1144,6 +1152,7 @@ Deno.test("a typed context window is never overwritten by detection", async () =
     assertEquals(localConfig(id).ctxManual, false);
     assertEquals(localConfig(id).ctx, 65_536);
   } finally {
+    await h.settle();
     h.dispose();
     await server.shutdown();
     await Deno.remove(dir, { recursive: true });
@@ -1172,6 +1181,7 @@ Deno.test("picking an engine adopts what the scan already found", async () => {
       assertEquals(seen.models.includes(cfg.model), true);
     }
   } finally {
+    await h.settle();
     h.dispose();
     await Deno.remove(dir, { recursive: true });
   }
@@ -1185,6 +1195,12 @@ Deno.test("picking an engine adopts what the scan already found", async () => {
  * bounded the honest way instead: the exact command, before it runs, with
  * somebody deciding. These pin that the turn really *blocks* on the answer,
  * because a prompt the loop races past is worse than no prompt at all.
+ *
+ * The tiers replaced asking about every command, so the question now has two
+ * ways to appear: a command that asks to leave the sandbox (`outside_sandbox`,
+ * what these drive — it asks on every machine), and Execute on a machine with
+ * no bubblewrap, where a reading of the command's words is not a wall worth
+ * trusting and every command is held instead.
  */
 Deno.test("a command is held until it is allowed, and the turn waits", async () => {
   await withEngine([
@@ -1192,7 +1208,12 @@ Deno.test("a command is held until it is allowed, and the turn waits", async () 
       toolCalls: [{
         id: "c1",
         name: "sh",
-        args: JSON.stringify({ cmd: "echo held-then-run" }),
+        // Not `echo`: a program that only looks leaves the sandbox unasked
+        // (see `mayLeaveUnasked`), and there would be no question to wait on.
+        args: JSON.stringify({
+          cmd: `deno eval "console.log('held-then-run')"`,
+          outside_sandbox: true,
+        }),
       }],
     },
     { text: "done" },
@@ -1212,7 +1233,10 @@ Deno.test("a command is held until it is allowed, and the turn waits", async () 
           roles: localChat(id).messages.map((m) => m.role),
         }),
     );
-    assertEquals(localChat(id).pending?.cmd, "echo held-then-run");
+    assertEquals(
+      localChat(id).pending?.cmd,
+      `deno eval "console.log('held-then-run')"`,
+    );
     assertEquals(localChat(id).messages.some((m) => m.role === "tool"), false);
     assertEquals(localChat(id).status, "working");
 
@@ -1222,7 +1246,8 @@ Deno.test("a command is held until it is allowed, and the turn waits", async () 
     const toolMsg = localChat(id).messages.find((m) => m.role === "tool")!;
     assert(toolMsg.text.includes("held-then-run"), toolMsg.text);
     // Answering does not silently grant everything after it.
-    assertEquals(localConfig(id).permission, undefined);
+    assertEquals(capabilityOf(localConfig(id)), "execute");
+    assertEquals(localConfig(id).outsideAllowed, undefined);
     assertEquals(localChat(id).pending, null);
   });
 });
@@ -1233,7 +1258,7 @@ Deno.test("a refused command never runs, and the model is told why", async () =>
       toolCalls: [{
         id: "c1",
         name: "sh",
-        args: JSON.stringify({ cmd: "rm -rf /" }),
+        args: JSON.stringify({ cmd: "rm -rf /", outside_sandbox: true }),
       }],
     },
     { text: "understood" },
@@ -1259,7 +1284,10 @@ Deno.test("stop counts as a refusal — a stopped turn never runs the command", 
       toolCalls: [{
         id: "c1",
         name: "sh",
-        args: JSON.stringify({ cmd: "echo must-not-run" }),
+        args: JSON.stringify({
+          cmd: `deno eval "console.log('must-not-run')"`,
+          outside_sandbox: true,
+        }),
       }],
     },
     { text: "…" },
@@ -1287,14 +1315,20 @@ Deno.test('"stop asking" applies to the project, and can be taken back', async (
       toolCalls: [{
         id: "c1",
         name: "sh",
-        args: JSON.stringify({ cmd: "echo first" }),
+        args: JSON.stringify({
+          cmd: `deno eval "console.log('first')"`,
+          outside_sandbox: true,
+        }),
       }],
     },
     {
       toolCalls: [{
         id: "c2",
         name: "sh",
-        args: JSON.stringify({ cmd: "echo second" }),
+        args: JSON.stringify({
+          cmd: `deno eval "console.log('second')"`,
+          outside_sandbox: true,
+        }),
       }],
     },
     { text: "done" },
@@ -1305,20 +1339,25 @@ Deno.test('"stop asking" applies to the project, and can be taken back', async (
     await local.answer(id, true, true);
     await turn;
 
-    // "…and stop asking" lands on the guarded mode, not on Bypass: the button
-    // says stop interrupting me, not "and delete whatever you like".
-    assertEquals(localConfig(id).permission, "dontAsk");
+    // "…and stop asking" lands on the guarded tier, not on "Allow all": the
+    // button says stop interrupting me, not "and delete whatever you like".
+    // Asked about leaving the sandbox, it means this program — `deno` — and
+    // the tier does not move at all.
+    assertEquals(capabilityOf(localConfig(id)), "execute");
+    assertEquals(localConfig(id).outsideAllowed, ["deno"]);
     // The second command in the same turn ran without a second question.
     const outputs = localChat(id).messages.filter((m) => m.role === "tool");
     assertEquals(outputs.length, 2);
     assert(outputs[1].text.includes("second"), outputs[1].text);
 
-    // …and it is one click back to being asked.
-    await local.setPermission(id, "ask");
-    assertEquals(localConfig(id).permission, "ask");
+    // …and it is one click back to a tier with no shell at all, which also
+    // forgets what was allowed outside.
+    await local.setCapability(id, "write");
+    assertEquals(capabilityOf(localConfig(id)), "write");
+    assertEquals(localConfig(id).outsideAllowed, undefined);
     // A junk value from the control plane fails closed, never open.
-    await local.setPermission(id, "whatever" as never);
-    assertEquals(localConfig(id).permission, "ask");
+    await local.setCapability(id, "whatever" as never);
+    assertEquals(capabilityOf(localConfig(id)), "read");
   });
 });
 
@@ -2086,14 +2125,24 @@ Deno.test("an approval click for a command already dealt with does nothing", asy
   await withEngine([
     {
       toolCalls: [
-        { id: "a1", name: "sh", args: `{"cmd":"echo first"}` },
-        { id: "a2", name: "sh", args: `{"cmd":"echo second"}` },
+        {
+          id: "a1",
+          name: "sh",
+          args:
+            `{"cmd":"deno eval \\"console.log('first')\\"","outside_sandbox":true}`,
+        },
+        {
+          id: "a2",
+          name: "sh",
+          args:
+            `{"cmd":"deno eval \\"console.log('second')\\"","outside_sandbox":true}`,
+        },
       ],
     },
     { text: "both done" },
   ], async (id) => {
     await local.setMode(id, "agent");
-    await local.setPermission(id, "ask");
+    await local.setCapability(id, "execute");
     const turn = local.send("go", id);
     // Answer the first question, then click its button again: the second
     // command is already on screen by then, and the stale click must not
@@ -2706,6 +2755,7 @@ Deno.test("a context overflow is answered with a tighter pack and a retry", asyn
     // not a duplicate.
     assertEquals(chat.messages.filter((m) => m.text === "hi").length, 1);
   } finally {
+    await h.settle();
     h.dispose();
     await server.shutdown();
     await Deno.remove(dir, { recursive: true });
@@ -2776,6 +2826,7 @@ Deno.test("a stream that dies before its first chunk is retried once", async () 
       "second time lucky",
     );
   } finally {
+    await h.settle();
     h.dispose();
     await server.shutdown();
     await Deno.remove(dir, { recursive: true });
@@ -3599,7 +3650,8 @@ Deno.test("a new project starts in Don't ask when the last conversation did", as
       const id2 = workspace.projects.find((p) => p.path === dir2)!.id;
       await local.setMode(id2, "agent");
       assertEquals(localConfig(id2).permission, "dontAsk");
-      // Bypass does not travel.
+      // "Allow all" does not travel: a new project lands on the guarded
+      // tier, never on the one with no checks at all.
       await local.setPermission(id, "bypass");
       await local.send("again", id);
       const dir3 = await Deno.makeTempDir();
@@ -3607,7 +3659,7 @@ Deno.test("a new project starts in Don't ask when the last conversation did", as
         await workspace.addProject(dir3);
         const id3 = workspace.projects.find((p) => p.path === dir3)!.id;
         await local.setMode(id3, "agent");
-        assertEquals(permissionOf(localConfig(id3)), "ask");
+        assertEquals(capabilityOf(localConfig(id3)), "execute");
       } finally {
         await Deno.remove(dir3, { recursive: true });
       }
@@ -3988,11 +4040,9 @@ Deno.test("a job run outside the box: its log is readable where it says, and the
     assert(log.includes(key) && log.endsWith("job-1.log"), started);
     // `cat` of that log, outside, is a look: test13 was asked about it,
     // because the app's data directory counted as a hidden place.
-    assert(
-      mayLeaveUnasked(`cat ${log} | tail -40`, [], io.lookEnv(key)),
-      io.lookEnv(key).own?.join(),
-    );
-    assert(!mayLeaveUnasked(`cat ${other(log)}`, [], io.lookEnv(key)));
+    const env = await io.lookEnv(key);
+    assert(mayLeaveUnasked(`cat ${log} | tail -40`, [], env), env.own?.join());
+    assert(!mayLeaveUnasked(`cat ${other(log)}`, [], env));
     const read = await io.runTool(
       "agent",
       cwd,
@@ -4078,7 +4128,7 @@ Deno.test("a wasted command shape is answered before anyone is asked", async () 
     { text: "ok, in the background then" },
   ], async (id) => {
     await local.setMode(id, "agent");
-    await local.setPermission(id, "ask");
+    await local.setCapability(id, "execute");
     const turn = local.send("run it", id);
     let asked = false;
     await until(() => {
@@ -4841,4 +4891,309 @@ Deno.test("writing against a vendored framework without reading it gets one nudg
   } finally {
     await Deno.remove(store, { recursive: true }).catch(() => {});
   }
+});
+
+Deno.test("a tool result carries no escapes, controls or invisible tags", async () => {
+  await withEngine([
+    {
+      toolCalls: [{
+        id: "c1",
+        name: "read",
+        args: JSON.stringify({ path: "noisy.txt" }),
+      }],
+    },
+    { text: "Read it." },
+  ], async (id) => {
+    const dir = workspace.projects.find((p) => p.id === id)!.path;
+    // Colour, a BEL, a carriage-return overwrite, and an ASCII-smuggling TAG.
+    await Deno.writeTextFile(
+      `${dir}/noisy.txt`,
+      "start\x1b[31mred\x1b[0m\x07mid\rdone\u{E0069}\u{E0067}end\n",
+    );
+    await local.setMode(id, "agent");
+    await local.send("read noisy.txt", id);
+    const tool = localChat(id).messages.find((m) => m.role === "tool")!;
+    assertEquals(tool.text.includes("\x1b"), false);
+    assertEquals(tool.text.includes("\x07"), false);
+    assertEquals(tool.text.includes("\u{E0069}"), false);
+    // The CR became a newline, so both halves survive.
+    assert(tool.text.includes("mid\ndone"), JSON.stringify(tool.text));
+    assert(tool.text.includes("startred"), JSON.stringify(tool.text));
+  });
+});
+
+Deno.test("an instruction file in a subdirectory rides the result that entered it", async () => {
+  await withEngine([
+    {
+      toolCalls: [{
+        id: "r1",
+        name: "read",
+        args: JSON.stringify({ path: "packages/api/main.ts" }),
+      }],
+    },
+    { text: "Done." },
+  ], async (id) => {
+    const dir = workspace.projects.find((p) => p.id === id)!.path;
+    await Deno.mkdir(`${dir}/packages/api`, { recursive: true });
+    await Deno.writeTextFile(
+      `${dir}/packages/api/AGENTS.md`,
+      "Use the api rules.\n",
+    );
+    await Deno.writeTextFile(
+      `${dir}/packages/api/main.ts`,
+      "export const x = 1;\n",
+    );
+    await local.setMode(id, "agent");
+    await local.send("read the api entry", id);
+    const tool = localChat(id).messages.find((m) => m.role === "tool")!;
+    assert(tool.text.includes("Use the api rules."), tool.text);
+    assert(tool.text.includes("packages/api/AGENTS.md"), tool.text);
+  });
+});
+
+Deno.test("an A,B,A,B loop with identical results is named as a cycle", async () => {
+  // Two commands that each return a constant result and repeat only three
+  // times before the guard fires — the per-call tally would not cut until the
+  // fourth, and nothing is ever three in a row, so only a cycle check sees it.
+  const script: Scripted[] = [];
+  for (let i = 0; i < 3; i++) {
+    script.push({
+      toolCalls: [{
+        id: `a${i}`,
+        name: "sh",
+        args: JSON.stringify({ cmd: "echo AAA" }),
+      }],
+    });
+    script.push({
+      toolCalls: [{
+        id: `b${i}`,
+        name: "sh",
+        args: JSON.stringify({ cmd: "echo BBB" }),
+      }],
+    });
+  }
+  script.push({ text: "Stopped." });
+  await withEngine(script, async (id, requests) => {
+    await local.setMode(id, "agent");
+    await local.setPermission(id, "bypass");
+    await local.send("go round forever", id);
+    // The note is a one-shot on the next request, not a transcript row.
+    const carried = requests.some((r) =>
+      JSON.stringify(r).includes("repeated the same 2 calls")
+    );
+    assertEquals(carried, true);
+  });
+});
+
+/* ── the audit's walls ────────────────────────────────────────────────────── */
+
+Deno.test("a link in the conversation's temp does not lead out of it", async () => {
+  // The real shape: the temp under a dotted directory of the real home (the
+  // app's is ~/.claude-control/tmp), the link aimed at a key file in another
+  // dotted directory there. A temp-dir stand-in hides exactly this.
+  const io = await import("../../cell/local.server.ts");
+  const home = Deno.env.get("HOME")!;
+  const tag = crypto.randomUUID().slice(0, 8);
+  const root = `${home}/.cc-test-tmp-${tag}`;
+  const vault = `${home}/.cc-test-vault-${tag}`;
+  const was = Deno.env.get("CC_TMP_ROOT")!;
+  const cwd = await Deno.makeTempDir();
+  const key = `conv-${tag}`;
+  try {
+    Deno.env.set("CC_TMP_ROOT", root);
+    const tmp = `${root}/${key}/tmp`;
+    await Deno.mkdir(tmp, { recursive: true });
+    await Deno.mkdir(vault);
+    await Deno.writeTextFile(`${vault}/id_ed25519`, "PRIVATE-KEY-BYTES");
+    await Deno.symlink(`${vault}/id_ed25519`, `${tmp}/k`);
+    await Deno.symlink(vault, `${tmp}/d`);
+    await Deno.writeTextFile(`${tmp}/job-1.log`, "started ok");
+    for (
+      const path of ["/tmp/k", `${tmp}/k`, "/tmp/d/id_ed25519", `${tmp}/d`]
+    ) {
+      for (const tool of ["read", "ls", "grep"]) {
+        const args = tool === "grep" ? { pattern: "PRIVATE", path } : { path };
+        const out = await io.runTool("read", cwd, tool, JSON.stringify(args), {
+          key,
+        });
+        assert(!out.includes("PRIVATE-KEY-BYTES"), `${tool} ${path}: ${out}`);
+        assert(!out.includes("id_ed25519") || /private|Error/.test(out), out);
+      }
+    }
+    // The conversation's own files are still its own, by either name.
+    for (const path of ["/tmp/job-1.log", `${tmp}/job-1.log`]) {
+      const out = await io.runTool(
+        "read",
+        cwd,
+        "read",
+        JSON.stringify({ path }),
+        { key },
+      );
+      assert(out.includes("started ok"), out);
+    }
+  } finally {
+    Deno.env.set("CC_TMP_ROOT", was);
+    await Deno.remove(root, { recursive: true }).catch(() => {});
+    await Deno.remove(vault, { recursive: true }).catch(() => {});
+    await Deno.remove(cwd, { recursive: true }).catch(() => {});
+  }
+});
+
+Deno.test("the sandbox hides ~/.config but what tools need from it", async () => {
+  const io = await import("../../cell/local.server.ts");
+  if (!await io.sandboxAvailable()) {
+    console.warn("bubblewrap unavailable here — sandbox test skipped");
+    return;
+  }
+  const home = Deno.env.get("HOME")!;
+  const tag = crypto.randomUUID().slice(0, 8);
+  // An entry nobody listed — rclone's remotes, copilot's token, a wallet.
+  const probe = `${home}/.config/cc-test-probe-${tag}`;
+  const cwd = await Deno.makeTempDir();
+  try {
+    await Deno.mkdir(probe, { recursive: true });
+    await Deno.writeTextFile(`${probe}/token`, "TOKEN-BYTES");
+    const git = await Deno.stat(`${home}/.config/git`).then(
+      () => true,
+      () => false,
+    );
+    const out = await io.runTool(
+      "agent",
+      cwd,
+      "sh",
+      JSON.stringify({
+        cmd: `cat ${probe}/token 2>&1; ls ${home}/.config | wc -l;` +
+          ` test -d ${home}/.config/git && echo GIT-SHOWN`,
+      }),
+      {
+        key: `box-${tag}`,
+        permission: "dontAsk",
+        capability: "execute",
+        runAs: "user",
+      },
+    );
+    assert(!out.includes("TOKEN-BYTES"), out);
+    if (git) assert(out.includes("GIT-SHOWN"), out);
+  } finally {
+    await Deno.remove(probe, { recursive: true }).catch(() => {});
+    await Deno.remove(cwd, { recursive: true }).catch(() => {});
+  }
+});
+
+Deno.test("a program on PATH inside the project is never a look outside", async () => {
+  const io = await import("../../cell/local.server.ts");
+  const cwd = await Deno.realPath(await Deno.makeTempDir());
+  const path = Deno.env.get("PATH") ?? "";
+  try {
+    await Deno.mkdir(`${cwd}/bin`);
+    await Deno.writeTextFile(`${cwd}/bin/status-tool`, "#!/bin/sh\ntrue\n");
+    await Deno.chmod(`${cwd}/bin/status-tool`, 0o755);
+    // A relative PATH entry is searched from where the command runs.
+    Deno.env.set("PATH", `bin:${path}`);
+    assertEquals(
+      await io.whichIn("status-tool", "bin:/usr/bin", cwd),
+      `${cwd}/bin/status-tool`,
+    );
+    const cmd = "status-tool --help";
+    assert(
+      !mayLeaveUnasked(cmd, [], await io.lookEnv("k", cwd, cmd)),
+      "a program the box can write ran outside unasked",
+    );
+    // One the box cannot write still looks.
+    const ls = "ls -la";
+    assert(mayLeaveUnasked(ls, [], await io.lookEnv("k", cwd, ls)));
+  } finally {
+    Deno.env.set("PATH", path);
+    await Deno.remove(cwd, { recursive: true }).catch(() => {});
+  }
+});
+
+Deno.test("the app's own git runs nothing a sandboxed command planted", async () => {
+  // The project's .git is writable in the box; the app's git runs outside it.
+  const io = await import("../../cell/local.server.ts");
+  const cwd = await Deno.makeTempDir();
+  const git = (...args: string[]) =>
+    new Deno.Command("git", { args: ["-C", cwd, ...args], stdout: "null" })
+      .output();
+  try {
+    if (!(await git("init", "-q")).success) return; // no git here
+    await Deno.writeTextFile(`${cwd}/f`, "a\n");
+    await git("add", "f");
+    await git(
+      "-c",
+      "user.email=a@b",
+      "-c",
+      "user.name=a",
+      "commit",
+      "-qm",
+      "i",
+    );
+    await git("config", "core.fsmonitor", `touch ${cwd}/PWNED_FSM; false`);
+    await git("config", "filter.x.clean", `touch ${cwd}/PWNED_FILTER; cat`);
+    await Deno.writeTextFile(`${cwd}/.git/info/attributes`, "* filter=x\n");
+    await Deno.writeTextFile(
+      `${cwd}/.git/hooks/post-index-change`,
+      `#!/bin/sh\ntouch ${cwd}/PWNED_HOOK\n`,
+    );
+    await Deno.chmod(`${cwd}/.git/hooks/post-index-change`, 0o755);
+    await new Promise((r) => setTimeout(r, 1_100)); // a stat the index missed
+    await Deno.writeTextFile(`${cwd}/f`, "b\n");
+    const env = await io.projectEnv(cwd, 32_768);
+    const planted = [...Deno.readDirSync(cwd)].map((e) => e.name)
+      .filter((n) => n.startsWith("PWNED"));
+    assertEquals(planted, []);
+    assert(env.git?.includes("1 uncommitted change"), env.git);
+  } finally {
+    await Deno.remove(cwd, { recursive: true }).catch(() => {});
+  }
+});
+
+Deno.test("a sh timeout past ten minutes is seconds, not milliseconds", async () => {
+  // `timeout: 1800` became 1.8 s: every long build killed at once, in a loop.
+  const { shTimeout } = await import("../../cell/local.server.ts");
+  const max = 600_000;
+  assertEquals(shTimeout(1_800, 120_000, max), { ms: max, capped: true });
+  assertEquals(shTimeout(600, 120_000, max), { ms: 600_000, capped: false });
+  assertEquals(shTimeout(30, 120_000, max), { ms: 30_000, capped: false });
+  // Only a number no one means as seconds (over an hour) is milliseconds.
+  assertEquals(shTimeout(5_000, 120_000, max), { ms: 5_000, capped: false });
+  assertEquals(shTimeout(0, 120_000, max), { ms: 120_000, capped: false });
+  assertEquals(shTimeout(-4, 120_000, max), { ms: 120_000, capped: false });
+});
+
+Deno.test("the row cap keeps the task and folds what it cuts into the summary", () => {
+  // A long agent turn passes 400 rows by itself: the request that started it
+  // was spliced away with nothing left of it in the model's view.
+  const row = (i: number, extra: Partial<LocalMsg> = {}): LocalMsg => ({
+    id: `r${i}`,
+    role: "assistant",
+    text: `step ${i}`,
+    at: i,
+    ...extra,
+  });
+  const task = row(0, { role: "user", text: "build the pomodoro app" });
+  const rows = [
+    task,
+    ...Array.from({ length: 12 }, (_, i) =>
+      row(i + 1, {
+        toolCalls: [{ id: `c${i}`, name: "read", args: `{"path":"f${i}.ts"}` }],
+      })),
+    row(13, { role: "user", text: "use yarn", steer: true }),
+  ];
+  const c = { messages: rows, summary: "", archived: 0 };
+  const gone = capChat(c, 10);
+  assertEquals(c.messages.length, 10);
+  assertEquals(c.messages[0].id, "r0");
+  assertEquals(c.archived, gone.length);
+  assert(!gone.some((m) => m.id === "r0"));
+  assert(c.summary.includes("- read f0.ts"), c.summary);
+  // Rows already folded by the packer are not summarised twice.
+  const again = { messages: [...c.messages], summary: "", archived: 0 };
+  again.messages.forEach((m) => m.evicted = true);
+  capChat(again, 5);
+  assertEquals(again.summary, "");
+  // Under the limit nothing moves.
+  const small = { messages: rows.slice(0, 3), summary: "s", archived: 0 };
+  assertEquals(capChat(small, 10), []);
+  assertEquals(small.summary, "s");
 });

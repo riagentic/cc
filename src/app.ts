@@ -60,6 +60,14 @@ await aio.run({
   // (dep/aio/docs/debugging/performance.md); every other effect stays at 5 ms.
   perfBudget: { methods: { "local:send": { effect: 60 } } },
 
+  // The session cell's `onDestroy` starts stopping every `claude` child but
+  // cannot be awaited; this is. Shutdown waits here, so each child gets its
+  // stdin EOF and grace period before the process exits, not a SIGKILL.
+  onStop: async () => {
+    const io = await import("./cell/claude.server.ts");
+    await io.stopAll();
+  },
+
   // Local conversations nobody has opened for ten minutes leave the app's
   // state for disk, and come back the moment they are opened. State is saved
   // whole on every change; 3.6 MB of old chats made every save carry them.

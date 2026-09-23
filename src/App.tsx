@@ -44,8 +44,9 @@ import { SettingsPage } from "./ui/SettingsPage.tsx";
 import { Banner, Empty } from "./ui/parts.tsx";
 import { PermissionQueue } from "./ui/PermissionPrompt.tsx";
 import {
-  backgroundApprovals,
   pendingPermissions,
+  sessionOf,
+  sessionsOf,
   view,
 } from "./cell/session.ts";
 import { activeIsLocal, engineOf, localChat } from "./cell/local.ts";
@@ -242,26 +243,12 @@ function useWheelVeto(anchor: { current: HTMLElement | null }): void {
  * this says it in words, and takes you there.
  */
 function ElsewhereBanner(): VNode | null {
-  // Claude approvals, and a local engine's held command — the same fact about
-  // two integrations. Both mean a turn somewhere else has stopped and will not
-  // start again until somebody answers, and the prompt for either only renders
-  // for the project on screen.
-  const active = workspace.activeId;
-  const waiting = [
-    ...backgroundApprovals(),
-    ...workspace.projects
-      .filter((p) =>
-        p.id !== active && engineOf(p.id) !== "claude" &&
-        localChat(p.id).pending !== null
-      )
-      .map((p) => ({ id: p.id, count: 1 })),
-  ];
+  const waiting = waitingElsewhere();
   if (waiting.length === 0) return null;
   const total = waiting.reduce((n, w) => n + w.count, 0);
-  const names = waiting
-    .map((w) =>
-      workspace.projects.find((p) => p.id === w.id)?.name ?? "a project"
-    )
+  const names = [...new Set(waiting.map((w) => w.projectId))]
+    .map((id) => workspace.projects.find((p) => p.id === id)?.name)
+    .map((name) => name ?? "a project")
     .join(", ");
 
   return (
@@ -272,12 +259,49 @@ function ElsewhereBanner(): VNode | null {
         <button
           type="button"
           class="btn btn--sm"
-          onClick={() => workspace.select(waiting[0].id)}
+          // The conversation itself, not its project: a project's first chat
+          // is not necessarily the one that is waiting, and when the one that
+          // is waiting sits in the project already on screen, selecting the
+          // project did nothing at all.
+          onClick={() => workspace.selectPane(waiting[0].key)}
         >
           Go there
         </button>
       </Banner>
     </div>
+  );
+}
+
+/**
+ * Every conversation stopped on an approval, except the one on screen.
+ *
+ * Per conversation, not per project: a project can hold several chats, any of
+ * them can be the one waiting — a second chat in the project on screen as
+ * much as one elsewhere — and "Go there" has to land on it. Claude approvals
+ * and a local engine's held command are the same fact about two
+ * integrations: a turn has stopped and will not start again until somebody
+ * answers, and the prompt for either only renders for the chat on screen.
+ */
+function waitingElsewhere(): {
+  projectId: string;
+  key: string;
+  count: number;
+}[] {
+  const showing = activeSessionKey();
+  return workspace.projects.flatMap((p) =>
+    sessionsOf(p.id)
+      .filter((key) => key !== showing)
+      .map((key) => ({
+        projectId: p.id,
+        key,
+        count: engineOf(key) === "claude"
+          ? sessionOf(key).permissions.filter((r) => r.status === "pending")
+            .length
+          : localChat(key).pending !== null
+          ? 1
+          : 0,
+      }))
+      .filter((w) => w.count > 0)
   );
 }
 

@@ -91,14 +91,22 @@ const AGENT_TOOLS = new Set(["Task", "Agent", "Workflow"]);
 
 export const isAgentTool = (name: string): boolean => AGENT_TOOLS.has(name);
 
-const str = (v: unknown): string | null =>
+/* Total readers over the wire: the CLI's JSON is not ours, so every field is
+ * read through one of these and a missing or mistyped one reads as absent.
+ * Exported so the reducer reads the same wire the same way. */
+
+/** A non-empty string, or `null`. */
+export const str = (v: unknown): string | null =>
   typeof v === "string" && v.length > 0 ? v : null;
-const num = (v: unknown): number => (typeof v === "number" ? v : 0);
-const obj = (v: unknown): Record<string, unknown> =>
+/** A number, or `0`. */
+export const num = (v: unknown): number => (typeof v === "number" ? v : 0);
+/** A plain object (never an array), or `{}`. */
+export const obj = (v: unknown): Record<string, unknown> =>
   v && typeof v === "object" && !Array.isArray(v)
     ? v as Record<string, unknown>
     : {};
-const arr = (v: unknown): unknown[] => (Array.isArray(v) ? v : []);
+/** An array, or `[]`. */
+export const arr = (v: unknown): unknown[] => (Array.isArray(v) ? v : []);
 
 /** Parse one NDJSON line; `null` for blank lines and non-JSON noise. */
 export function parseLine(line: string): Evt | null {
@@ -268,10 +276,6 @@ export function blocksOf(message: unknown): Block[] {
   return out;
 }
 
-/** `tool_result.content` is a string, or an array of content blocks — or, from
- *  some MCP servers, an array of bare strings. Flatten all three: reading only
- *  the block shape turned `["hello", "world"]` into an empty result, which is a
- *  tool whose output silently vanished. */
 /**
  * The most of a tool's output to keep on the message.
  *
@@ -284,6 +288,10 @@ export function blocksOf(message: unknown): Block[] {
  */
 const MAX_RESULT = 4_000;
 
+/** `tool_result.content` is a string, or an array of content blocks — or, from
+ *  some MCP servers, an array of bare strings. Flatten all three: reading only
+ *  the block shape turned `["hello", "world"]` into an empty result, which is a
+ *  tool whose output silently vanished. */
 export function resultText(content: unknown): string {
   if (typeof content === "string") return content;
   return arr(content)

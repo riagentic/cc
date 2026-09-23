@@ -9,7 +9,12 @@
 import { assertEquals } from "@std/assert";
 import { testCell } from "aio/testing";
 import { voice, voiceReady } from "../../cell/voice.ts";
-import { mostConfident } from "../../cell/voice.server.ts";
+import {
+  answered,
+  type Heard,
+  mostConfident,
+  transcribe,
+} from "../../cell/voice.server.ts";
 
 testCell(voice, "off by default, and off means nothing happens", (t) => {
   // The GPU whisper would hold is VRAM taken from the model this app exists
@@ -17,7 +22,7 @@ testCell(voice, "off by default, and off means nothing happens", (t) => {
   // the cell anyway meets the same answer as the held key: silence.
   t.init();
   t.expect.state((s) => s.config.enabled === false);
-  t.expect.state((s) => voiceReady() === false);
+  t.expect.state((_s) => voiceReady() === false);
   t.send.start();
   t.expect.state((s) => s.status === "off" && s.error === null);
   // A config without the field — saved before the switch existed — is off
@@ -44,7 +49,7 @@ testCell(voice, "enabling is what makes the key mean anything", (t) => {
   // stopped, not "finishes this one last sentence".
   t.send.setEnabled(false);
   t.expect.state((s) => s.config.enabled === false);
-  t.expect.state((s) => voiceReady() === false);
+  t.expect.state((_s) => voiceReady() === false);
 });
 
 testCell(
@@ -67,26 +72,26 @@ testCell(voice, "silence is not transcribed", (t) => {
   // by accident must therefore produce NOTHING — not an empty string that
   // still counts as a turn, and certainly not a guess.
   t.init({ status: "transcribing" });
-  t.send.settled("", "");
+  t.send.settled("", "", 0);
   t.expect.state((s) => s.status === "off");
   t.expect.state((s) => s.text === "" && s.turn === 0);
 });
 
 testCell(voice, "the same sentence twice is two turns", (t) => {
   t.init();
-  t.send.settled("run the tests", "");
+  t.send.settled("run the tests", "", 0);
   t.expect.state((s) => s.text === "run the tests" && s.turn === 1);
   t.send.taken();
   // Said again: the text is identical, so only the counter can tell the page
   // that something new happened. Without it the second one looks like the
   // first still sitting there.
-  t.send.settled("run the tests", "");
+  t.send.settled("run the tests", "", 0);
   t.expect.state((s) => s.turn === 2);
 });
 
 testCell(voice, "a failure is reported, not swallowed", (t) => {
   t.init({ status: "transcribing" });
-  t.send.settled("", "the speech server answered 500");
+  t.send.settled("", "the speech server answered 500", 0);
   t.expect.state((s) => s.status === "error");
   t.expect.state((s) => s.error === "the speech server answered 500");
   // And it does not leave stale words behind to be pasted later.
@@ -104,7 +109,7 @@ testCell(voice, "the meter only moves while recording", (t) => {
   t.expect.state((s) => s.level === 0);
   // A late chunk arriving after the key was released must not light the meter
   // back up under a "transcribing" label.
-  t.send.thinking();
+  t.send.thinking(0);
   t.send.hearing(0.8);
   t.expect.state((s) => s.level === 0);
 });
@@ -233,4 +238,107 @@ Deno.test("mostConfident — the answer the model actually believed", () => {
     ])?.language,
     "czech",
   );
+});
+
+testCell(
+  voice,
+  "a press with nothing in it does not wipe the error before it",
+  (t) => {
+    // The microphone failed to open: status "error", saying why. The release
+    // that follows finds no recording and discards — and used to go through
+    // `settled("", "")`, which set "off" and logged "the model made no words",
+    // so a broken mic looked, one release later, like a working one.
+    t.init({ status: "error", error: "no such device", take: 1 });
+    t.send.discarded(1);
+    t.expect.state((s) => s.status === "error" && s.error === "no such device");
+    // A brushed key, though, is just over.
+    t.init({ status: "recording", take: 2, level: 0.3 });
+    t.send.discarded(2);
+    t.expect.state((s) => s.status === "off" && s.level === 0);
+    t.expect.state((s) => s.turn === 0 && s.text === "");
+  },
+);
+
+testCell(
+  voice,
+  "a second press is not ended by the first one's words",
+  (t) => {
+    // Press, release — transcribing — press again before the model answers.
+    // The first turn's ending used to set "off" under the open microphone.
+    t.init({ status: "recording", take: 2 });
+    t.send.settled("first sentence", "", 1);
+    // The words are still yours, and still handed over…
+    t.expect.state((s) => s.text === "first sentence" && s.turn === 1);
+    // …but the state belongs to the press that is recording now.
+    t.expect.state((s) => s.status === "recording");
+    // Nor can its late "transcribing" or its failure land on it.
+    t.send.thinking(1);
+    t.send.settled("", "the speech server answered 500", 1);
+    t.send.discarded(1);
+    t.expect.state((s) => s.status === "recording" && s.error === null);
+    // The current press's own ending still works.
+    t.send.settled("second", "", 2);
+    t.expect.state((s) => s.status === "off" && s.turn === 2);
+  },
+);
+
+testCell(voice, "every press is a new take", async (t) => {
+  t.init({
+    config: { ...t.state.config, enabled: true, baseUrl: "http://127.0.0.1:9" },
+  });
+  const before = t.state.take;
+  // Capture fails or works depending on the machine — the take moves either
+  // way, because the press happened.
+  await t.send.start();
+  t.expect.state((s) => s.take === before + 1);
+  await t.send.cancel();
+  t.expect.state((s) => s.status !== "recording" && s.turn === 0);
+});
+
+Deno.test("answered — a retry that failed does not sink the ones that worked", () => {
+  const good: Heard = {
+    text: "Testy jsou zelené",
+    language: "czech",
+    confidence: 0.9,
+  };
+  const out = answered([
+    { status: "rejected", reason: new Error("the speech server answered 500") },
+    { status: "fulfilled", value: good },
+  ]);
+  assertEquals(out, [good]);
+  assertEquals(answered([{ status: "rejected", reason: "x" }]), []);
+});
+
+Deno.test("transcribe — one language failing keeps the answer in hand", async () => {
+  // Detection says Polish; you speak Czech and Slovak; the Slovak retry fails.
+  // Promise.all threw the lot away — including a perfectly good first answer.
+  const server = Deno.serve({ port: 0, onListen() {} }, async (req) => {
+    const form = await req.formData();
+    const lang = String(form.get("language"));
+    if (lang === "sk") return new Response("busy", { status: 500 });
+    const body = lang === "cs"
+      ? {
+        text: "Testy jsou zelené",
+        language: "czech",
+        segments: [{ words: [{ probability: 0.9 }] }],
+      }
+      : {
+        text: "Testy są zielone",
+        language: "polish",
+        segments: [{ words: [{ probability: 0.5 }] }],
+      };
+    return Response.json(body);
+  });
+  try {
+    const url = `http://127.0.0.1:${server.addr.port}`;
+    const text = await transcribe(new Uint8Array(44), {
+      baseUrl: url,
+      language: "",
+      translate: false,
+      spoken: ["cs", "sk"],
+    }, AbortSignal.timeout(5000));
+    assertEquals(text, "Testy jsou zelené");
+  } finally {
+    await server.shutdown();
+  }
 });

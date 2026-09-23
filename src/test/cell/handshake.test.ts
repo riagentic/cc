@@ -62,6 +62,7 @@ async function withStub(
     await workspace.addProject(dir);
     await body(dir);
   } finally {
+    await booted.settle();
     booted.dispose();
     if (previous === undefined) Deno.env.delete("CLAUDE_BIN");
     else Deno.env.set("CLAUDE_BIN", previous);

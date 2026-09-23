@@ -77,9 +77,19 @@ let resolving: Promise<string> | null = null;
  *
  * `CC_PTY` overrides everything, which is how you test a host you just built
  * without reinstalling the app.
+ *
+ * Only a success is kept. A failure — the host not built yet, a full disk —
+ * is forgotten as it settles, so building it and pressing Start again works
+ * without restarting the app.
  */
 export function resolveHost(): Promise<string> {
-  return (resolving ??= findHost());
+  if (resolving) return resolving;
+  const attempt = findHost();
+  resolving = attempt;
+  attempt.catch(() => {
+    if (resolving === attempt) resolving = null;
+  });
+  return attempt;
 }
 
 async function findHost(): Promise<string> {
@@ -218,9 +228,6 @@ type Session = {
 
 const live = new Map<string, Session>();
 
-/** Sessions currently open, by key. */
-export const liveTerminals = (): string[] => [...live.keys()];
-
 /**
  * Start a shell on its own terminal.
  *
@@ -338,7 +345,9 @@ async function pump(
     while (true) {
       // Wait while the page is behind. This is the whole back-pressure story:
       // not reading is what fills the pipe.
-      while (events.isBehind()) {
+      // …unless this session has been closed: a reader that waits on a page
+      // for a shell that is already gone never reaches its `finally`.
+      while (!session.closed && events.isBehind()) {
         flush();
         await new Promise((r) => setTimeout(r, BEHIND_MS));
       }
@@ -387,7 +396,9 @@ async function pump(
     if (tail) pending += tail;
     flush();
     session.closed = true;
-    live.delete(key);
+    // Only our own entry. A restart under the same key has already put its
+    // session here, and deleting that one would orphan a running shell.
+    if (live.get(key) === session) live.delete(key);
     log.info("pty", "terminal closed", { key, code: exit ?? 0 });
     events.onExit(exit ?? 0);
   }

@@ -14,33 +14,17 @@ import {
   pendingPermissions,
   runningAgents,
 } from "../cell/session.ts";
-import {
-  activeProject,
-  activeSessionKey,
-  activeSettings,
-  workspace,
-} from "../cell/workspace.ts";
-import { detectedEngines, local, localConfig } from "../cell/local.ts";
+import { activeProject, activeSettings, workspace } from "../cell/workspace.ts";
 import { EFFORTS, modelOf, MODELS, PERMISSION_MODES } from "../lib/stream.ts";
-import { LOCAL_PERMISSIONS, permissionOf } from "../lib/agent.ts";
-import { pct, tildePath, tokens, until, usd } from "../lib/format.ts";
-import { Dot, Elapsed, Menu, Meter, Pill, Stat, useNow } from "./parts.tsx";
-import {
-  BranchStat,
-  ContextStat,
-  ENGINE_OPTIONS,
-  EngineStat,
-  ProjectStat,
-} from "./strip.tsx";
+import { tokens, until, usd } from "../lib/format.ts";
+import { Dot, Elapsed, Menu, Pill, Stat, useNow } from "./parts.tsx";
+import { BranchStat, ContextStat, EngineStat, ProjectStat } from "./strip.tsx";
 import {
   IconAgents,
   IconAlert,
-  IconBranch,
   IconClock,
   IconCoins,
-  IconFolder,
   IconModel,
-  IconPlug,
   IconShield,
   IconTasks,
   IconThinking,
@@ -86,11 +70,11 @@ export function StatusStrip(): VNode {
   // still get wrong, so it is marked instead of being papered over.
   const behind = running && runningModel !== null && chosenModel !== null &&
     runningModel.id !== chosenModel.id;
-  // A local engine runs its own agent loop with its own permission modes, and
-  // the CLI's four mean nothing to it. One row, two vocabularies — a switcher
-  // that cannot affect what it names is worse than no switcher at all.
-  const engineCfg = localConfig(activeSessionKey());
-  const onLocal = engineCfg.engine !== "claude";
+  // This row is the CLI's. `App` swaps it for the local page's own strip the
+  // moment the conversation on screen is answered by a local engine
+  // (`activeIsLocal`), so a local branch HERE can never render: the pace,
+  // run-as and capability pickers a local chat needs live on `LocalStrip` and
+  // in Settings, where they are actually drawn.
 
   return (
     <div class="strip">
@@ -179,58 +163,30 @@ export function StatusStrip(): VNode {
 
       <Stat key="permissions" label="Permissions">
         {IconShield({ size: 14 })}
-        {onLocal
-          ? (
-            <Menu
-              label="Permission mode"
-              value={permissionOf(engineCfg)}
-              title="What the local agent may do without asking"
-              trigger={LOCAL_PERMISSIONS.find((p) =>
-                p.id === permissionOf(engineCfg)
-              )?.label ?? "Ask every time"}
-              options={LOCAL_PERMISSIONS.map((p) => ({
-                id: p.id,
-                label: p.label,
-                hint: p.hint,
-                tone: p.id === "bypass" ? ("danger" as const) : undefined,
-              }))}
-              onChange={(id) =>
-                void local.setPermission(
-                  project?.id ?? workspace.activeId,
-                  id,
-                )}
-              // Unlike the CLI's, this one takes effect on the very next tool
-              // call: the loop reads it per call, not per session.
-              footer={engineCfg.mode === "agent"
-                ? undefined
-                : "Only Agent mode runs commands — this has nothing to gate yet."}
-            />
+        <Menu
+          label="Permission mode"
+          value={activeSettings().permissionMode}
+          title="What Claude Code may do without asking"
+          trigger={PERMISSION_MODES.find((m) =>
+            m.id === settings.permissionMode
           )
-          : (
-            <Menu
-              label="Permission mode"
-              value={activeSettings().permissionMode}
-              title="What Claude Code may do without asking"
-              trigger={PERMISSION_MODES.find((m) =>
-                m.id === settings.permissionMode
-              )?.label ?? settings.permissionMode}
-              options={PERMISSION_MODES.map((m) => ({
-                id: m.id,
-                label: m.label,
-                hint: m.hint,
-                tone: m.id === "bypassPermissions"
-                  ? ("danger" as const)
-                  : undefined,
-              }))}
-              onChange={(id) => workspace.setPermissionMode(id)}
-              footer={modePending
-                ? "The running session is on " +
-                  `${view().meta.permissionMode} — use Restart in Settings.`
-                : running
-                ? "Takes effect on the next session."
-                : undefined}
-            />
-          )}
+            ?.label ?? settings.permissionMode}
+          options={PERMISSION_MODES.map((m) => ({
+            id: m.id,
+            label: m.label,
+            hint: m.hint,
+            tone: m.id === "bypassPermissions"
+              ? ("danger" as const)
+              : undefined,
+          }))}
+          onChange={(id) => workspace.setPermissionMode(id)}
+          footer={modePending
+            ? "The running session is on " +
+              `${view().meta.permissionMode} — use Restart in Settings.`
+            : running
+            ? "Takes effect on the next session."
+            : undefined}
+        />
       </Stat>
 
       <ContextStat key="context" used={used} max={max} measured={measured} />

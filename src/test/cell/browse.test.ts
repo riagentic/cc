@@ -56,6 +56,7 @@ Deno.test("browse — lists folders only, marks repositories", async () => {
     await browse.toggleHidden();
     assertEquals(visibleEntries().length, 4);
   } finally {
+    await h.settle();
     h.dispose();
     await Deno.remove(root, { recursive: true });
   }
@@ -69,6 +70,7 @@ Deno.test("browse — numbered folders sort like numbers", async () => {
     await browse.go(root);
     assertEquals(browse.entries.map((e) => e.name), ["v1", "v2", "v10"]);
   } finally {
+    await h.settle();
     h.dispose();
     await Deno.remove(root, { recursive: true });
   }
@@ -90,6 +92,7 @@ Deno.test("browse — a folder that cannot be read keeps you where you are", asy
     browse.dismissError();
     assertEquals(browse.error, null);
   } finally {
+    await h.settle();
     h.dispose();
     await Deno.remove(root, { recursive: true });
   }
@@ -108,6 +111,7 @@ Deno.test("browse — up stops at the root, and go ignores nonsense", async () =
     await browse.go(42 as unknown as string);
     assertEquals(browse.cwd, "/");
   } finally {
+    await h.settle();
     h.dispose();
   }
 });

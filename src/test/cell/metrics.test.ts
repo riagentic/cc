@@ -31,6 +31,7 @@ Deno.test("metrics — the sampler is armed by watchers and stood down with them
     metrics.unwatch();
     assertEquals(metrics.watchers, 0);
   } finally {
+    await h.settle();
     h.dispose();
   }
 });
@@ -46,6 +47,7 @@ Deno.test("metrics — a sample with nobody watching does nothing", async () => 
     assert(metrics.sampledAt > 0, "a watcher gets one");
     metrics.unwatch();
   } finally {
+    await h.settle();
     h.dispose();
   }
 });
@@ -57,6 +59,7 @@ Deno.test("metrics — one-off sampling ignores the watch count", async () => {
     assert(metrics.sampledAt > 0);
     assertEquals(metrics.watchers, 0, "and does not leave a watcher behind");
   } finally {
+    await h.settle();
     h.dispose();
   }
 });
@@ -69,6 +72,7 @@ Deno.test("metrics — derived readings are absent, not zero, before a sample", 
     assertEquals(busiestGpu(), null);
     assertEquals(vram(), null, "no cards is not a card with no memory");
   } finally {
+    await h.settle();
     h.dispose();
   }
 });

@@ -56,8 +56,10 @@ export function explainRefusal(
 async function scan(s: JobsState): Promise<void> {
   try {
     const io = await import("./catalog.server.ts");
+    // The roster once, handed to the listing: it needs the same answer to
+    // mark stale jobs, and reading it twice could give two.
     const daemon = await io.readDaemon();
-    const found = await io.listJobs();
+    const found = await io.listJobs(daemon);
     // Compared the same way the list is: this is polled every few seconds and
     // an unconditional write would broadcast the whole cell for a value that
     // changes when a daemon starts or stops, which is roughly never.

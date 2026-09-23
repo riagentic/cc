@@ -65,6 +65,9 @@ testUI(
     await ui.settle();
     await withProject(ui, async (id) => {
       await local.setEngine(id, "llamacpp");
+      // A typed (dead) address: the finder must not adopt a real llama.cpp
+      // running on this machine and swap in the model it has loaded.
+      await local.setBaseUrl(id, "http://127.0.0.1:9");
       await local.setModel(id, "qwen-test");
       await ui.settle();
 
@@ -138,12 +141,11 @@ testUI(
       await ui.settle();
       assertEquals(localConfig(id).mode, "agent");
       assertEquals(ui.html().includes("Enable agent mode"), false);
-      // Agent mode writes files by itself and ASKS before a command — the
-      // strip says which of those two it is.
-      assertEquals(ui.html().includes("can write files"), true);
+      // Agent mode defaults to Execute — commands run unasked in a sandbox.
+      assertEquals(ui.html().includes("runs commands unasked"), true);
       assertEquals(ui.AutoApproveCheckbox.checked, false);
 
-      // A command is waiting; ticking the box answers it and every later one.
+      // Already on Execute; a pending command + Auto-approve escalates to Allow all.
       await local.setPermission(id, "dontAsk");
       await local.askCommand(id, "c1", "npm run build", true);
       await ui.settle();

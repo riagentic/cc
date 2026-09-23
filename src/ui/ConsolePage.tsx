@@ -57,6 +57,12 @@ const drawn = new Map<string, { text: string; upTo: number }>();
  *  over; past that the oldest goes, exactly as scrollback always has. */
 const MAX_REDRAW = 256 * 1024;
 
+/** How long a closing terminal is given to finish parsing what it was already
+ *  handed, before it is disposed anyway. A quarter of a megabyte of redraw
+ *  parses in tens of milliseconds; this is the backstop for the case where the
+ *  callback never comes, not a budget anything normally spends. */
+const DRAIN_MS = 2_000;
+
 /**
  * Read one CSS custom property off the document.
  *
@@ -73,27 +79,27 @@ function token(name: string, fallback: string): string {
 /** The terminal palette, from the app's own tokens. */
 function palette() {
   return {
-    background: token("--panel", "#11141c"),
-    foreground: token("--ink", "#e9edf6"),
+    background: token("--panel", "#0c0f15"),
+    foreground: token("--ink", "#e6eaf2"),
     cursor: token("--accent", "#e07a58"),
-    cursorAccent: token("--panel", "#11141c"),
+    cursorAccent: token("--panel", "#0c0f15"),
     selectionBackground: token("--accent-soft", "rgba(224,122,88,.3)"),
-    black: token("--panel-2", "#161a24"),
+    black: token("--panel-2", "#12151d"),
     red: token("--danger", "#f6685e"),
     green: token("--ok", "#46c46b"),
     yellow: token("--warn", "#e3b341"),
     blue: token("--info", "#63a4ff"),
     magenta: token("--violet", "#a982f5"),
-    cyan: "#4fd6c8",
-    white: token("--ink-soft", "#99a3b8"),
-    brightBlack: token("--ink-dim", "#6b7589"),
+    cyan: token("--cyan", "#4fd6c8"),
+    white: token("--ink-soft", "#97a0b3"),
+    brightBlack: token("--ink-dim", "#78829a"),
     brightRed: token("--danger", "#f6685e"),
     brightGreen: token("--ok", "#46c46b"),
     brightYellow: token("--warn", "#e3b341"),
     brightBlue: token("--info", "#63a4ff"),
     brightMagenta: token("--violet", "#a982f5"),
-    brightCyan: "#7ee8dd",
-    brightWhite: token("--ink", "#e9edf6"),
+    brightCyan: token("--cyan", "#4fd6c8"),
+    brightWhite: token("--ink", "#e6eaf2"),
   };
 }
 
@@ -225,6 +231,15 @@ function TerminalView(props: { terminalId: string }): VNode {
   const state = terminalById(props.terminalId);
   const pending = state.out.length;
   const base = state.base;
+  // The palette's two inputs, read HERE for the same reason as the three
+  // above: AIR subscribes a component to what its RENDER body touches, and a
+  // read inside an effect subscribes to nothing at all. They used to be read
+  // in the effect that applies them, under a comment saying they were read
+  // there so the effect would re-run — which is exactly the mistake the
+  // framework warns about, and it meant the terminal's colours never followed
+  // a theme or accent change at all. Closed over by the effect below.
+  const accent = prefs.accent;
+  const theme = workspace.theme;
 
   const host = useRef<HTMLDivElement | null>(null);
   // deno-lint-ignore no-explicit-any
@@ -347,7 +362,39 @@ function TerminalView(props: { terminalId: string }): VNode {
       win?.removeEventListener("resize", onResize);
       ro?.disconnect();
       void consoleCell.unwatch(props.terminalId);
-      t.dispose();
+      // Disposed only once its queued writes have been parsed.
+      //
+      // xterm parses a write in 12ms slices and reschedules the rest with
+      // `setTimeout`, and that loop has no idea the terminal was disposed in
+      // between. The slice that lands afterwards walks the parser into
+      // `_syncTextArea`, which reads `_renderService.dimensions` — a getter
+      // over a renderer that dispose has already taken away. That is the
+      // "Uncaught TypeError: Cannot read properties of undefined (reading
+      // 'dimensions')" in the logs, and because it comes out of a timer there
+      // is nothing of ours on the stack to catch it. Its own guard cannot
+      // help: it tests for the render SERVICE, which survives dispose; only
+      // the renderer inside it is gone.
+      //
+      // `write`'s completion callback is the emulator's own answer — it fires
+      // when everything queued before it has been parsed — so the terminal
+      // goes when the queue is empty. The timer is the backstop: a terminal
+      // that never drains must still be let go, and a leaked emulator is
+      // worse than a late one.
+      let ended = false;
+      const end = () => {
+        if (ended) return;
+        ended = true;
+        clearTimeout(backstop);
+        try {
+          t.dispose();
+        } catch { /* half-built, or already gone: nothing left to close */ }
+      };
+      const backstop = setTimeout(end, DRAIN_MS);
+      try {
+        t.write("", end);
+      } catch {
+        end();
+      }
     });
   });
 
@@ -391,19 +438,35 @@ function TerminalView(props: { terminalId: string }): VNode {
     drawn.set(props.terminalId, seen);
   });
 
-  // The palette follows the theme. Read here so the effect re-runs when either
-  // changes: a terminal whose colours lag a theme switch by one navigation is
-  // the kind of thing nobody reports and everybody notices.
+  // The palette follows the theme. The subscription is the read in the render
+  // body above; this runs after every render that read it, which is what makes
+  // a theme switch reach a terminal that is already on screen.
+  //
+  // Applied only when the skin CHANGES. This page re-renders on every chunk of
+  // output, and each assignment reads twenty custom properties and makes xterm
+  // repaint the whole screen — per chunk, while a build scrolls past. The OS
+  // scheme is part of the skin: under "system" it is what decides the palette.
+  const skinned = useRef("");
   afterRender(() => {
     const t = term.current;
-    if (!t) return;
-    void prefs.accent;
-    void workspace.theme;
+    const osLight = host.current?.ownerDocument.defaultView?.matchMedia?.(
+      "(prefers-color-scheme: light)",
+    ).matches ?? false;
+    const skin = `${theme}/${accent}/${osLight ? "light" : "dark"}`;
+    if (!t || skinned.current === skin) return;
+    skinned.current = skin;
     t.options.theme = palette();
   });
 
   // `data-at` is the drain position, written so the rendered output actually
   // depends on what was read above — an attribute nobody looks at, and the
   // difference between a subscription and a promise of one.
-  return <div class="console" ref={host} data-at={`${base}+${pending}`} />;
+  return (
+    <div
+      class="console"
+      ref={host}
+      data-at={`${base}+${pending}`}
+      data-skin={`${theme}/${accent}`}
+    />
+  );
 }

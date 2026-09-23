@@ -195,43 +195,6 @@ export function startAt(seen: Watched | undefined, msgs: Said[]): string {
 }
 
 /**
- * The same decision, told about BOTH markers.
- *
- * There are two, and the reason is the bug this function exists to end. The
- * cell's marker only moves when a dispatch commits, which is a render or more
- * later — and a reply streaming in causes dozens of renders in that window.
- * Every one of them read the old marker, concluded the message had not been
- * handed over yet, and handed it over again. Your sentence twice, the reply
- * three times, and the count depending on how fast the tokens arrived.
- *
- * So the caller keeps a second marker of its own that it can write the instant
- * it decides, and passes both. Whichever is further along this transcript
- * wins. The cell's still matters: it is the one the speaker's own switch
- * moves, and the only one that survives a reload.
- */
-export function toHandOver(
-  msgs: Said[],
-  cellMark: string,
-  localMark: string,
-  working: boolean,
-): { speak: Said[]; mark: string } {
-  return nextToSpeak(msgs, furtherOn(msgs, cellMark, localMark), working);
-}
-
-/**
- * Whichever of two markers is further along this transcript.
- *
- * A marker that is not in it at all counts as behind one that is — which is
- * what makes switching project safe: the stale local marker loses to the
- * cell's, and `nextToSpeak` then does its own recovery.
- */
-export function furtherOn(msgs: Said[], a: string, b: string): string {
-  const ia = msgs.findIndex((m) => m.id === a);
-  const ib = msgs.findIndex((m) => m.id === b);
-  return ia > ib ? a : b;
-}
-
-/**
  * A Claude Code transcript, flattened to the lines worth hearing.
  *
  * Text blocks only. Thinking is not addressed to you, a tool call is a chip
@@ -359,6 +322,10 @@ export function intoChunks(
   return out.filter((p) => p !== "");
 }
 
+/** The samples inside a WAV, and the rate they were made at — `null` when
+ *  the file does not say. */
+export type Pcm = { pcm: Uint8Array; rate: number | null };
+
 /**
  * The samples inside a WAV, without its header.
  *
@@ -370,26 +337,39 @@ export function intoChunks(
  * The `data` chunk is searched for rather than assumed to be at offset 44: it
  * usually is, and a file carrying a `LIST` or `fact` chunk first is still a
  * valid WAV that nothing else would play wrong.
+ *
+ * The rate comes back with it, read from `fmt `. Stripping the header throws
+ * away the one field that says how fast to play what is left, and a player
+ * told the wrong rate plays a voice at the wrong pitch — which sounds like a
+ * bad model rather than a bad number.
  */
-export function pcmFromWav(bytes: Uint8Array): Uint8Array {
+export function pcmFromWav(bytes: Uint8Array): Pcm {
   const ascii = (at: number) =>
     String.fromCharCode(bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]);
   if (bytes.length < 12 || ascii(0) !== "RIFF" || ascii(8) !== "WAVE") {
     // Not a WAV at all. Raw samples are what the caller wanted anyway, so
     // handing them straight back is the useful answer rather than an error.
-    return bytes;
+    return { pcm: bytes, rate: null };
   }
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  let rate: number | null = null;
   let at = 12;
   while (at + 8 <= bytes.length) {
     const id = ascii(at);
     const size = view.getUint32(at + 4, true);
     const body = at + 8;
+    if (id === "fmt " && body + 8 <= bytes.length) {
+      const hz = view.getUint32(body + 4, true);
+      rate = hz > 0 ? hz : null;
+    }
     if (id === "data") {
-      return bytes.subarray(body, Math.min(bytes.length, body + size));
+      return {
+        pcm: bytes.subarray(body, Math.min(bytes.length, body + size)),
+        rate,
+      };
     }
     // Chunks are word-aligned; an odd length carries a pad byte.
     at = body + size + (size % 2);
   }
-  return bytes.subarray(Math.min(44, bytes.length));
+  return { pcm: bytes.subarray(Math.min(44, bytes.length)), rate };
 }

@@ -77,7 +77,7 @@ export const ACCENTS: {
   { id: "forest", label: "Forest", dark: "#4fc07a", light: "#1a7c45" },
   { id: "grape", label: "Grape", dark: "#a982f5", light: "#6f45cc" },
   { id: "rose", label: "Rose", dark: "#f0709c", light: "#c43665" },
-  { id: "steel", label: "Steel", dark: "#8fa3c4", light: "#4a5b78" },
+  { id: "steel", label: "Steel", dark: "#8fa3c4", light: "#3a4d6b" },
 ];
 
 type PrefsState = {

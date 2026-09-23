@@ -5,11 +5,12 @@
  * what these events put into state — so it is tested event by event, without
  * spawning a process.
  */
-import { assertEquals } from "@std/assert";
+import { assert, assertEquals } from "@std/assert";
 import { testCell } from "aio/testing";
 import { session } from "../../cell/session.ts";
 import {
   blank,
+  forDisk,
   offlineAgain,
   type ProjectSession,
 } from "../../cell/session-reduce.ts";
@@ -602,8 +603,8 @@ testCell(session, "random action fuzzing keeps every invariant", (t) => {
     .filter((k: string) => !BOOT_ONLY.has(k));
   for (let i = 0; i < 120; i++) {
     const key = keys[Math.floor(Math.random() * keys.length)];
-    // deno-lint-ignore no-explicit-any
     try {
+      // deno-lint-ignore no-explicit-any
       void (t.send as any)[key]?.();
     } catch { /* this IS the fuzzer */ }
   }
@@ -1180,4 +1181,107 @@ Deno.test("offlineAgain — a restored conversation does not pretend to be runni
   // null, which is "nobody knows how that finished", because nobody does.
   assertEquals(dead.tools[0].endedAt, 5);
   assertEquals(dead.tools[0].ok, null);
+});
+
+Deno.test("offlineAgain — no call still waits on a prompt, no task still runs", () => {
+  // Restored mid-approval: the prompts are dropped, so a call still pointing at
+  // one would render "needs approval" for a question nobody can answer — and a
+  // task still "running" kept the busy count up on a dead process.
+  const run = {
+    id: "t1",
+    name: "Write",
+    kind: "tool" as const,
+    title: "x",
+    detail: "",
+    input: {},
+    startedAt: 5,
+    endedAt: null,
+    ok: null,
+    output: null,
+    parentToolUseId: null,
+    taskId: null,
+    agent: null,
+    permissionId: "req-1" as string | null,
+  };
+  const p = {
+    ...blank(),
+    tools: [run, { ...run, id: "t2", endedAt: 9, permissionId: "req-2" }],
+    tasks: [{
+      id: "task-1",
+      type: "local_agent",
+      description: "map",
+      status: "running" as const,
+      toolUseId: null,
+      startedAt: 7,
+      endedAt: null,
+      outputFile: null,
+    }],
+  };
+  offlineAgain(p);
+  assertEquals(p.tools.map((t) => t.permissionId), [null, null]);
+  assertEquals(p.tools[0].endedAt, 5);
+  assertEquals(p.tools[0].ok, null);
+  assertEquals(p.tasks[0].status, "stopped");
+  assertEquals(p.tasks[0].endedAt, 7);
+});
+
+testCell(session, "a late interrupt ack cannot mark an idle session", (t) => {
+  // The turn's own result lands first; the ack for the interrupt that ended
+  // it arrives after. Read as "interrupting", the idle session's next failed
+  // turn would be reported as a deliberate stop.
+  t.send.ingest({ type: "system", subtype: "status", status: "requesting" });
+  t.send.ingest({ type: "result", is_error: true, usage: {} });
+  t.expect.state((s) => s.status === "ready");
+  t.send.ingest({
+    type: "control_response",
+    response: { subtype: "success", request_id: "cc-interrupt-9" },
+  });
+  t.expect.state((s) => s.interrupting === false);
+});
+
+Deno.test("forDisk — the stored copy drops the live stream and caps tool inputs", () => {
+  const big = "x".repeat(50_000);
+  const input = { file_path: "/a.ts", content: big };
+  const p = {
+    ...blank(),
+    streaming: { kind: "text" as const, text: "half" },
+    messages: [{
+      id: "m",
+      role: "assistant" as const,
+      blocks: [{ kind: "tool" as const, id: "t", name: "Write", input }],
+      at: 1,
+      parentToolUseId: null,
+    }],
+    tools: [{
+      id: "t",
+      name: "Write",
+      kind: "tool" as const,
+      title: "a.ts",
+      detail: "",
+      input,
+      startedAt: 1,
+      endedAt: null,
+      ok: null,
+      output: null,
+      parentToolUseId: null,
+      taskId: null,
+      agent: null,
+      permissionId: null,
+    }],
+  };
+  const disk = forDisk(p);
+  assertEquals(disk.streaming, null);
+  const stored = disk.tools[0].input.content as string;
+  assert(stored.length < 5_000, `stored ${stored.length} chars`);
+  const block = disk.messages[0].blocks[0];
+  assert(
+    block.kind === "tool" && (block.input.content as string).length < 5_000,
+  );
+  assertEquals(disk.tools[0].input.file_path, "/a.ts");
+  // The live state is untouched — the screen still shows the whole file.
+  assertEquals(p.tools[0].input.content, big);
+  assertEquals(p.streaming?.text, "half");
+  // Nothing to cut, nothing copied.
+  const small = { ...p, streaming: null, tools: [], messages: [] };
+  assertEquals(forDisk(small).tools, small.tools);
 });

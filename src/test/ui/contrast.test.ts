@@ -82,7 +82,7 @@ const INKS = ["--ink", "--ink-soft", "--ink-dim"];
 /** The status colours. Each one is a text colour somewhere — a failed step's
  *  title, a warning banner's words, the green on a finished run — so each one
  *  is held to the same number as any other text. */
-const TONES = ["--info", "--ok", "--warn", "--danger", "--violet"];
+const TONES = ["--info", "--ok", "--warn", "--danger", "--violet", "--cyan"];
 const AA = 4.5;
 
 Deno.test("every accent is readable in every palette", () => {

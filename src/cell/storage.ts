@@ -12,7 +12,7 @@
  * project is gone" is a *momentary observation about a filesystem*, and an
  * unplugged drive looks exactly like a deleted directory.
  */
-import { cell, log } from "aio";
+import { cell, log, type MethodDraftMeta } from "aio";
 import type { StoredProject } from "./storage.server.ts";
 
 /* ── plain helper ─────────────────────────────────────────────────────────────
@@ -22,9 +22,19 @@ import type { StoredProject } from "./storage.server.ts";
  * could land its result either side of its own writes.
  */
 
-/** Walk `~/.claude` into the draft. */
-async function scan(s: StorageState): Promise<void> {
+/**
+ * Walk `~/.claude` into the draft.
+ *
+ * `outcome` is what the caller has to say once the walk is done — a refused
+ * delete — so a clean scan does not wipe the one message explaining why the
+ * row is still there.
+ */
+async function scan(s: Draft, outcome: string | null = null): Promise<void> {
+  // Published now: a transactional method's writes are otherwise invisible
+  // until it returns, and a spinner that appears when the work is over is no
+  // spinner at all.
   s.loading = true;
+  s.$commit?.();
   try {
     const io = await import("./storage.server.ts");
     const report = await io.scanStorage();
@@ -32,15 +42,24 @@ async function scan(s: StorageState): Promise<void> {
     s.projects = report.projects;
     s.extras = report.extras;
     s.scannedAt = report.scannedAt;
-    s.error = null;
+    s.error = outcome;
   } catch (e) {
     const reason = e instanceof Error ? e.message : String(e);
-    s.error = reason;
+    s.error = outcome ?? reason;
     log.warn("storage", "scan failed", { error: reason });
   } finally {
     s.loading = false;
   }
 }
+
+/**
+ * Deletions running right now, by directory. Module state, not the cell's
+ * `busyDir`: a second click lands before the first one's write has reached
+ * anybody, so the field cannot be what refuses it.
+ */
+const DELETING = new Set<string>();
+
+type Draft = StorageState & Partial<MethodDraftMeta<StorageState>>;
 
 type StorageState = {
   totalBytes: number;
@@ -72,34 +91,45 @@ export const storage = cell("storage", {
 
   methods: {
     /** Walk `~/.claude` and report what is there. */
-    async refresh(s: StorageState) {
+    async refresh(s: Draft) {
       await scan(s);
     },
 
     /**
      * Delete one project's stored history.
      *
-     * The server re-checks every precondition rather than trusting what this
-     * page last measured: a scan is a snapshot, and the folder may have come
-     * back — remounted, re-cloned — between the scan and the click.
+     * The server re-derives every precondition rather than trusting what
+     * this page last measured — including which folder the history belongs
+     * to, which is why the page's `path` is not passed on. A scan is a
+     * snapshot, and the folder may have come back — remounted, re-cloned —
+     * between the scan and the click.
      */
-    async remove(s: StorageState, dir: string, path: string) {
+    async remove(s: Draft, dir: unknown, _path: unknown = undefined) {
+      if (typeof dir !== "string" || dir === "" || DELETING.has(dir)) return;
+      DELETING.add(dir);
       s.busyDir = dir;
       s.error = null;
+      s.$commit?.();
+      let refused: string | null = null;
       try {
-        const io = await import("./storage.server.ts");
-        const refused = await io.deleteProjectHistory(dir, path);
-        if (refused) {
-          s.error = refused;
-          log.warn("storage", "delete refused", { dir, reason: refused });
+        try {
+          const io = await import("./storage.server.ts");
+          refused = await io.deleteProjectHistory(dir);
+          if (refused) {
+            log.warn("storage", "delete refused", { dir, reason: refused });
+          }
+        } catch (e) {
+          refused = e instanceof Error ? e.message : String(e);
         }
-      } catch (e) {
-        s.error = e instanceof Error ? e.message : String(e);
-      } finally {
+        // Re-measured in this transaction, not by dispatching `refresh` again
+        // — and carrying the refusal through, so the rescan does not clear it.
         s.busyDir = "";
+        await scan(s, refused);
+      } finally {
+        // Held until the row is gone from the list, so a click on it in the
+        // meantime is not a second delete of something already deleted.
+        DELETING.delete(dir);
       }
-      // Re-measured in this transaction, not by dispatching `refresh` again.
-      await scan(s);
     },
   },
 });

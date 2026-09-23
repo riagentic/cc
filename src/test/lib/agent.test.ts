@@ -10,10 +10,15 @@ import { assert, assertEquals } from "@std/assert";
 import {
   allowedTools,
   calibrate,
+  callTag,
+  capabilityOf,
   clip,
   CLIP_MARK,
   commandAdvice,
+  type CycleCall,
+  cycleVerdict,
   destructiveReason,
+  docsNudgeFor,
   emptyResult,
   estTokens,
   explainError,
@@ -22,6 +27,7 @@ import {
   foldedText,
   harnessNoteIn,
   isCloudModel,
+  isDocPath,
   isNoToolSupport,
   isOverflow,
   isRunaway,
@@ -30,11 +36,13 @@ import {
   isUnreachable,
   loopVerdict,
   maxOutput,
+  maxRoundsFor,
   mayLeaveUnasked,
   newAcc,
   newestBodies,
   outputReserve,
   overflowFacts,
+  paceOf,
   packContext,
   type PackInput,
   parallelSafe,
@@ -43,6 +51,8 @@ import {
   programsToAllow,
   runsTests,
   safePattern,
+  sanitizeToolOutput,
+  secretPath,
   type SeenCall,
   splitThink,
   storeBudget,
@@ -54,9 +64,12 @@ import {
   todoNote,
   toolBudget,
   toolSpecs,
+  turnMsFor,
+  verifyNudgeFor,
   wantsToContinue,
   wireArgs,
   wireId,
+  withCallIds,
 } from "../../lib/agent.ts";
 import type { LocalConfig, LocalMsg } from "../../type/local.ts";
 
@@ -633,7 +646,8 @@ Deno.test("foldChunk clamps a hostile tool-call index instead of allocating it",
     }],
   });
   assert(acc.toolCalls.length <= 32, `grew to ${acc.toolCalls.length}`);
-  assertEquals(acc.toolCalls[0].name, "lsx");
+  // An index that cannot be one is read as none: a new name is a new call.
+  assertEquals(acc.toolCalls.map((c) => c.name), ["ls", "x"]);
 });
 
 Deno.test("foldChunk stops growing text past its ceiling", () => {
@@ -793,22 +807,36 @@ Deno.test("safePattern is not fooled by nesting — the audit's bypasses", () =>
   assertEquals(safePattern("(ab)+"), true, "simple quantified group");
 });
 
-Deno.test("permissionOf — closed over the real modes, and fails closed", () => {
-  assertEquals(permissionOf(undefined), "ask");
-  assertEquals(permissionOf({} as LocalConfig), "ask");
+Deno.test("permissionOf — derived from capability; legacy fields migrate", () => {
+  // Fresh configs default to Execute (dontAsk), not Ask-every-time.
+  assertEquals(permissionOf(undefined), "dontAsk");
+  assertEquals(permissionOf({} as LocalConfig), "dontAsk");
   assertEquals(permissionOf({ permission: "bypass" } as LocalConfig), "bypass");
   assertEquals(
     permissionOf({ permission: "dontAsk" } as LocalConfig),
     "dontAsk",
   );
+  // Unknown junk fails closed → read capability → ask (no auto shell).
   assertEquals(
     permissionOf({ permission: "whatever" } as unknown as LocalConfig),
     "ask",
   );
   assertEquals(permissionOf({ shApproval: "always" } as LocalConfig), "bypass");
-  assertEquals(permissionOf({ shApproval: "ask" } as LocalConfig), "ask");
+  assertEquals(permissionOf({ shApproval: "ask" } as LocalConfig), "dontAsk");
+  // An explicit legacy "ask" fails CLOSED: somebody who wanted to see every
+  // command before it ran did not thereby ask for unattended shell, so the
+  // upgrade lands on Write (no shell), not on Execute.
+  assertEquals(capabilityOf({ permission: "ask" } as LocalConfig), "write");
   assertEquals(
     permissionOf({ permission: "ask", shApproval: "always" } as LocalConfig),
+    "ask",
+  );
+  assertEquals(
+    permissionOf({ capability: "all" } as LocalConfig),
+    "bypass",
+  );
+  assertEquals(
+    permissionOf({ capability: "write" } as LocalConfig),
     "ask",
   );
 });
@@ -1115,7 +1143,6 @@ Deno.test("the command rules know no framework: any tool's report verbs and serv
   const env = { home: "/home/u" };
   for (
     const c of [
-      "git status",
       "docker logs web --tail 50",
       "kubectl describe pod web",
       "pm2 list",
@@ -1132,6 +1159,8 @@ Deno.test("the command rules know no framework: any tool's report verbs and serv
       "npm version",
       "go get x",
       "am start",
+      // Reads .git/config, which a sandboxed command can write.
+      "git status",
     ]
   ) assert(!mayLeaveUnasked(c, [], env), c);
   for (
@@ -1635,4 +1664,289 @@ Deno.test("the newest change to each file goes back whole, older ones do not", (
   // The newest of each path is what the model is working from: whole.
   assertEquals(app.content, body("app"));
   assertEquals(now.content, body("second"));
+});
+
+Deno.test("pace budgets: draft fast, normal checked, quality full", () => {
+  assertEquals(maxRoundsFor("draft"), 48);
+  assertEquals(maxRoundsFor("normal"), 160);
+  assertEquals(maxRoundsFor("quality"), 1024);
+  assertEquals(verifyNudgeFor("draft"), false);
+  assertEquals(verifyNudgeFor("normal"), true);
+  assertEquals(verifyNudgeFor("quality"), true);
+  assertEquals(docsNudgeFor("draft"), false);
+  assertEquals(docsNudgeFor("normal"), false);
+  assertEquals(docsNudgeFor("quality"), true);
+  assertEquals(paceOf(undefined), "quality");
+  assertEquals(capabilityOf(undefined), "execute");
+  assert(turnMsFor("draft") < turnMsFor("normal"));
+  assert(turnMsFor("normal") < turnMsFor("quality"));
+});
+
+Deno.test("sanitizeToolOutput — escapes, controls, CR and invisible tags out", () => {
+  // Colour and cursor escapes never reach the model.
+  assertEquals(sanitizeToolOutput("\x1b[31mred\x1b[0m"), "red");
+  assertEquals(sanitizeToolOutput("a\x1b]0;title\x07b"), "ab");
+  // Bare control characters go; tab and newline stay.
+  assertEquals(sanitizeToolOutput("a\tb\nc\x07d"), "a\tb\ncd");
+  // A carriage return that rewrote a line on a terminal becomes a newline.
+  assertEquals(sanitizeToolOutput("done\rworking"), "done\nworking");
+  assertEquals(sanitizeToolOutput("a\r\nb"), "a\nb");
+  // Plane-14 TAG chars (ASCII smuggling) are stripped…
+  assertEquals(sanitizeToolOutput("safe\u{E0069}\u{E0067}text"), "safetext");
+  // …but a valid emoji tag sequence (a TR51 flag) is preserved.
+  const flag = "\u{1F3F4}\u{E0067}\u{E007F}";
+  assertEquals(sanitizeToolOutput(`x${flag}y`), `x${flag}y`);
+  // Clean text passes through byte-for-byte.
+  const clean = "ordinary source code\n\twith tabs\n";
+  assertEquals(sanitizeToolOutput(clean), clean);
+});
+
+Deno.test("sanitizeToolOutput — an unterminated escape does not cost the turn", () => {
+  // A lazy scan to a REQUIRED terminator rescans the rest of the text for
+  // every opener that never gets one: 50k bare `ESC ]` took 1.6 seconds, on
+  // text somebody else wrote. The bound is generous; the failure it catches
+  // is three orders of magnitude away.
+  const nasty = "\x1b]".repeat(50_000) + "tail";
+  const started = performance.now();
+  const out = sanitizeToolOutput(nasty);
+  const took = performance.now() - started;
+  assertEquals(out, "tail");
+  assert(took < 250, `escape stripping went quadratic: ${took.toFixed(0)}ms`);
+  // …and the bound does not turn an unterminated opener into a censor: what
+  // follows one is content, and stays.
+  assertEquals(sanitizeToolOutput("\x1b]keep this"), "keep this");
+});
+
+Deno.test("isDocPath — prose has nothing to verify", () => {
+  for (
+    const p of ["README.md", "docs/guide.md", "LICENSE", "CHANGELOG", "a.txt"]
+  ) {
+    assertEquals(isDocPath(p), true, p);
+  }
+  for (const p of ["src/app.ts", "main.py", "Makefile", "src/style.css"]) {
+    assertEquals(isDocPath(p), false, p);
+  }
+});
+
+Deno.test("cycleVerdict — an A,B,A,B loop the streak guard cannot see", () => {
+  const call = (
+    name: string,
+    args: string,
+    result: string,
+  ): CycleCall => ({ name, args, result, failed: false });
+  const ab = [
+    call("read", '{"path":"a"}', "A"),
+    call("ls", '{"path":"b"}', "B"),
+    call("read", '{"path":"a"}', "A"),
+    call("ls", '{"path":"b"}', "B"),
+    call("read", '{"path":"a"}', "A"),
+    call("ls", '{"path":"b"}', "B"),
+  ];
+  assert(cycleVerdict(ab) !== null);
+  // The same calls with a changed result each lap are progress, not a cycle.
+  const growing = ab.map((c, i) => ({ ...c, result: `${c.result}${i}` }));
+  assertEquals(cycleVerdict(growing), null);
+  // Two calls is not enough to be a cycle.
+  assertEquals(cycleVerdict(ab.slice(0, 4)), null);
+});
+
+Deno.test("splitThink — prose that mentions a tag is not eaten", () => {
+  // An unterminated tag mid-sentence is prose, not a reasoning block.
+  assertEquals(
+    splitThink("Use a <thinking> block here.").text,
+    "Use a <thinking> block here.",
+  );
+  // At a block boundary it is still reasoning.
+  assertEquals(splitThink("<thinking>thinking about it").text, "");
+  assertEquals(splitThink("done.\n<thinking>still going").text, "done.\n");
+  assertEquals(splitThink("</think>\n\nThe answer.").text, "The answer.");
+  // A closed pair is always reasoning, wherever it sits.
+  assertEquals(
+    splitThink("prose <thinking>x</thinking> tail").text,
+    "prose  tail",
+  );
+});
+
+Deno.test("outside unasked: a program the model could have written is never a look", () => {
+  // The audit's escape: a report verb, or --help, of a program named by a
+  // path ran outside the sandbox without asking — as the user, whatever the
+  // script said.
+  for (
+    const cmd of [
+      "./x.sh status",
+      "tools/run.py list",
+      "./evil --help",
+      "./cat notes.txt",
+      "sh/x status",
+      // A verb is a convention only known programs keep.
+      "x.sh status",
+      "mytool list",
+      // git reads .git/config, which the box can write (core.fsmonitor…).
+      "git status",
+      "git log --oneline",
+    ]
+  ) assert(!mayLeaveUnasked(cmd), cmd);
+  // Allowed by name is not allowed by path: `am` allowed, `./am` is not.
+  assert(!mayLeaveUnasked("./am start", ["am"]));
+  assertEquals(programsToAllow("./run.sh start && am start"), ["am"]);
+  // A bare name found on PATH somewhere the box can write is the same thing.
+  const env = {
+    home: "/home/u",
+    where: (p: string) => p === "mytool" ? "/home/u/proj/bin/mytool" : null,
+    writable: ["/home/u/proj"],
+  };
+  assert(!mayLeaveUnasked("mytool --help", [], env));
+  assert(!mayLeaveUnasked("mytool start", ["mytool"], env));
+  // What stays a look.
+  for (
+    const cmd of [
+      "am status",
+      "docker ps",
+      "pm2 list",
+      "somecli --version",
+      "ps aux | grep electron",
+    ]
+  ) assert(mayLeaveUnasked(cmd, [], env), cmd);
+});
+
+Deno.test("one secret predicate: the box, the read tools and the looks agree", () => {
+  const home = "/home/u";
+  for (
+    const p of [
+      "/home/u/.ssh/id_ed25519",
+      "/home/u/.config/rclone/rclone.conf",
+      "/home/u/.config/github-copilot/apps.json",
+      "/home/u/.config/git/credentials",
+      "/home/u/.config/quant-live.env",
+      "/home/u/other/.env",
+      "/home/other/.aws/credentials",
+      "/root/.ssh/config",
+      "/home/u/.s*/id_rsa",
+      "/home/u/.config/*/token",
+      "/home/u/work/*.pem",
+    ]
+  ) assert(secretPath(p, home), p);
+  for (
+    const p of [
+      "/home/u/.config/git/config",
+      "/home/u/.config/fontconfig/fonts.conf",
+      "/home/u/.config",
+      "/home/u/proj/src/app.ts",
+      "/home/u/.pomodoro/logs/app.log",
+      "/home/u/proj/*.ts",
+      "/tmp/x.log",
+    ]
+  ) assert(!secretPath(p, home), p);
+  // …and the look check uses it: each of these ran outside unasked before.
+  const env = { home };
+  for (
+    const cmd of [
+      "cat ~/other/.env",
+      "cat ~/.config/rclone/rclone.conf",
+      "head ~/.config/github-copilot/apps.json",
+      "cat ~/.s*/id_rsa",
+      "cd ~ && cat .ssh/id_rsa",
+      "grep -r token ~/.config",
+      "find ~/.local -name '*'",
+    ]
+  ) assert(!mayLeaveUnasked(cmd, [], env), cmd);
+  for (
+    const cmd of [
+      "cat ~/.config/git/config",
+      "ls ~/.config",
+      "timeout 5 cat ~/.pomodoro/logs/app.log",
+    ]
+  ) assert(mayLeaveUnasked(cmd, [], env), cmd);
+});
+
+Deno.test("call ids made up for a server that sent none do not repeat across stretches", () => {
+  // `round` starts at 0 every stretch: `call_0_0` from the last turn and
+  // this one crossed results in the packer's call map.
+  const bare = [{ id: "", name: "ls", args: "{}" }, {
+    id: "",
+    name: "read",
+    args: "{}",
+  }];
+  const a = withCallIds(bare, 0, callTag());
+  const b = withCallIds(bare, 0, callTag());
+  assertEquals(new Set([...a, ...b].map((c) => c.id)).size, 4);
+  // A server's own id is kept.
+  assertEquals(
+    withCallIds([{ id: "x", name: "ls", args: "" }], 0, "t")[0].id,
+    "x",
+  );
+});
+
+Deno.test("a streamed tool call without an index gets its own slot", () => {
+  // Every index-less piece went into slot 0: two calls became one, with
+  // both argument strings run together.
+  const tc = (calls: Record<string, unknown>[]) => ({
+    choices: [{ delta: { tool_calls: calls } }],
+  });
+  // Whole calls, no index, no id (Ollama's shape).
+  let acc = newAcc();
+  foldChunk(acc, tc([{ function: { name: "ls", arguments: { path: "." } } }]));
+  foldChunk(
+    acc,
+    tc([{ function: { name: "read", arguments: { path: "a" } } }]),
+  );
+  assertEquals(acc.toolCalls.map((c) => [c.name, c.args]), [
+    ["ls", '{"path":"."}'],
+    ["read", '{"path":"a"}'],
+  ]);
+  // Ids, then pieces of the newest.
+  acc = newAcc();
+  foldChunk(acc, tc([{ id: "a", function: { name: "ls", arguments: "" } }]));
+  foldChunk(acc, tc([{ function: { arguments: '{"path":' } }]));
+  foldChunk(acc, tc([{ function: { arguments: '"."}' } }]));
+  foldChunk(
+    acc,
+    tc([{ id: "b", function: { name: "read", arguments: "{}" } }]),
+  );
+  foldChunk(acc, tc([{ id: "a", function: { arguments: "" } }]));
+  assertEquals(acc.toolCalls.map((c) => [c.id, c.name, c.args]), [
+    ["a", "ls", '{"path":"."}'],
+    ["b", "read", "{}"],
+  ]);
+  // Indexed streams are unchanged.
+  acc = newAcc();
+  foldChunk(acc, tc([{ index: 0, id: "a", function: { name: "ls" } }]));
+  foldChunk(acc, tc([{ index: 0, function: { arguments: "{}" } }]));
+  assertEquals(acc.toolCalls.length, 1);
+});
+
+Deno.test("the prompt and the schemas follow the capability tier", () => {
+  const env = { cwd: "/p" };
+  // Write has no shell: the prompt says so, and the text protocol's manual
+  // does not offer sh.
+  const write = systemPrompt(
+    "agent",
+    32_768,
+    env,
+    "",
+    true,
+    "quality",
+    "write",
+  );
+  assert(write.includes("You have no shell"), "no-shell note missing");
+  assert(!/- sh\(/.test(write), "the manual offers sh");
+  assert(/- sh\(/.test(textToolManual("agent", 32_768, "execute")));
+  assert(!/- sh\(/.test(textToolManual("agent", 32_768, "write")));
+  // Read capability gets the read-only method.
+  assertEquals(
+    systemPrompt("agent", 8_192, env, "", false, "quality", "read"),
+    systemPrompt("read", 8_192, env, "", false, "quality", "read"),
+  );
+  // The packer charges for the schemas actually sent.
+  const input = {
+    msgs: [],
+    ctx: 8_192,
+    mode: "agent" as const,
+    system: "s",
+    native: true,
+  };
+  assert(
+    packContext({ ...input, cap: "read" }).tokens <
+      packContext({ ...input, cap: "execute" }).tokens,
+  );
 });

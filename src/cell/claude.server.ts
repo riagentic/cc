@@ -90,14 +90,28 @@ type Session = {
  */
 const live = new Map<string, Session>();
 
-/** How many sessions are running right now. */
-export const liveCount = (): number => live.size;
+/**
+ * The tail of each conversation's start/stop queue.
+ *
+ * `start` awaits the incumbent's teardown before it spawns, so two starts for
+ * one conversation arriving together (Restart, then Enter) both saw no process,
+ * both spawned, and the second `live.set` orphaned the first — a `claude` with
+ * no entry anything could stop. A `stop` racing a spawn had the same hole the
+ * other way round: it found nothing to stop, and the spawn landed after it.
+ * Every start and stop for one key now runs after the one before it.
+ */
+const queues = new Map<string, Promise<void>>();
 
-/** Whether this project has a process of its own. */
-export const isLive = (key: string): boolean => {
-  const s = live.get(key);
-  return s !== undefined && !s.closed;
-};
+/** Run `fn` once every earlier start/stop for `key` has settled. */
+function serial<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  const run = (queues.get(key) ?? Promise.resolve()).then(fn);
+  const tail = run.then(() => {}, () => {});
+  queues.set(key, tail);
+  void tail.then(() => {
+    if (queues.get(key) === tail) queues.delete(key);
+  });
+  return run;
+}
 
 const enc = new TextEncoder();
 const DELTA_FLUSH_MS = 90;
@@ -164,14 +178,23 @@ export function buildArgs(opts: StartOptions): string[] {
  * Throws with an actionable message when the CLI is missing or the directory
  * is not usable, rather than leaving a dead "starting" state behind.
  */
-export async function start(
+export function start(
+  key: string,
+  opts: StartOptions,
+  hooks: Hooks,
+): Promise<{ pid: number }> {
+  return serial(key, () => spawn(key, opts, hooks));
+}
+
+async function spawn(
   key: string,
   opts: StartOptions,
   hooks: Hooks,
 ): Promise<{ pid: number }> {
   // This project's incumbent only. Other projects' sessions are untouched —
-  // that is what makes switching free.
-  await stop(key);
+  // that is what makes switching free. Already inside the queue, so the
+  // unqueued teardown — the queued one would wait for this very call.
+  await teardown(key);
 
   const stat = await Deno.stat(opts.cwd).catch(() => null);
   if (!stat?.isDirectory) {
@@ -360,15 +383,19 @@ const SIGNAL_GRACE_MS = 1_500;
  * reporting success while the child ran on: a `claude` still holding a model
  * session, invisible to the app, one more of them after every restart.
  */
-export async function stop(key: string): Promise<void> {
+export function stop(key: string): Promise<void> {
+  return serial(key, () => teardown(key));
+}
+
+async function teardown(key: string): Promise<void> {
   const session = live.get(key);
-  if (!session || session.closed) {
-    live.delete(key);
-    releaseExitGuardIfIdle();
-    return;
-  }
-  session.closed = true;
+  if (!session) return releaseExitGuardIfIdle();
   live.delete(key);
+  // `closed` is not "exited": the stdout reader sets it when the stream ends,
+  // and a process can close stdout and live on. Returning on it left exactly
+  // that process running — so the escalation below always runs, and a child
+  // that really has gone passes every stage at once.
+  session.closed = true;
 
   await session.stdin.close().catch(() => {});
   if (await settled(session, CLOSE_GRACE_MS)) return releaseExitGuardIfIdle();
@@ -386,15 +413,24 @@ export async function stop(key: string): Promise<void> {
 /** End every session. What app shutdown needs, and the only caller that should
  *  ever address them all at once. */
 export async function stopAll(): Promise<void> {
-  await Promise.allSettled([...live.keys()].map((key) => stop(key)));
+  // A start still queued has no `live` entry yet, and must be ended too.
+  const keys = new Set([...live.keys(), ...queues.keys()]);
+  await Promise.allSettled([...keys].map((key) => stop(key)));
 }
 
-/** True once the child has exited, or `false` if `ms` passes first. */
-function settled(session: Session, ms: number): Promise<boolean> {
-  return Promise.race([
-    session.child.status.then(() => true).catch(() => true),
-    delay(ms).then(() => false),
-  ]);
+/** True once the child has exited, or `false` if `ms` passes first. The timer
+ *  is cleared either way — left running, every clean exit held the event loop
+ *  open for the rest of the grace period. */
+async function settled(session: Session, ms: number): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      session.child.status.then(() => true).catch(() => true),
+      new Promise<boolean>((r) => timer = setTimeout(() => r(false), ms)),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function signal(session: Session, sig: "SIGTERM" | "SIGKILL") {
@@ -415,11 +451,18 @@ function signal(session: Session, sig: "SIGTERM" | "SIGKILL") {
  * but that is the CLI being well behaved, not the app being correct, and it
  * covers none of the paths where the app *can* clean up after itself.
  *
- * Installed only while a session is live, and removed with it, so nothing here
- * is holding the process open or intercepting signals an idle app should see.
+ * Installed only while a session is live, and removed with it.
+ *
+ * No signal handlers. SIGINT/SIGTERM belong to aio, which runs every cell's
+ * `onDestroy` (the session's calls `stopAll`) and then flushes the final state
+ * to disk before it exits. A handler here that ended in its own `Deno.exit`
+ * raced that flush — the first to finish took the process down through the
+ * other's write (dep/aio/src/server/shutdown.ts, "Whose shutdown a
+ * process-wide exit has to wait for"). What is left is the one thing aio cannot
+ * do for us: a synchronous SIGKILL on the way out, for any child still alive.
  */
 
-let guard: { sigint: () => void; sigterm: () => void } | null = null;
+let guarded = false;
 
 /** Last resort on a normal exit: `unload` cannot await, so this is a bare
  *  synchronous kill rather than the graceful sequence above. */
@@ -430,28 +473,17 @@ const onUnload = () => {
 };
 
 function installExitGuard() {
-  if (guard) return;
-  const bye = (code: number) => () => {
-    // Ends every child *before* this process goes, then exits deliberately:
-    // taking over the signal means nothing else will.
-    void stopAll().finally(() => Deno.exit(code));
-  };
-  guard = { sigint: bye(130), sigterm: bye(143) };
-  Deno.addSignalListener("SIGINT", guard.sigint);
-  Deno.addSignalListener("SIGTERM", guard.sigterm);
+  if (guarded) return;
   globalThis.addEventListener("unload", onUnload);
+  guarded = true;
 }
 
 /** The guard exists to protect running children, so it is released only once
  *  the last one is gone — not when any single session ends. */
 function releaseExitGuardIfIdle() {
-  if (!guard || live.size > 0) return;
-  try {
-    Deno.removeSignalListener("SIGINT", guard.sigint);
-    Deno.removeSignalListener("SIGTERM", guard.sigterm);
-  } catch { /* never registered on this platform — nothing to undo */ }
+  if (!guarded || live.size > 0) return;
   globalThis.removeEventListener("unload", onUnload);
-  guard = null;
+  guarded = false;
 }
 
 /* ── environment ─────────────────────────────────────────────────────────── */
@@ -690,6 +722,16 @@ export async function gitChanged(
   const top = await run("git", ["rev-parse", "--show-toplevel"], path);
   if (top === null) return { modified: [], untracked: [] };
   const root = top.trim();
+  // git answers with the REAL path, and a project opened through a symlink
+  // (`~/code` → `/mnt/data/code`) is compared against a tree of lexical ones.
+  // So the answer is mapped back under the path the project was opened by.
+  const real = await Deno.realPath(path).catch(() => path);
+  const shown = (abs: string): string =>
+    abs === real
+      ? path
+      : abs.startsWith(real + "/")
+      ? path.replace(/\/+$/, "") + abs.slice(real.length)
+      : abs;
   // `-uall`, because git collapses an untracked directory to its own name by
   // default — a whole new folder arrived as one entry called "inner/", and
   // every file inside it went unmarked. A file list wants files. Ignored paths
@@ -702,18 +744,35 @@ export async function gitChanged(
   if (out === null) return { modified: [], untracked: [] };
   const modified: string[] = [];
   const untracked: string[] = [];
-  // `-z` because a path with a space in it is normal and a path with a NEWLINE
-  // in it is legal; the line-based format quotes those, and parsing quotes is
-  // how you end up with a file called "\"weird name\"".
-  for (const entry of out.split("\0")) {
-    if (entry.length < 4) continue;
-    const code = entry.slice(0, 2);
-    const name = entry.slice(3);
-    // A rename reads as "R  new -> old" across two NUL-separated fields; the
-    // first is the one that exists now, which is the one a file list shows.
-    (code === "??" ? untracked : modified).push(join(root, name));
+  for (const { code, name } of parsePorcelainZ(out)) {
+    (code === "??" ? untracked : modified).push(shown(join(root, name)));
   }
   return { modified, untracked };
+}
+
+/**
+ * `git status --porcelain=v1 -z`, as `{ code, name }` per changed path.
+ *
+ * `-z` because a path with a space in it is normal and a path with a NEWLINE
+ * in it is legal; the line-based format quotes those, and parsing quotes is
+ * how you end up with a file called "\"weird name\"".
+ *
+ * A rename or copy is TWO fields — `R  new\0old\0` — and only the first has a
+ * status code. Read as entries of their own, the old path lost its first
+ * three characters to a "code" and was marked as a changed file that does
+ * not exist. The new name is the one a file list shows; the old is skipped.
+ */
+export function parsePorcelainZ(out: string): { code: string; name: string }[] {
+  const fields = out.split("\0");
+  const found: { code: string; name: string }[] = [];
+  for (let i = 0; i < fields.length; i++) {
+    const entry = fields[i];
+    if (entry.length < 4) continue;
+    const code = entry.slice(0, 2);
+    found.push({ code, name: entry.slice(3) });
+    if (/[RC]/.test(code)) i++;
+  }
+  return found;
 }
 
 /**
@@ -724,14 +783,23 @@ export async function gitChanged(
  * file plainly in all of them, which is the right answer to all of them.
  */
 export async function gitFileAtHead(path: string): Promise<string | null> {
-  const dir = path.slice(0, path.lastIndexOf("/")) || "/";
+  const cut = path.lastIndexOf("/");
+  const dir = path.slice(0, cut) || "/";
   const top = await run("git", ["rev-parse", "--show-toplevel"], dir);
   if (top === null) return null;
   const root = top.trim();
-  if (!path.startsWith(root + "/")) return null;
-  const rel = path.slice(root.length + 1);
-  // `--` and a path that is explicitly relative to the root: without the
-  // separator a file called "HEAD" is a revision, and git resolves it as one.
+  // Compared real to real: git's root is resolved, and the path came from a
+  // tree that may have been opened through a symlink. The folder is resolved
+  // rather than the file, which may have been deleted since.
+  const realDir = await Deno.realPath(dir).catch(() => null);
+  if (realDir === null) return null;
+  const file = `${realDir === "/" ? "" : realDir}/${path.slice(cut + 1)}`;
+  if (!file.startsWith(root + "/")) return null;
+  const rel = file.slice(root.length + 1);
+  // One `HEAD:<path>` argument — git's name for a blob, with the path taken
+  // relative to the root. It starts with `HEAD`, so no file name can be read
+  // as an option, and it is not a pathspec, so none can be read as a
+  // revision either. (A `--` here would turn it INTO a pathspec.)
   return await run("git", ["show", `HEAD:${rel}`], root);
 }
 
@@ -914,12 +982,14 @@ async function pump(
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
-      buf += decoder.decode(value, { stream: true });
-      const cut = buf.lastIndexOf("\n");
+      const text = decoder.decode(value, { stream: true });
+      // Only the new text can hold the new line end: searching the whole
+      // buffer re-read a long unterminated line once per chunk.
+      const cut = text.lastIndexOf("\n");
       if (cut >= 0) {
-        onChunk(buf.slice(0, cut + 1));
-        buf = buf.slice(cut + 1);
-      } else if (buf.length > MAX_LINE) {
+        onChunk(buf + text.slice(0, cut + 1));
+        buf = text.slice(cut + 1);
+      } else if ((buf += text).length > MAX_LINE) {
         // No newline in 16MB: flush what we have as a line and reset, rather
         // than hold a growing buffer for a terminator that is not coming.
         onChunk(buf + "\n");
@@ -971,6 +1041,3 @@ async function run(
     clearTimeout(timer);
   }
 }
-
-const delay = (ms: number): Promise<void> =>
-  new Promise((r) => setTimeout(r, ms));

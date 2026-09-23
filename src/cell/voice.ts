@@ -2,9 +2,10 @@
  * @module
  * Push to talk.
  *
- * Hold a key, say a sentence, let go — the words arrive in the composer. Not
- * in the shell, and never sent on their own: speech recognition is wrong often
- * enough about names and paths that a person has to see it before it runs.
+ * Hold a key, say a sentence, let go — the words arrive in the composer and,
+ * unless auto-send is switched off, are sent as if you had pressed Enter.
+ * Never into the shell: a misheard instruction to a chat is corrected by the
+ * next one, a misheard command is already running.
  */
 import { cell, log } from "aio";
 import type { VoiceConfig, VoiceStatus } from "../type/voice.ts";
@@ -32,6 +33,16 @@ type VoiceState = {
   /** Bumped with `text`, so a page can tell "said the same thing twice" from
    *  "said nothing new" — an identical sentence is not a stale one. */
   turn: number;
+  /**
+   * Which press this is — bumped every time the key goes down.
+   *
+   * A press can start while the last one is still being transcribed, and the
+   * last one's ending used to land on top of it: "off" while the microphone
+   * was open, the meter frozen, the next release finding nothing to stop.
+   * Every step of a turn carries the press it belongs to, and one from an
+   * earlier press still hands over its words but leaves the state alone.
+   */
+  take: number;
   error: string | null;
   config: VoiceConfig;
   /** Whether a speech server answered the last time anyone looked. */
@@ -56,6 +67,7 @@ export const voice = cell("voice", {
     level: 0,
     text: "",
     turn: 0,
+    take: 0,
     error: null as string | null,
     config: {
       // Off until somebody switches it on: the GPU whisper holds is VRAM
@@ -110,6 +122,7 @@ export const voice = cell("voice", {
       s.status = "recording";
       s.error = null;
       s.level = 0;
+      s.take += 1;
       log.info("voice", "listening (key down)");
       await openMic(s);
     },
@@ -136,17 +149,30 @@ export const voice = cell("voice", {
       // the settings cannot change while a key is held anyway — so taking them
       // here is both correct and the honest description of when they applied.
       const cfg = { ...s.config };
+      const take = s.take;
 
       const io = await import("./voice.server.ts");
-      const wav = await io.stopCapture().catch(() => null);
-      if (!wav) {
-        // Too short to be speech. Said quietly rather than as an error: a
-        // brushed key is not a failure, and whisper answers silence with
-        // confident invented sentences, which is why it is not sent at all.
-        await voice.settled("", ""); // aiol-ok: orchestration, one step
+      let wav: Uint8Array | null;
+      try {
+        wav = await io.stopCapture();
+      } catch (e) {
+        // The recorder said why it heard nothing — a microphone that is not
+        // there. That one IS a failure, and the only place its reason exists.
+        await voice.settled( // aiol-ok: orchestration, one step
+          "",
+          e instanceof Error ? e.message : String(e),
+          take,
+        );
         return;
       }
-      await voice.thinking(); // aiol-ok: orchestration, one step
+      if (!wav) {
+        // Too short, or only silence. Said quietly rather than as an error: a
+        // brushed key is not a failure, and whisper answers silence with
+        // confident invented sentences, which is why it is not sent at all.
+        await voice.discarded(take); // aiol-ok: orchestration, one step
+        return;
+      }
+      await voice.thinking(take); // aiol-ok: orchestration, one step
       try {
         const text = await io.transcribe(wav, {
           baseUrl: cfg.baseUrl,
@@ -158,17 +184,50 @@ export const voice = cell("voice", {
           // has to mean the old behaviour: trust detection.
           spoken: Array.isArray(cfg.spoken) ? cfg.spoken : [],
         }, AbortSignal.timeout(60_000));
-        await voice.settled(text, ""); // aiol-ok: orchestration, one step
+        await voice.settled(text, "", take); // aiol-ok: orchestration, one step
       } catch (e) {
         await voice.settled( // aiol-ok: orchestration, one step
           "",
           e instanceof Error ? e.message : String(e),
+          take,
         );
       }
     },
 
-    thinking(s: VoiceState) {
+    /**
+     * Let go, but throw the recording away.
+     *
+     * Another key went down while this one was held: Right-Ctrl+C is a
+     * shortcut, not a sentence. Transcribed, it was a second or two of key
+     * clicks that whisper wrote up as words, and auto-send then sent them.
+     */
+    async cancel(s: VoiceState) {
+      const take = s.take;
+      const io = await import("./voice.server.ts");
+      await io.stopCapture().catch(() => null);
+      log.info("voice", "another key joined the press — a shortcut, discarded");
+      await voice.discarded(take); // aiol-ok: orchestration, one step
+    },
+
+    thinking(s: VoiceState, take: number) {
+      if (take !== s.take) return; // a newer press is recording
       s.status = "transcribing";
+      s.level = 0;
+    },
+
+    /**
+     * The press produced nothing worth sending — too short, only silence, or
+     * cancelled.
+     *
+     * Not `settled("", "")`, which this used to be: that path reports "the
+     * model made no words" when the model was never asked, and it cleared an
+     * "error" the microphone had just set — a mic that failed to open looked,
+     * one release later, like a mic that was fine. Only a recording is ended
+     * here; anything else the press left behind stays.
+     */
+    discarded(s: VoiceState, take: number) {
+      if (take !== s.take || s.status !== "recording") return;
+      s.status = "off";
       s.level = 0;
     },
 
@@ -179,15 +238,22 @@ export const voice = cell("voice", {
      * they differ only in what they leave behind, and three separate ones
      * meant three dispatches from `stop` racing to describe the same moment.
      */
-    settled(s: VoiceState, text: string, error: string) {
-      s.level = 0;
+    settled(s: VoiceState, text: string, error: string, take: number) {
+      // An earlier press, ending while a newer one records. Its words are
+      // still yours and still handed over; the state belongs to the new one.
+      const current = take === s.take;
       if (error !== "") {
+        log.warn("voice", "could not transcribe", { error });
+        if (!current) return;
+        s.level = 0;
         s.status = "error";
         s.error = error;
-        log.warn("voice", "could not transcribe", { error });
         return;
       }
-      s.status = "off";
+      if (current) {
+        s.level = 0;
+        s.status = "off";
+      }
       const clean = typeof text === "string" ? text.trim() : "";
       if (clean === "") {
         // The commonest silent failure: audio went to the model and came back
@@ -209,6 +275,14 @@ export const voice = cell("voice", {
       s.text = "";
     },
 
+    /** The words are in the box, waiting for a reply to finish before they can
+     *  go. A state of its own so the mic can say "waiting", which is a
+     *  different thing from "failed" and from "idle". */
+    queued(s: VoiceState) {
+      s.status = "queued";
+      s.error = null;
+    },
+
     /**
      * The words are in the box but could not be sent.
      *
@@ -218,14 +292,6 @@ export const voice = cell("voice", {
      * and in every one of those cases the app used to do exactly nothing and
      * explain nothing. The words are still there; this is what says where.
      */
-    /** The words are in the box, waiting for a reply to finish before they can
-     *  go. A state of its own so the mic can say "waiting", which is a
-     *  different thing from "failed" and from "idle". */
-    queued(s: VoiceState) {
-      s.status = "queued";
-      s.error = null;
-    },
-
     notSent(s: VoiceState, why: string) {
       s.status = "error";
       s.error = why;
@@ -371,6 +437,9 @@ async function openMic(s: VoiceState): Promise<void> {
   try {
     await io.startCapture({ device: voice.config.device }, {
       onLevel: (l) => voice.hearing(l),
+      // The cap was reached with the key still down. Ended as if released; the
+      // real release, when it comes, finds nothing left to stop.
+      onFull: () => void voice.stop(),
     });
   } catch (e) {
     s.status = "error";
