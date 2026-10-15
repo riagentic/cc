@@ -139,10 +139,10 @@ export const loops = cell("loops", {
     error: null as string | null,
   },
 
-  onInit() {
-    // The runtime is not up during `onInit` — same constraint as the other
-    // cells that schedule from boot.
-    setTimeout(() => void loops.arm(), 0); // aiol-ok
+  onInit(app) {
+    // Methods are bound after `onInit` — same constraint as the other cells
+    // that schedule from boot. Dispatch through the app handle, not a timer.
+    app.dispatch({ type: "loops:arm", payload: { args: [] } });
   },
 
   methods: {

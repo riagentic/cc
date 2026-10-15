@@ -7,7 +7,7 @@
  * processes exist afterwards — the two things that go silently wrong.
  */
 import { assert, assertEquals } from "@std/assert";
-import { bootCells } from "aio/testing";
+import { bootCells, type BootHandle } from "aio/testing";
 import { session, sessionOf } from "../../cell/session.ts";
 import { workspace } from "../../cell/workspace.ts";
 
@@ -24,8 +24,9 @@ while IFS= read -r line; do :; done
 
 const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-/** Two projects, `a` selected, and a stub CLI no other test shares. */
-async function rig() {
+/** A private stub CLI on `CLAUDE_BIN`, and the two project dirs to fill. Made
+ *  BEFORE `bootCells`: the boot's very first version probe has to find it. */
+async function stubEnv() {
   const tmp = await Deno.makeTempDir({ prefix: "cc-race-" });
   const bin = `${tmp}/claude-stub`;
   const argvFile = `${tmp}/argv`;
@@ -35,13 +36,26 @@ async function rig() {
   await Deno.mkdir(`${tmp}/b`);
   const previous = Deno.env.get("CLAUDE_BIN");
   Deno.env.set("CLAUDE_BIN", bin);
+  return { tmp, bin, argvFile, previous };
+}
 
-  const h = await bootCells([workspace, session]);
+/**
+ * Two projects, `a` selected, over the boot the TEST created.
+ *
+ * `bootCells` is called in each test body, never here: it sheds Deno's pinned
+ * ambient async context synchronously, and that only holds for the caller's
+ * own body. A helper-created boot leaves the BODY fenced to the previous test's
+ * retired boot, and its first dispatch is refused as a torn-down runtime.
+ */
+async function rig(
+  h: BootHandle,
+  env: { tmp: string; bin: string; argvFile: string; previous?: string },
+) {
   await delay(0);
   await h.settle();
-  await workspace.addProject(`${tmp}/a`);
+  await workspace.addProject(`${env.tmp}/a`);
   const a = workspace.activeId;
-  await workspace.addProject(`${tmp}/b`);
+  await workspace.addProject(`${env.tmp}/b`);
   const b = workspace.activeId;
   await workspace.select(a);
   await h.settle();
@@ -49,7 +63,7 @@ async function rig() {
   /** Stub processes alive right now — `-1` where there is no `pgrep`. */
   const alive = async (): Promise<number> => {
     const out = await new Deno.Command("pgrep", {
-      args: ["-f", bin],
+      args: ["-f", env.bin],
       stdout: "piped",
       stderr: "null",
     }).output().catch(() => null);
@@ -59,7 +73,7 @@ async function rig() {
   };
   /** The argv of every session spawned — not the app's `--version` probe. */
   const argv = async (): Promise<string[]> =>
-    (await Deno.readTextFile(argvFile).catch(() => "")).split("\n")
+    (await Deno.readTextFile(env.argvFile).catch(() => "")).split("\n")
       .filter((l) => l.startsWith("-p "));
 
   return {
@@ -73,9 +87,9 @@ async function rig() {
       await h.settle();
       await h.settle();
       h.dispose();
-      if (previous === undefined) Deno.env.delete("CLAUDE_BIN");
-      else Deno.env.set("CLAUDE_BIN", previous);
-      await Deno.remove(tmp, { recursive: true }).catch(() => {});
+      if (env.previous === undefined) Deno.env.delete("CLAUDE_BIN");
+      else Deno.env.set("CLAUDE_BIN", env.previous);
+      await Deno.remove(env.tmp, { recursive: true }).catch(() => {});
     },
   };
 }
@@ -92,7 +106,9 @@ const texts = (key: string): string[] =>
   );
 
 Deno.test("a switch while the process spawns leaves the message and pid with their project", async () => {
-  const t = await rig();
+  const env = await stubEnv();
+  const h = await bootCells([workspace, session]);
+  const t = await rig(h, env);
   try {
     const sent = session.send("for A");
     // The spawn is under way for A…
@@ -112,7 +128,9 @@ Deno.test("a switch while the process spawns leaves the message and pid with the
 });
 
 Deno.test("the first message after a restart keeps the transcript and resumes the CLI session", async () => {
-  const t = await rig();
+  const env = await stubEnv();
+  const h = await bootCells([workspace, session]);
+  const t = await rig(h, env);
   try {
     // A restored conversation: a transcript, a CLI session id to resume, and
     // no process (what `offlineAgain` leaves at boot).
@@ -152,7 +170,9 @@ Deno.test("the first message after a restart keeps the transcript and resumes th
 });
 
 Deno.test("Restart then Enter spawns one process, not two", async () => {
-  const t = await rig();
+  const env = await stubEnv();
+  const h = await bootCells([workspace, session]);
+  const t = await rig(h, env);
   try {
     // Both dispatched before either has spawned — two clicks, one frame.
     const restart = session.start();
@@ -176,7 +196,9 @@ Deno.test("Restart then Enter spawns one process, not two", async () => {
 });
 
 Deno.test("a released conversation is not brought back by its process's last words", async () => {
-  const t = await rig();
+  const env = await stubEnv();
+  const h = await bootCells([workspace, session]);
+  const t = await rig(h, env);
   try {
     await session.ingest(
       {

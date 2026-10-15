@@ -431,12 +431,12 @@ export const session = cell("session", {
   // which is why `claude.server.ts` also SIGKILLs any child still alive on
   // `unload`; between them, no exit route leaves a `claude` running. Signals
   // stay aio's: its handler runs this and then the final state flush.
-  onInit() {
-    // The runtime is not up during `onInit`, so the watchdog arms itself on the
-    // next macrotask — the same constraint every other cell here works around.
-    // Arming is all boot does: the first folder check then lands one poll
-    // interval later, which is the check's own resolution anyway.
-    setTimeout(() => void session.armFolderWatch(), 0); // aiol-ok
+  onInit(app) {
+    // Methods are bound after `onInit`, so the watchdog is dispatched through
+    // the app handle, not called. Arming is all boot does: the first folder
+    // check lands one poll interval later, which is the check's own resolution
+    // anyway.
+    app.dispatch({ type: "session:armFolderWatch", payload: { args: [] } });
   },
 
   onDestroy() {

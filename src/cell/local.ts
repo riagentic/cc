@@ -25,6 +25,7 @@ import {
   clip,
   commandAdvice,
   type CycleCall,
+  cycleImpulse,
   cycleVerdict,
   destructiveReason,
   docsNudgeFor,
@@ -41,6 +42,7 @@ import {
   isUnreachable,
   LOCAL_CAPABILITIES,
   loopVerdict,
+  maxHoursOf,
   maxOutput,
   maxRoundsFor,
   mayLeaveUnasked,
@@ -64,6 +66,7 @@ import {
   todoNote,
   TOOL_NAMES,
   toolSpecs,
+  turnBaseMs,
   turnMsFor,
   verifyNudgeFor,
   wantsToContinue,
@@ -106,11 +109,13 @@ import type { HistRow, Recall } from "../lib/history.ts";
 export const MAX_ROUNDS = 1024;
 /** The same call, this many times in one turn, is a loop — even with other
  *  calls in between (`read a` → `ls` → `read a` → `ls` …), which is how a
- *  small model loops most often. */
+ *  small model loops most often. Named once with {@link cycleImpulse}; does
+ *  not hard-stop the turn. */
 export const MAX_SAME_CALL = 4;
 
-/** Loop verdicts in one turn before it ends: the second and third pause the
- *  tools for a round, the fourth takes them away. */
+/** How many cycle/loop namings in one turn before the impulse is at full
+ *  strength (plan / todo). The second already pauses tools for a plan reply;
+ *  cycling alone never force-answers the turn. */
 export const MAX_VERDICTS = 4;
 /** Calls from one reply that are actually run. A model that asks for hundreds
  *  in one breath is guessing, and running them all costs minutes and floods
@@ -170,6 +175,7 @@ const blankConfig = (): LocalConfig => ({
   mode: "chat",
   ctx: DEFAULT_CTX,
   pace: "quality",
+  maxHours: 2,
   runAs: "auto",
   capability: "execute",
 });
@@ -380,10 +386,18 @@ export const TEST_STRETCH_MS = 5 * 60_000;
 const MUTATES: ReadonlySet<string> = new Set(["write", "edit"]);
 
 /** A span of work, said the way a person would say it. */
-const spanWords = (ms: number): string =>
-  ms >= 60_000
-    ? `${Math.round(ms / 60_000)} minutes of work`
-    : `${Math.max(1, Math.round(ms / 1000))} seconds of work`;
+const spanWords = (ms: number): string => {
+  if (ms >= 3_600_000) {
+    const h = Math.round((ms / 3_600_000) * 10) / 10;
+    return `${h} hour${h === 1 ? "" : "s"} of work`;
+  }
+  if (ms >= 60_000) {
+    const m = Math.round(ms / 60_000);
+    return `${m} minute${m === 1 ? "" : "s"} of work`;
+  }
+  const s = Math.max(1, Math.round(ms / 1000));
+  return `${s} second${s === 1 ? "" : "s"} of work`;
+};
 
 export const local = cell("local", {
   /**
@@ -931,25 +945,31 @@ export const local = cell("local", {
       // before the first await — the `detecting` flag is a dispatch behind.
       if (SCAN) return await SCAN;
       if (!force && local.detectedAt > 0) return;
+      // The method's own abort, captured before the first await and threaded
+      // all the way to the sockets. Three loopback probes are quick when a
+      // server answers and two seconds when nothing does — long enough that a
+      // shutdown, or a harness waiting for the app to go quiet, should not have
+      // to sit through it. Also the guard below: once it is aborted (a disposed
+      // boot, a disabled cell), the scan must not dispatch its result into a
+      // runtime that is gone.
+      const signal = s.$signal;
       let done = () => {};
       SCAN = new Promise<void>((r) => done = r);
       try {
         await local.beginScan(); // aiol-ok: orchestration, see above
         try {
           const io = await import("./local.server.ts");
-          // The method's own abort, threaded all the way to the sockets. Three
-          // loopback probes are quick when a server answers and two seconds when
-          // nothing does — long enough that a shutdown, or a harness waiting for
-          // the app to go quiet, should not have to sit through it.
           // `configured` was gathered above: every address this workspace points
           // at, so a server on a port somebody chose is found as readily as one
           // on the default.
-          const found = await io.detectEngines(s.$signal, configured);
+          const found = await io.detectEngines(signal, configured);
+          if (signal?.aborted) return;
           await local.endScan(found); // aiol-ok: orchestration
           log.info("local", "engine scan", {
             reachable: found.filter((f) => f.reachable).map((f) => f.engine),
           });
         } catch (e) {
+          if (signal?.aborted) return;
           await local.endScan(null); // aiol-ok: orchestration
           log.warn("local", "engine scan failed", {
             error: e instanceof Error ? e.message : String(e),
@@ -1114,11 +1134,17 @@ export const local = cell("local", {
         // aio-ok: a live read, deliberately — what the user changed mid-turn
         s.configs[id] ?? (ACTIVE.get(id) === claim ? cfgAt(s, id) : cfg);
 
-      /** This stretch's wall clock: the tunable turn budget (`CC_TURN_MS`),
-       *  at the share this pace takes of it. Read once, when the stretch
-       *  starts — a pace picked mid-turn changes the *rounds* on the next one,
-       *  not the clock a turn is already being measured against. */
-      const paceMs = turnMsFor(paceOf(live()), io.turnMs());
+      /** This stretch's wall clock: the user-facing max-hours setting (or
+       *  `CC_TURN_MS` when set), at the share this pace takes of it. Read once
+       *  when the stretch starts — a pace or max-hours picked mid-turn changes
+       *  the *rounds* / next stretch, not the clock already running. */
+      const envMs = io.turnMsEnv();
+      const fromEnv = envMs !== null;
+      const fullMs = turnBaseMs(maxHoursOf(live()), envMs);
+      const paceMs = turnMsFor(paceOf(live()), fullMs);
+      // User max-hours is a hard outer wall. Env-driven clocks keep the old
+      // 3× grant headroom so measured-speed stretch still has room in tests.
+      const ceilingMs = fromEnv ? fullMs * 3 : fullMs;
 
       /** Everything one turn remembers across its rounds and retries. */
       const turn = {
@@ -1141,6 +1167,9 @@ export const local = cell("local", {
          *  said once — not the loss of its turn. */
         wall: new Map<string, string>(),
         walled: new Set<string>(),
+        /** Same-call tallies already named with a cycle impulse this turn —
+         *  so the tally does not re-fire every round after MAX_SAME_CALL. */
+        tallyNudged: new Set<string>(),
         /** How long a stretch of work may go on, and when this one is over.
          *  Reset for a new stretch, which only a message the user typed can
          *  start. */
@@ -1149,13 +1178,16 @@ export const local = cell("local", {
          * The furthest the clock can ever be pushed, and how much work buys.
          *
          * A flat wall cuts a turn that is finishing and a turn that is going in
-         * circles at the same minute. One live session was cut at twenty
-         * minutes with the app nearly built; the loop guards, not the clock, are
-         * what a circle should die of. So each new file it touches buys a few
-         * minutes more, up to a hard ceiling — and a turn that touches nothing
-         * still ends exactly when it used to.
+         * circles at the same minute. Each new file it touches buys a few
+         * minutes more, up to the ceiling — and a turn that touches nothing
+         * still ends at the pace budget. When the ceiling is the user's
+         * max-hours setting, stretch cannot push past it either.
          */
-        hardUntil: Date.now() + paceMs * 3,
+        fullMs: ceilingMs,
+        /** True when the ceiling is the user-facing max-hours wall (not an
+         *  env override): the out-of-time check must honour it. */
+        capByHard: !fromEnv,
+        hardUntil: Date.now() + ceilingMs,
         grantMs: Math.round(paceMs / 4),
         /** Files touched as of the last round, so "a new one" is measurable. */
         touchedAt: 0,
@@ -1388,14 +1420,16 @@ export const local = cell("local", {
           // Out of time. Checked between rounds, not mid-reply: a reply that
           // is already coming is worth having. A slow model's clock runs
           // longer, by its measured speed — the same rounds, not the same
-          // minutes.
+          // minutes. When the ceiling is the user's max-hours setting,
+          // stretch cannot push past it (a prior bug: hardUntil only capped
+          // grants, and stretch quietly ran past what the user asked for).
           const stretch = io.turnStretch(baseUrl, model);
-          if (
-            !turn.forceAnswer &&
-            Date.now() - turn.since > (turn.until - turn.since) * stretch
-          ) {
+          const softMs = (turn.until - turn.since) * stretch;
+          const hardMs = Math.max(0, turn.hardUntil - turn.since);
+          const limitMs = turn.capByHard ? Math.min(softMs, hardMs) : softMs;
+          if (!turn.forceAnswer && Date.now() - turn.since > limitMs) {
             turn.forceAnswer = true;
-            turn.cut = spanWords((turn.budgetMs + turn.granted) * stretch);
+            turn.cut = spanWords(limitMs);
             log.info("local", "turn out of time", { key: id, round });
           }
           // `>=`, not `===`: the pace is read live, so a turn switched to a
@@ -1668,14 +1702,15 @@ export const local = cell("local", {
 
           if (calls.length && paused && mode !== "chat") {
             // Called during the pause: nothing runs, and the tools come back —
-            // the repeat tally, not this reply, is what ends a real circle.
+            // the pause was for a plan step, not the end of the turn.
             if (reply.trim()) {
               here().messages.push(msg("assistant", reply));
               cap(id, here());
             }
             turn.note = "Tools were off for that reply, so its calls did not" +
               " run. They are on again. Do not repeat the call that was going" +
-              " round: change it, take another approach, or answer.";
+              " round: take the different approach you just planned, or step" +
+              " further out.";
             continue;
           }
           if (calls.length && noTools && mode !== "chat") {
@@ -2057,43 +2092,34 @@ export const local = cell("local", {
             }
           }
 
-          // A loop, named once; named twice or three times, the tools go away
-          // for one round; named a fourth time, the turn is over.
-          const verdict = loopVerdict(turn.recent);
-          if (verdict) {
+          // A loop or cycle: name it, step the model out, escalate if it
+          // keeps going. Never forceAnswer solely for cycling — round and
+          // time caps still close a turn that will not move. Level 2+ pauses
+          // tools for one reply so the next move is a plan, not another hop
+          // into the same dead-end.
+          const hit = loopVerdict(turn.recent) ?? cycleVerdict(turn.recent);
+          if (hit) {
             turn.verdicts++;
-            turn.note = also(turn.note, verdict);
-            if (turn.verdicts >= MAX_VERDICTS) {
-              turn.forceAnswer = true;
-              turn.cut = `going round in circles ${turn.verdicts} times`;
-            } else if (turn.verdicts >= 2) turn.pause = true;
+            turn.note = also(
+              turn.note,
+              cycleImpulse(Math.min(turn.verdicts, MAX_VERDICTS), hit),
+            );
+            if (turn.verdicts >= 2) turn.pause = true;
             turn.recent = [];
-            log.info("local", "loop verdict", {
-              key: id,
-              count: turn.verdicts,
-            });
-          } // A loop that is never three in a row: `A,B,A,B,…` resets the streak
-          // above on every alternation, and only the whole-turn tally would see
-          // it — four laps later, as "the same call four times". Caught here,
-          // named, before the repeated results pile up.
-          else {
-            const cycle = cycleVerdict(turn.recent);
-            if (cycle) {
-              turn.note = also(turn.note, cycle);
-              turn.recent = [];
-              log.info("local", "loop cycle", { key: id });
-            }
+            log.info(
+              "local",
+              hit.startsWith("The last") ? "loop cycle" : "loop verdict",
+              {
+                key: id,
+                count: turn.verdicts,
+              },
+            );
           }
-          // The other shape of a loop: the same act again and again with other
-          // acts in between, so nothing is ever three in a row. The count is
-          // over the whole turn, so this catches it however wide the circle.
           // Walked into the same wall twice: the harness has already refused
           // this exact call, and a second identical try means the reason never
-          // landed. Put it in front of the model once, with the call named,
-          // rather than letting the loop cut take the turn away four tries
-          // later — which is what happened to a live session that asked for a
-          // framework file it was not allowed to read: four refusals, one lost
-          // turn, and a model that never saw a way forward.
+          // landed. Put it in front of the model once, with the call named —
+          // a wall is not a circle, and the answer is the reason, not the loss
+          // of its turn.
           const walled = [...turn.tally.entries()].find(([k, n]) =>
             n >= 2 && turn.wall.has(k) && !turn.walled.has(k)
           );
@@ -2115,31 +2141,34 @@ export const local = cell("local", {
               times,
             });
           }
+          // Same act again and again with other acts in between. Named with
+          // the cycle impulse (and a plan-pause once the turn has already been
+          // told); not a hard stop — a model that changes approach keeps going.
           const over = [...turn.tally.entries()]
-            .find(([, n]) => n >= MAX_SAME_CALL);
+            .find(([k, n]) => n >= MAX_SAME_CALL && !turn.tallyNudged.has(k));
           if (over && !turn.forceAnswer) {
-            turn.forceAnswer = true;
-            turn.cut = `the same ${over[0].split("\n")[0]} call` +
-              ` ${over[1]} times`;
-            const refused = turn.wall.get(over[0]);
-            turn.note =
-              `You have made the same ${over[0].split("\n")[0]} call ${
-                over[1]
-              } times in this turn, going round in a circle.` +
+            const [key, times] = over;
+            turn.tallyNudged.add(key);
+            turn.verdicts++;
+            const refused = turn.wall.get(key);
+            const what =
+              `You have made the same ${key.split("\n")[0]} call ${times}` +
+              ` times in this turn, going round in a circle.` +
               (refused
-                // Carried into the note, because the next thing said to this
-                // model is "continue" and without the reason it walks straight
-                // back into the same wall.
                 ? ` Every one of them failed the same way: ${
                   refused.split("\n")[0].slice(0, 220)
                 }`
-                : "") +
-              ` Stop calling tools and say what you found, what you did, and` +
-              ` what is still in the way.`;
+                : "");
+            turn.note = also(
+              turn.note,
+              cycleImpulse(Math.min(turn.verdicts, MAX_VERDICTS), what),
+            );
+            if (turn.verdicts >= 2) turn.pause = true;
             log.info("local", "repeat tally tripped", {
               key: id,
-              call: over[0].split("\n")[0],
-              times: over[1],
+              call: key.split("\n")[0],
+              times,
+              count: turn.verdicts,
             });
           }
         }
@@ -2261,7 +2290,7 @@ export const local = cell("local", {
           // start over, because only a message the user typed gets here.
           turn.since = Date.now();
           turn.until = Date.now() + turn.budgetMs;
-          turn.hardUntil = Date.now() + turn.budgetMs * 3;
+          turn.hardUntil = Date.now() + turn.fullMs;
           turn.granted = 0;
           turn.touchedAt = here().changed ?? 0;
           turn.note = "";
@@ -2467,6 +2496,14 @@ export const local = cell("local", {
           : "quality";
       cfgAt(s, key).pace = next;
       log.info("local", "pace set", { key, pace: next });
+    },
+
+    /** Max wall-clock hours before a soft pause. Clamped like context. */
+    setMaxHours(s: LocalState, key: string, hours: number) {
+      if (!Number.isFinite(hours)) return;
+      const next = maxHoursOf({ maxHours: hours });
+      cfgAt(s, key).maxHours = next;
+      log.info("local", "maxHours set", { key, maxHours: next });
     },
 
     setRunAs(s: LocalState, key: string, runAs: string) {

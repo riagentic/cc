@@ -21,14 +21,15 @@ import { IconSpeaker, IconSpeakerOff } from "./icons.tsx";
  * speaker that ignores being turned off, which people click twice and then
  * distrust.
  */
-export function Speaker(_props: { key?: string } = {}): VNode {
-  const ready = speechReady();
+export function Speaker(_props: { key?: string }): VNode | null {
+  // Not set up means not offered, not a hidden control: `present()` counts a
+  // `hidden` element as on the surface, and a control nobody can use reads as a
+  // broken feature rather than an absent one. The setup path lives in Settings.
+  if (!speechReady()) return null;
   const status = speech.status;
   const on = status !== "off";
 
-  const hint = !ready
-    ? "Set up a speech server in Settings to have replies read aloud"
-    : status === "speaking"
+  const hint = status === "speaking"
     ? `Reading aloud — click to stop. ${speech.saying}`
     : status === "error"
     ? speech.error ?? "Reading aloud failed"
@@ -47,7 +48,6 @@ export function Speaker(_props: { key?: string } = {}): VNode {
       // no test can address twice. The state travels in `aria-pressed`.
       aria-label="Read aloud"
       aria-pressed={on}
-      hidden={!ready}
       // Through these rather than the cell directly: "on" also means every
       // conversation's history stops counting as news, and that bookkeeping
       // lives with the hook that reads it.

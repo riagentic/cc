@@ -7,6 +7,8 @@ as a second engine. Built on [aio](https://github.com/riagentic/aio).
 > **Status: v0.2, early and unfinished.** Built and tried on one Linux machine
 > only. Expect rough edges, breaking changes and no support.
 
+![cc: projects on the left, a local-model chat in the middle, session panel and gauges on the right](docs/screenshot.png)
+
 ## What it does
 
 - **Projects side by side** — each with its own conversations, `claude` process,

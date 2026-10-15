@@ -202,6 +202,10 @@ export default function App(): VNode {
  */
 function useShortcuts(): void {
   const bindings = globalBindings();
+  // aio-ok: `globalBindings()` returns a fixed-length array literal, so the
+  // count and order are the same on every render — the one thing the hook
+  // contract requires. The rule cannot see a literal's length; see the note
+  // above and `commands.ts`.
   for (const b of bindings) onGlobalKey(b.key, b.run, b.chord);
 }
 

@@ -132,6 +132,12 @@ export type LocalConfig = {
   permission?: LocalPermission;
   /** How thoroughly to work: draft / normal / quality. Default quality. */
   pace?: LocalPace;
+  /**
+   * Max wall-clock hours for one stretch of work before the agent soft-pauses
+   * and asks whether to continue. Default 2. Pace takes a share of this
+   * (Draft 20%, Normal 50%, Quality 100%). Clamped to a sane range.
+   */
+  maxHours?: number;
   /** Who shell commands run as. Default auto. */
   runAs?: LocalRunAs;
   /**

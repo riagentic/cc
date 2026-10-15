@@ -585,30 +585,35 @@ Deno.test("sh runs for real: output, exit code, and a hard output cap", async ()
   });
 });
 
-Deno.test("a model stuck on one call is stopped long before the round cap", async () => {
-  // A model that never stops making the same call. It is told once what it
-  // is doing, then the tools are taken away for a round — and when it calls
-  // anyway, the turn ends, saying why. Before, this burned every round up to
-  // the cap: minutes of GPU for nothing.
-  const always = Array.from({ length: 40 }, (_, i) => ({
-    toolCalls: [{ id: `r${i}`, name: "ls", args: "{}" }],
-  }));
-  await withEngine(always, async (id, requests) => {
+Deno.test("a model stuck on one call is stepped out, not hard-stopped", async () => {
+  // A model that keeps making the same call. It is named, told to step further
+  // out, then tools pause for a plan reply — the turn stays open so a better
+  // approach can land. Before, a fourth verdict force-answered and cut the
+  // turn; cycling alone must not do that.
+  const script = [
+    ...Array.from({ length: 8 }, (_, i) => ({
+      toolCalls: [{ id: `r${i}`, name: "ls", args: "{}" }],
+    })),
+    { text: "I will list a different path and answer." },
+  ];
+  await withEngine(script, async (id, requests) => {
     await local.setMode(id, "read");
     await local.send("loop forever", id);
     const chat = localChat(id);
     assertEquals(chat.status, "idle");
-    assert(chat.error?.includes("repeating"), chat.error ?? "(null)");
-    assert(requests.length <= 8, `${requests.length} requests`);
-    // The last request offered no tools and said so.
-    const last = requests[requests.length - 1] as {
-      tools?: unknown[];
-      messages: { content: string }[];
-    };
-    assertEquals(last.tools, undefined);
+    assertEquals(chat.error, null);
     assert(
-      last.messages.some((m) => m.content.includes("Tools are off")),
-      "the model was not told",
+      !chat.messages.some((m) => /^\*\(stopped/.test(m.text)),
+      "cycling alone must not cut the turn",
+    );
+    const wire = JSON.stringify(requests);
+    assert(
+      wire.includes("Step further out") || wire.includes("Still looping"),
+      wire.slice(0, 800),
+    );
+    assert(
+      requests.some((r) => (r as { tools?: unknown[] }).tools === undefined),
+      "expected a plan-pause with tools off",
     );
     assert(chat.messages.length <= MAX_LOCAL_MESSAGES);
   });
@@ -1664,12 +1669,13 @@ Deno.test("output too long for the window is kept in a file", async () => {
   });
 });
 
-Deno.test("a loop that alternates two calls is stopped early", async () => {
+Deno.test("a loop that alternates two calls gets a step-out impulse", async () => {
   // The shape a small model loops in most often: never three of the same in a
-  // row, so a "last three identical" check never fires — and before the count
-  // over the whole turn existed, this ran to the 1024-round cap.
+  // row, so a "last three identical" check never fires — cycleVerdict names
+  // the A,B,A,B pattern and cycleImpulse steps the model out. The turn is not
+  // cut solely for cycling; a final answer is still allowed.
   const script: Scripted[] = [];
-  for (let i = 0; i < 60; i++) {
+  for (let i = 0; i < 14; i++) {
     script.push({
       toolCalls: [
         i % 2 === 0
@@ -1687,14 +1693,18 @@ Deno.test("a loop that alternates two calls is stopped early", async () => {
     await local.send("go", id);
     const chat = localChat(id);
     assertEquals(chat.status, "idle");
-    // Four of the same call is the limit, and two calls take turns: a dozen
-    // requests at the very most, not a thousand.
-    assert(requests.length <= 12, `${requests.length} requests`);
+    assertEquals(chat.error, null);
     assert(
-      chat.messages.some((m) => m.text.includes("same read call")) ||
-        chat.messages.some((m) => m.text.includes("same ls call")),
-      "the transcript does not say it went round in a circle",
+      !chat.messages.some((m) => /^\*\(stopped/.test(m.text)),
+      "alternating cycle must not hard-stop the turn",
     );
+    const wire = JSON.stringify(requests);
+    assert(
+      wire.includes("not progress") || wire.includes("Step further out") ||
+        wire.includes("same read call") || wire.includes("same ls call"),
+      wire.slice(0, 1000),
+    );
+    assertEquals(chat.messages.at(-1)?.text, "Fine — here is what I know.");
   });
 });
 
@@ -1751,15 +1761,23 @@ Deno.test("edit, check, edit, check is work — the same write in a circle is no
     });
   }
   circle.push({ text: "Stopped." });
-  await withEngine(circle, async (id) => {
+  await withEngine(circle, async (id, requests) => {
     await local.setMode(id, "agent");
     await local.setPermission(id, "bypass");
     await local.send("go", id);
-    const rows = localChat(id).messages;
+    const chat = localChat(id);
+    // Impulse rides on the wire (and may pause for a plan); cycling alone
+    // does not cut the turn with a *(stopped after…)* line.
+    const wire = JSON.stringify(requests);
     assert(
-      rows.some((m) => m.text.includes("same write call")),
-      rows.map((m) => m.text).join("\n---\n").slice(-1500),
+      wire.includes("same write call"),
+      wire.slice(-1500),
     );
+    assert(
+      !chat.messages.some((m) => /^\*\(stopped/.test(m.text)),
+      "repeat tally must not hard-stop the turn",
+    );
+    assertEquals(chat.messages.at(-1)?.text, "Stopped.");
   });
 });
 
@@ -2072,7 +2090,7 @@ Deno.test("a turn that runs out of time answers and says so", async () => {
       const rows = localChat(id).messages;
       assertEquals(localChat(id).status, "idle");
       assert(
-        rows[rows.length - 1].text.includes("seconds of work"),
+        /second of work|seconds of work/.test(rows[rows.length - 1].text),
         rows[rows.length - 1].text,
       );
     });

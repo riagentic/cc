@@ -212,6 +212,11 @@ Deno.test("switching project drops the other one's expansion and preview", async
 Deno.test("the touch overlay reports the session's own file calls", async () => {
   const h = await bootCells([workspace, session, tree]);
   try {
+    // Let boot finish: `workspace.bootstrap` names the active project, and the
+    // session record the events reduce into is chosen from it. Ingesting before
+    // it lands writes to the unclaimed top level, which the first project then
+    // parks — the events would vanish from the record on screen.
+    await h.settle();
     session.ingest({
       type: "assistant",
       message: {

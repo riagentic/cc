@@ -44,6 +44,9 @@ import {
   LOCAL_CAPABILITIES,
   LOCAL_PACES,
   LOCAL_RUN_AS,
+  MAX_MAX_HOURS,
+  maxHoursOf,
+  MIN_MAX_HOURS,
   paceOf,
   permissionOf,
   programsToAllow,
@@ -559,13 +562,45 @@ function LocalStrip(): VNode {
           re-reads it every round. */
       }
       {cfg.mode !== "chat" && (
-        <Stat label="Pace">
-          <Segmented
-            value={paceOf(cfg)}
-            options={LOCAL_PACES.map((p) => ({ id: p.id, label: p.label }))}
-            onChange={(v) => local.setPace(id, v)}
-          />
-        </Stat>
+        <>
+          <Stat label="Pace">
+            <Segmented
+              value={paceOf(cfg)}
+              options={LOCAL_PACES.map((p) => ({ id: p.id, label: p.label }))}
+              onChange={(v) => local.setPace(id, v)}
+            />
+          </Stat>
+          <Stat
+            label="Max hours"
+            numeric
+            title="Wall-clock hours before the agent pauses and asks whether to continue. Pace takes a share of this."
+          >
+            <input
+              class="input"
+              type="number"
+              min={MIN_MAX_HOURS}
+              max={MAX_MAX_HOURS}
+              step={0.25}
+              aria-label="Max work hours"
+              value={String(maxHoursOf(cfg))}
+              style={{ width: "64px" }}
+              // Only a positive number is committed. Snapping mid-keystroke
+              // would rewrite "0.5" the moment the field reads "0" (the
+              // smallest setting is a quarter hour), and a half-typed value
+              // must not be clamped out from under the cursor.
+              onChange={(e: Event) => {
+                const v = Number((e.currentTarget as HTMLInputElement).value);
+                if (Number.isFinite(v) && v > 0) local.setMaxHours(id, v);
+              }}
+              // A field left empty or nonsensical shows the setting it kept.
+              onBlur={(e: Event) => {
+                (e.currentTarget as HTMLInputElement).value = String(
+                  maxHoursOf(cfg),
+                );
+              }}
+            />
+          </Stat>
+        </>
       )}
 
       {
@@ -1300,6 +1335,35 @@ export function EnginePanel(): VNode {
               <span class="field__hint">
                 Draft: something that runs, very fast. Normal: checked and still
                 quick. Quality: thorough (slower).
+              </span>
+              <span class="field__label" style={{ marginTop: "10px" }}>
+                Max hours
+              </span>
+              <input
+                class="input"
+                type="number"
+                min={MIN_MAX_HOURS}
+                max={MAX_MAX_HOURS}
+                step={0.25}
+                aria-label="Max work hours"
+                value={String(maxHoursOf(cfg))}
+                // Only a positive number is committed — see the strip's field:
+                // snapping mid-keystroke makes a quarter-hour setting
+                // untypeable, and an emptied field keeps what it had.
+                onChange={(e: Event) => {
+                  const v = Number((e.target as HTMLInputElement).value);
+                  if (Number.isFinite(v) && v > 0) local.setMaxHours(id, v);
+                }}
+                onBlur={(e: Event) => {
+                  (e.target as HTMLInputElement).value = String(
+                    maxHoursOf(cfg),
+                  );
+                }}
+              />
+              <span class="field__hint">
+                Wall-clock hours before the agent pauses and asks whether to
+                continue (default 2). Pace takes a share — Draft 20%, Normal
+                50%, Quality the full amount. Slow local models need the room.
               </span>
               <span class="field__label" style={{ marginTop: "10px" }}>
                 Run as

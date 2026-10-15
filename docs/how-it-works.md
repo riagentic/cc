@@ -32,15 +32,16 @@ takes tools natively, and the project it works in.
 
 How thoroughly one turn works — orthogonal to tools and permissions.
 
-| Pace        | Intent                         | Rounds | Wall   | Verify nudge | Docs nudge |
-| ----------- | ------------------------------ | ------ | ------ | ------------ | ---------- |
-| **Draft**   | Something that runs, very fast | 48     | 4 min  | no           | no         |
-| **Normal**  | Decent quality, still quick    | 160    | 10 min | yes          | no         |
-| **Quality** | Today's full thorough pass     | 1024   | 20 min | yes          | yes        |
+| Pace        | Intent                         | Rounds | Wall share | Verify nudge | Docs nudge |
+| ----------- | ------------------------------ | ------ | ---------- | ------------ | ---------- |
+| **Draft**   | Something that runs, very fast | 48     | 20%        | no           | no         |
+| **Normal**  | Decent quality, still quick    | 160    | 50%        | yes          | no         |
+| **Quality** | Today's full thorough pass     | 1024   | 100%       | yes          | yes        |
 
-The wall-clock column is a _share_ of the turn budget, not a second clock: the
-tunable `CC_TURN_MS` (twenty minutes by default) stays the whole of Quality, and
-Draft and Normal take a fifth and a half of whatever it is set to.
+The wall-clock column is a _share_ of **Max hours** (default 2), the user-facing
+setting beside Pace — not a second clock. At the default, Draft gets ~24 min,
+Normal ~1 h, Quality the full 2 h; then the agent soft-pauses and asks whether
+to continue. `CC_TURN_MS` still overrides when set (tests / power users).
 
 Draft always uses the terse working method. Normal uses a lighter method on
 large windows. Quality keeps the window-sized method unchanged. Sticky packing,

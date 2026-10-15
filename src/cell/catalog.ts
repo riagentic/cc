@@ -124,10 +124,12 @@ export const catalog = cell("catalog", {
     error: null as string | null,
   },
 
-  onInit() {
-    // The cell's runtime is not up during `onInit`; the first scan waits a tick
-    // like every other cell here.
-    setTimeout(() => void catalog.refresh(), 0); // aiol-ok
+  onInit(app) {
+    // Methods are bound AFTER `onInit`, so a direct call here would hit the
+    // "runtime not booted" guard. Dispatch through the app handle instead: it
+    // enters the action log, is cancellable, and belongs to this boot
+    // (dep/aio/docs/state/lifecycle.md#starting-work-when-the-app-comes-up).
+    app.dispatch({ type: "catalog:refresh", payload: { args: [] } });
   },
 
   methods: {

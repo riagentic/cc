@@ -518,14 +518,26 @@ const STREAM_IDLE_MS = () => tunable("CC_STREAM_IDLE_MS", 120_000);
 const STREAM_FIRST_MS = () => tunable("CC_STREAM_FIRST_MS", 900_000);
 /**
  * How long one stretch of work may go on before the agent has to answer with
- * what it has.
+ * what it has — only when `CC_TURN_MS` is set. Prefer the user-facing
+ * max-hours setting ({@link turnMsEnv} returns null when unset); this fallback
+ * stays at twenty minutes for callers that still read it directly.
  *
  * Rounds alone are no bound: a thousand cheap calls are twelve seconds against
- * a stub and most of a working day against a real 7B. Twenty minutes is long
- * enough for a real build-and-test cycle and short enough that a model walking
- * in circles gives the machine back.
+ * a stub and most of a working day against a real 7B.
  */
 export const turnMs = (): number => tunable("CC_TURN_MS", 20 * 60_000);
+
+/**
+ * Explicit `CC_TURN_MS` when the env names one, else `null` so the turn loop
+ * can fall back to the project's max-hours setting. Tests and power users set
+ * the env; everyone else gets the UI number.
+ */
+export function turnMsEnv(): number | null {
+  const raw = Deno.env.get("CC_TURN_MS");
+  if (raw === undefined || raw.trim() === "") return null;
+  const v = Number(raw);
+  return Number.isFinite(v) && v > 0 ? v : null;
+}
 
 /**
  * Tokens of thinking a reply may spend before it has to act — or `undefined`
@@ -608,12 +620,14 @@ const WRITE_RATE = new Map<string, number>();
 const rateKey = (baseUrl: string, model: string) =>
   `${baseUrl.replace(/\/+$/, "")} ${model}`;
 
-/** The writing speed a turn's clock (`turnMs`) is set for. */
+/** The writing speed a turn's clock is set for, whatever its length. */
 const CLOCK_RATE = 60;
 
 /**
- * How many times longer than `turnMs` this model's turn may run: the speed
- * the clock is set for over the model's measured one, between 1 and 4.
+ * How many times longer than the turn's own wall budget this model's turn may
+ * run: the speed the clock is set for over the model's measured one, between 1
+ * and 4. Independent of how long that budget is (max-hours now, `CC_TURN_MS`
+ * before): a slow model gets proportionally more time, not a bigger constant.
  *
  * The clock is there to end a turn getting nowhere, and "nowhere" is a count
  * of rounds, not of minutes. On the wall clock a dense 27B at 17 tokens/s

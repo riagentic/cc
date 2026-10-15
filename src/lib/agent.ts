@@ -128,6 +128,42 @@ export function paceOf(cfg: LocalConfig | undefined): LocalPace {
   return p === "draft" || p === "normal" || p === "quality" ? p : "quality";
 }
 
+/** Default max wall-clock hours before a soft pause. */
+export const DEFAULT_MAX_HOURS = 2;
+/** Lowest accepted max-hours setting (15 minutes). */
+export const MIN_MAX_HOURS = 0.25;
+/** Highest accepted max-hours setting (a day). */
+export const MAX_MAX_HOURS = 24;
+
+/**
+ * Max wall-clock hours for a project. Default 2. Clamped to
+ * {@link MIN_MAX_HOURS}–{@link MAX_MAX_HOURS} and snapped to quarter hours
+ * so the strip and the clock agree on one number.
+ */
+export function maxHoursOf(
+  cfg: { maxHours?: number } | undefined,
+): number {
+  const h = cfg?.maxHours;
+  if (typeof h !== "number" || !Number.isFinite(h)) return DEFAULT_MAX_HOURS;
+  const snapped = Math.round(h * 4) / 4;
+  return Math.min(MAX_MAX_HOURS, Math.max(MIN_MAX_HOURS, snapped));
+}
+
+/**
+ * Wall-clock base (ms) for Quality pace: an explicit `CC_TURN_MS` when the
+ * env names one (tests / power users), otherwise the user-facing max-hours
+ * setting. Pace then takes its share of this base.
+ */
+export function turnBaseMs(
+  maxHours: number,
+  envMs?: number | null,
+): number {
+  if (typeof envMs === "number" && Number.isFinite(envMs) && envMs > 0) {
+    return Math.floor(envMs);
+  }
+  return Math.max(1, Math.round(maxHours * 3_600_000));
+}
+
 /** Run-as preference. Default auto. */
 export function runAsOf(cfg: LocalConfig | undefined): LocalRunAs {
   const r = cfg?.runAs;
@@ -159,11 +195,14 @@ export function maxRoundsFor(pace: LocalPace): number {
 
 /**
  * Wall-clock budget (ms) for one turn at this pace, as a share of the base
- * budget — which is the tunable one (`CC_TURN_MS`, twenty minutes by default),
- * passed in rather than hard-coded here: a pace is a fraction of the turn
- * clock, not a second clock of its own.
+ * budget — which is the user-facing max-hours setting (or `CC_TURN_MS` when
+ * set), passed in rather than hard-coded here: a pace is a fraction of the
+ * turn clock, not a second clock of its own. Default base is two hours.
  */
-export function turnMsFor(pace: LocalPace, baseMs = 20 * 60_000): number {
+export function turnMsFor(
+  pace: LocalPace,
+  baseMs = DEFAULT_MAX_HOURS * 3_600_000,
+): number {
   const share = pace === "draft" ? 0.2 : pace === "normal" ? 0.5 : 1;
   return Math.max(1, Math.round(baseMs * share));
 }
@@ -1805,15 +1844,33 @@ export const REPEATABLE: ReadonlySet<string> = new Set([
 export type SeenCall = { name: string; args: string; failed: boolean };
 
 /**
- * The verdict on a turn that keeps repeating itself: what to tell the model,
- * or `null` when the recent calls still look like progress.
+ * Path + old_string for a failed edit. Two edits that miss the same place are
+ * the same dead-end even when `new_string` differs — the model is hopping
+ * between wordings of one broken replace. `null` when the args are not a
+ * readable edit.
+ */
+export function editFailKey(args: string): string | null {
+  try {
+    const o = JSON.parse(args) as { path?: unknown; old_string?: unknown };
+    if (typeof o.path !== "string" || typeof o.old_string !== "string") {
+      return null;
+    }
+    return `${o.path}\u0000${o.old_string}`;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The verdict on a turn that keeps repeating itself: a short naming of the
+ * shape, or `null` when the recent calls still look like progress. The caller
+ * wraps this with {@link cycleImpulse} so the first hit steps the model out
+ * and later hits escalate — never a hard stop for cycling alone.
  *
- * Two shapes, both the ones every stuck small model produces: the same call
- * three times in a row (any tool — `sh` re-run with nothing changed in between
- * is as stuck as a re-read), and the same call *failing* twice in a row. Naming
- * the behaviour and the two exits breaks loops a bare "identical call" note
- * never did. The caller escalates: a second verdict in one turn takes the
- * tools away for a round.
+ * Shapes every stuck small model produces: the same call three times in a row
+ * (any tool — `sh` re-run with nothing changed in between is as stuck as a
+ * re-read); the same call *failing* twice in a row; and two failed `edit`s on
+ * the same file + old_string (new_string may differ).
  */
 export function loopVerdict(recent: SeenCall[]): string | null {
   const key = (c: SeenCall) => `${c.name}\u0000${c.args}`;
@@ -1823,17 +1880,28 @@ export function loopVerdict(recent: SeenCall[]): string | null {
     if (new Set(last.map(key)).size === 1) {
       return `You have made the same ${last[0].name} call three times in a` +
         ` row and nothing changed in between, so the result will not change` +
-        ` either. Change the call (another path, a narrower range, a` +
-        ` different approach) or stop calling tools and answer with what you` +
-        ` have.`;
+        ` either.`;
     }
   }
   if (n >= 2) {
     const [a, b] = recent.slice(-2);
     if (a.failed && b.failed && key(a) === key(b)) {
       return `That ${a.name} call failed twice with the same arguments.` +
-        ` Read the error, then fix the cause or try a different approach —` +
-        ` repeating it will fail again.`;
+        ` Repeating it will fail again.`;
+    }
+    // Same file + pattern, different new_string: still one dead-end.
+    if (
+      a.name === "edit" && b.name === "edit" && a.failed && b.failed &&
+      key(a) !== key(b)
+    ) {
+      const ea = editFailKey(a.args);
+      const eb = editFailKey(b.args);
+      if (ea && ea === eb) {
+        const path = ea.split("\u0000")[0] || "that file";
+        return `That edit on ${path} failed twice against the same` +
+          ` old_string (only new_string changed). The match is wrong or the` +
+          ` approach is — re-read the file, or change strategy.`;
+      }
     }
   }
   return null;
@@ -1851,7 +1919,8 @@ export type CycleCall = SeenCall & { result: string };
  * cycle: the result hash changes the moment anything real happens.
  *
  * `period` is the smallest 2..4 that laps at least three times; `recent` holds
- * the tail of the turn's calls. `null` when nothing repeats.
+ * the tail of the turn's calls. `null` when nothing repeats. The caller wraps
+ * the naming with {@link cycleImpulse}.
  */
 export function cycleVerdict(
   recent: readonly CycleCall[],
@@ -1881,12 +1950,37 @@ export function cycleVerdict(
     if (count >= laps) {
       const names = last.map((c) => c.name).join(", ");
       return `The last ${count} blocks repeated the same ${period} calls` +
-        ` (${names}) with the same results each time — that is not progress.` +
-        ` Change at least one call, use a different approach, or stop calling` +
-        ` tools and answer with what you already have.`;
+        ` (${names}) with the same results each time — that is not progress.`;
     }
   }
   return null;
+}
+
+/**
+ * Escalating impulse when the agent is cycling. `what` is the naming from
+ * {@link loopVerdict} / {@link cycleVerdict} (or the repeat-tally line). Level
+ * 1 steps out; 2 forces a plan reply (caller pauses tools); 3+ demands a new
+ * strategy on the todo. Never "stop the turn" — round and time caps still
+ * close a turn that will not move.
+ */
+export function cycleImpulse(level: number, what: string): string {
+  const base = what.trim();
+  if (level <= 1) {
+    return `${base} Do not repeat that approach. Step further out: re-read` +
+      ` the request, open a different file, try another tool, verify an` +
+      ` assumption you have been treating as fact, or make a smaller repro.` +
+      ` Pick a move that is not a variant of the last few.`;
+  }
+  if (level === 2) {
+    return `${base} Still looping after being told. Tools pause for one` +
+      ` reply: write a short plan of a genuinely different approach (what` +
+      ` failed, what you will try instead, which file or tool first) — then` +
+      ` take only that step. Do not hop back into the same dead-end.`;
+  }
+  return `${base} Cycling again. Before any more of those calls: update your` +
+    ` todo with a new strategy that is not a retry of the failed one, then` +
+    ` execute its first different step. Re-check requirements and` +
+    ` assumptions. Keep going — change strategy, do not repeat.`;
 }
 
 /**

@@ -120,10 +120,10 @@ export const jobs = cell("jobs", {
     error: null as string | null,
   },
 
-  onInit() {
-    // Same reason as `workspace.bootstrap`: the cell's runtime is not up yet
-    // during `onInit`, so the first scan is queued for the next macrotask.
-    setTimeout(() => void jobs.arm(), 0); // aiol-ok
+  onInit(app) {
+    // Same reason as `workspace.bootstrap`: methods are bound after `onInit`,
+    // so the first scan is dispatched through the app handle, not called.
+    app.dispatch({ type: "jobs:arm", payload: { args: [] } });
   },
 
   methods: {

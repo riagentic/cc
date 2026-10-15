@@ -108,6 +108,45 @@ testUI(App, "engine settings appear in Settings, per project", async (ui) => {
 
 testUI(
   App,
+  "Max hours is typed in quarter hours and kept, per project",
+  async (ui) => {
+    ui.ProjectLink.click();
+    await ui.settle();
+    await withProject(ui, async (id) => {
+      await local.setEngine(id, "llamacpp");
+      // The strip's controls show for anything but chat mode.
+      await local.setMode(id, "agent");
+      await ui.settle();
+
+      // The default is two hours.
+      assertEquals(localConfig(id).maxHours, 2);
+      assertEquals(ui.MaxWorkHoursInput.value, "2");
+
+      // A quarter hour is typable: the old per-keystroke commit snapped "0"
+      // to the 0.25 minimum, so "0.5" could never be entered.
+      ui.MaxWorkHoursInput.clear();
+      ui.MaxWorkHoursInput.type("0.5");
+      await ui.settle();
+      assertEquals(localConfig(id).maxHours, 0.5);
+
+      // Out-of-range clamps, and the field agrees with the stored number.
+      ui.MaxWorkHoursInput.setValue("99");
+      await ui.settle();
+      assertEquals(localConfig(id).maxHours, 24);
+      assertEquals(ui.MaxWorkHoursInput.value, "24");
+
+      // A cleared field keeps what it had, and blur restores it.
+      ui.MaxWorkHoursInput.clear();
+      ui.MaxWorkHoursInput.blur();
+      await ui.settle();
+      assertEquals(localConfig(id).maxHours, 24);
+      assertEquals(ui.MaxWorkHoursInput.value, "24");
+    });
+  },
+);
+
+testUI(
+  App,
   "a project parked on a Claude page falls back to local chat on switch",
   async (ui) => {
     ui.SubAgentsLink.click();

@@ -16,8 +16,9 @@ import { testUI } from "aio/testing";
 import App from "../../App.tsx";
 import { session, view } from "../../cell/session.ts";
 import type { ToolRun } from "../../type/claude.ts";
-import { panesOf, workspace } from "../../cell/workspace.ts";
+import { activeSettings, panesOf, workspace } from "../../cell/workspace.ts";
 import { listKey } from "../../lib/format.ts";
+import { modelOf } from "../../lib/stream.ts";
 import { loops } from "../../cell/loops.ts";
 import { tree } from "../../cell/tree.ts";
 import { catalog } from "../../cell/catalog.ts";
@@ -294,6 +295,9 @@ testUI(
   async (ui) => {
     await open(ui);
     session.ingest(init);
+    // A live session: the strip names the running model beside the chosen one
+    // only while one is actually running, and `running` is "not offline".
+    session.ingest({ type: "system", subtype: "status", status: "requesting" });
     // The family, not the id the CLI reports: "claude-sonnet-5" is what the
     // wire says, "Sonnet" is what the picker calls it and what the strip has
     // to name if choosing from that picker is to change what is written here.
@@ -1568,6 +1572,9 @@ testUI(App, "a draft belongs to the project it was written for", async (ui) => {
 testUI(App, "a menu can be driven entirely from the keyboard", async (ui) => {
   await open(ui);
   session.ingest(init);
+  // A live session: the strip names the running model beside the chosen one
+  // only while one is actually running, and `running` is "not offline".
+  session.ingest({ type: "system", subtype: "status", status: "requesting" });
   await ui.waitFor(() => ui.html().includes("Sonnet"));
 
   ui.ModelButton.click();
@@ -1580,7 +1587,14 @@ testUI(App, "a menu can be driven entirely from the keyboard", async (ui) => {
     ) === true
   );
   const opened = ui.document.activeElement as HTMLElement;
-  assertEquals(opened.getAttribute("aria-label"), "Sonnet");
+  // Opening focuses the picker's current selection: the chosen model, which is
+  // what the strip's trigger names (the session's own model is marked beside
+  // it). Read from the app rather than a literal — the chosen default is the
+  // one this machine's CLI reports.
+  assertEquals(
+    opened.getAttribute("aria-label"),
+    modelOf(activeSettings().model)?.label,
+  );
 
   // Typing jumps, the way every native menu has for thirty years.
   ui.HaikuButton.press("h");

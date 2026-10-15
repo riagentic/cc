@@ -272,12 +272,21 @@ async function spawn(
     // Identity, not key: a restart of the same project has already replaced the
     // entry, and deleting it here would drop the *new* session from the
     // registry — leaving a running process nothing could stop.
-    if (live.get(key) === session) {
+    //
+    // `live.get(key) === session` is also exactly "this process ended on its
+    // own": a deliberate `stop`/`stopAll` removes the entry BEFORE killing, so
+    // by the time the exit lands the session is gone. Only a self-ended
+    // process has an exit left to report — a stopped one already recorded it,
+    // and after a mount is torn down (a harness dispose, an app shutdown) a
+    // dispatch would land in a runtime that no longer exists, which aio
+    // refuses loudly.
+    const onItsOwn = live.get(key) === session;
+    if (onItsOwn) {
       live.delete(key);
       releaseExitGuardIfIdle();
     }
     session.closed = true;
-    hooks.onExit(status.code, stderrTail.trim());
+    if (onItsOwn) hooks.onExit(status.code, stderrTail.trim());
   })();
 
   return { pid: session.pid };

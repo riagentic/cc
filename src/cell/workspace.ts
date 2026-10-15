@@ -860,15 +860,13 @@ export const workspace = cell("workspace", {
   // half-added project must never be visible.
   transaction: true,
 
-  // `onInit` runs *during* the boot sequence, before this cell's runtime can
-  // accept a dispatch — so the discovery pass is queued for the next macrotask,
-  // when the app is genuinely up. Calling it inline throws INIT_ERROR.
-  onInit() {
-    // A plain macrotask on purpose: `schedule.after`
-    // (dep/aio/docs/state/scheduling.md) dispatches through this cell's
-    // runtime, which is precisely what is not up yet.
-    // Hook contract: dep/aio/docs/state/lifecycle.md#oninit-and-ondestroy.
-    setTimeout(() => void workspace.bootstrap(), 0); // aiol-ok
+  // `onInit` runs *during* the boot sequence, before this cell's methods are
+  // bound — so the discovery pass is dispatched through the app handle, which
+  // accepts a dispatch while the boot is in progress. Calling the method
+  // inline throws INIT_ERROR; a raw timer would escape the action log.
+  // Hook contract: dep/aio/docs/state/lifecycle.md#oninit-and-ondestroy.
+  onInit(app) {
+    app.dispatch({ type: "workspace:bootstrap", payload: { args: [] } });
   },
 
   methods: {

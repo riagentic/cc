@@ -16,9 +16,12 @@ import {
   CLIP_MARK,
   commandAdvice,
   type CycleCall,
+  cycleImpulse,
   cycleVerdict,
+  DEFAULT_MAX_HOURS,
   destructiveReason,
   docsNudgeFor,
+  editFailKey,
   emptyResult,
   estTokens,
   explainError,
@@ -35,9 +38,12 @@ import {
   isTestPath,
   isUnreachable,
   loopVerdict,
+  MAX_MAX_HOURS,
+  maxHoursOf,
   maxOutput,
   maxRoundsFor,
   mayLeaveUnasked,
+  MIN_MAX_HOURS,
   newAcc,
   newestBodies,
   outputReserve,
@@ -64,6 +70,7 @@ import {
   todoNote,
   toolBudget,
   toolSpecs,
+  turnBaseMs,
   turnMsFor,
   verifyNudgeFor,
   wantsToContinue,
@@ -702,6 +709,10 @@ Deno.test("loopVerdict — the same call three times, or failing twice", () => {
   const read = call("read", '{"path":"a.ts"}');
   const v = loopVerdict([read, read, read]);
   assert(v !== null && v.includes("read"), v ?? "");
+  assert(
+    !v!.includes("stop calling"),
+    "naming only — impulse adds the step-out",
+  );
   assertEquals(loopVerdict([read, read]), null);
   assertEquals(loopVerdict([read, call("grep", "{}"), read]), null);
   // Any tool: `sh` re-run three times with nothing changed is as stuck.
@@ -713,6 +724,41 @@ Deno.test("loopVerdict — the same call three times, or failing twice", () => {
   const bad = call("edit", '{"path":"x"}', true);
   assert(loopVerdict([bad, bad])?.includes("failed twice"));
   assertEquals(loopVerdict([bad, { ...bad, failed: false }]), null);
+  // Failed edits on the same file+old_string with different new_string.
+  const e1 = call(
+    "edit",
+    JSON.stringify({ path: "a.ts", old_string: "foo", new_string: "bar" }),
+    true,
+  );
+  const e2 = call(
+    "edit",
+    JSON.stringify({ path: "a.ts", old_string: "foo", new_string: "baz" }),
+    true,
+  );
+  assert(loopVerdict([e1, e2])?.includes("old_string"));
+  assertEquals(editFailKey(e1.args), editFailKey(e2.args));
+  // Different old_string is a different attempt, not this shape.
+  const e3 = call(
+    "edit",
+    JSON.stringify({ path: "a.ts", old_string: "other", new_string: "baz" }),
+    true,
+  );
+  assertEquals(loopVerdict([e1, e3]), null);
+});
+
+Deno.test("cycleImpulse — steps out, then plans, then demands a new strategy", () => {
+  const what = "You have made the same read call three times in a row.";
+  const one = cycleImpulse(1, what);
+  assert(one.includes("Step further out"), one);
+  assert(one.includes(what), one);
+  assert(!one.includes("stop calling"), one);
+  const two = cycleImpulse(2, what);
+  assert(two.includes("short plan"), two);
+  assert(two.includes("Tools pause"), two);
+  const three = cycleImpulse(3, what);
+  assert(three.includes("todo"), three);
+  assert(three.includes("Keep going"), three);
+  assertEquals(cycleImpulse(4, what), three);
 });
 
 Deno.test("wantsToContinue — a reply that stops at 'let me…'", () => {
@@ -1680,6 +1726,27 @@ Deno.test("pace budgets: draft fast, normal checked, quality full", () => {
   assertEquals(capabilityOf(undefined), "execute");
   assert(turnMsFor("draft") < turnMsFor("normal"));
   assert(turnMsFor("normal") < turnMsFor("quality"));
+  // Default base is max-hours (2h); Quality takes all of it.
+  assertEquals(turnMsFor("quality"), DEFAULT_MAX_HOURS * 3_600_000);
+  assertEquals(
+    turnMsFor("draft"),
+    Math.round(DEFAULT_MAX_HOURS * 3_600_000 * 0.2),
+  );
+});
+
+Deno.test("maxHoursOf: default 2, clamped and snapped to quarters", () => {
+  assertEquals(maxHoursOf(undefined), DEFAULT_MAX_HOURS);
+  assertEquals(maxHoursOf({}), DEFAULT_MAX_HOURS);
+  assertEquals(maxHoursOf({ maxHours: 3 }), 3);
+  assertEquals(maxHoursOf({ maxHours: 0.1 }), MIN_MAX_HOURS);
+  assertEquals(maxHoursOf({ maxHours: 100 }), MAX_MAX_HOURS);
+  assertEquals(maxHoursOf({ maxHours: 1.4 }), 1.5);
+  assertEquals(maxHoursOf({ maxHours: NaN }), DEFAULT_MAX_HOURS);
+  // Env override wins; otherwise hours → ms.
+  assertEquals(turnBaseMs(2, null), 2 * 3_600_000);
+  assertEquals(turnBaseMs(2, undefined), 2 * 3_600_000);
+  assertEquals(turnBaseMs(2, 700), 700);
+  assertEquals(turnBaseMs(2, 0), 2 * 3_600_000);
 });
 
 Deno.test("sanitizeToolOutput — escapes, controls, CR and invisible tags out", () => {
@@ -1742,7 +1809,10 @@ Deno.test("cycleVerdict — an A,B,A,B loop the streak guard cannot see", () => 
     call("read", '{"path":"a"}', "A"),
     call("ls", '{"path":"b"}', "B"),
   ];
-  assert(cycleVerdict(ab) !== null);
+  const named = cycleVerdict(ab);
+  assert(named !== null);
+  assert(named!.includes("not progress"), named ?? "");
+  assert(!named!.includes("stop calling"), named ?? "");
   // The same calls with a changed result each lap are progress, not a cycle.
   const growing = ab.map((c, i) => ({ ...c, result: `${c.result}${i}` }));
   assertEquals(cycleVerdict(growing), null);

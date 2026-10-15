@@ -117,12 +117,15 @@ to put an unattended command in, so Execute holds every command for you there
 instead — as does any command that asks to leave the sandbox. **Pace** (Draft /
 Normal / Quality), on the chat row beside Mode, sets how thorough a turn is —
 Draft is fastest and lightly checked, Normal is tested but still quick, Quality
-is the full thorough pass. **Run as** (Settings) chooses Auto, the `cc-agent`
-Linux user, or you; picking `cc-agent` where there is none refuses the command
-rather than quietly running it as you. Stop counts as a refusal. Programs can be
-left running in the background; messages typed while the agent works are
-delivered into the task at its next step, and "stop" cuts the step short. The
-**Stop** button ends everything at once and sends nothing more.
+is the full thorough pass. **Max hours** beside it (default 2) is the wall-clock
+cap before the agent pauses and asks whether to continue — Pace takes a share of
+that budget, so slow local models are not cut off after twenty minutes. **Run
+as** (Settings) chooses Auto, the `cc-agent` Linux user, or you; picking
+`cc-agent` where there is none refuses the command rather than quietly running
+it as you. Stop counts as a refusal. Programs can be left running in the
+background; messages typed while the agent works are delivered into the task at
+its next step, and "stop" cuts the step short. The **Stop** button ends
+everything at once and sends nothing more.
 
 No conversation is thrown away: Clear, the 400-row cap and compaction all save
 what they take to `~/.claude-control/history/`, idle chats move there until

@@ -148,13 +148,13 @@ export const tree = cell("tree", {
     error: null as string | null,
   },
 
-  onInit() {
+  onInit(app) {
     // The first read has to be scheduled here, not left to the first project
     // *change*: on a normal boot the persisted project is already the right
     // one, so nothing changes and nothing would ever trigger a read — the Tree
-    // page opened empty on every launch that did not switch project. The
-    // macrotask is the usual one: the cell's runtime is not up during `onInit`.
-    setTimeout(() => void tree.reproject(), 0); // aiol-ok
+    // page opened empty on every launch that did not switch project. Methods
+    // are bound after `onInit`, so dispatch through the app handle.
+    app.dispatch({ type: "tree:reproject", payload: { args: [] } });
   },
 
   methods: {
