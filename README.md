@@ -20,8 +20,9 @@ as a second engine. Built on [aio](https://github.com/riagentic/aio).
   memory files, skills, MCP servers, hooks, storage, CPU/GPU gauges.
 - **Consoles** — real shells on a pseudo-terminal (a small Rust host ships in
   the binary), plus run buttons taken from the project's own manifests. The host
-  is prebuilt for Linux x86_64; elsewhere a build with Rust installed makes one,
-  and without it the Console is off. Not on Windows yet.
+  is prebuilt for Linux x86_64 and macOS (arm64, x86_64); elsewhere a build with
+  Rust installed makes one, and without it the Console is off. Not on Windows
+  yet.
 - **Local agent** — tools for reading, searching, editing and running commands,
   sized to whatever context window the server has. Commands can run in a
   bubblewrap sandbox, or as a separate Linux user
