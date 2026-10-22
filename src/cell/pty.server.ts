@@ -57,8 +57,13 @@ const hostPath = (): string =>
  *     goes away. */
 const HOST_VERSION = "3";
 
-/** The binary as it sits in the source tree, for `deno task dev`. */
-const devHost = new URL("../../native/pty/bin/cc-pty", import.meta.url);
+/** The binary for this OS and CPU as it sits in the source tree — run by
+ *  `deno task dev`, embedded by the compile. One file per platform, because a
+ *  host built for another one is not a slower host, it is no host at all. */
+export const devHost = new URL(
+  `../../native/pty/bin/cc-pty-${Deno.build.os}-${Deno.build.arch}`,
+  import.meta.url,
+);
 
 /**
  * The in-flight resolution, not the result.
@@ -127,9 +132,15 @@ async function findHost(): Promise<string> {
     return unpacked;
   }
 
+  // Windows has no forkpty: the host would need ConPTY, which it does not
+  // speak. Everything else in the app works; only the Console is off.
+  if (Deno.build.os === "windows") {
+    throw new Error("The Console is not available on Windows yet.");
+  }
   throw new Error(
-    "The terminal host is missing. Build it with `deno task pty`, " +
-      "or point CC_PTY at a copy.",
+    `The Console is not available: this build has no terminal host for ` +
+      `${Deno.build.os}-${Deno.build.arch}. Build it with \`deno task pty\` ` +
+      "(needs Rust), or point CC_PTY at a copy.",
   );
 }
 

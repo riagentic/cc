@@ -5,7 +5,7 @@ dep/
 *.sqlite
 
 # The terminal host's build tree. The shipped binary is committed at
-# native/pty/bin/cc-pty so a clean checkout builds without a Rust toolchain;
+# native/pty/bin/cc-pty-<os>-<arch> so a clean checkout builds without a Rust toolchain;
 # everything cargo generates on the way there is not worth versioning.
 native/pty/target/
 

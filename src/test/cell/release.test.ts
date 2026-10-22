@@ -234,7 +234,7 @@ Deno.test("closing a chat tab ends its claude", async () => {
 
 /** A real shell on a real PTY, from the host in the source tree. */
 async function withShell(run: () => Promise<void>): Promise<void> {
-  const host = new URL("../../../native/pty/bin/cc-pty", import.meta.url);
+  const { devHost: host } = await import("../../cell/pty.server.ts");
   const keep = { pty: Deno.env.get("CC_PTY"), shell: Deno.env.get("SHELL") };
   Deno.env.set("CC_PTY", host.pathname);
   Deno.env.set("SHELL", "/bin/sh");
