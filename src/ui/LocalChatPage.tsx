@@ -82,6 +82,7 @@ import type { LocalMode, LocalMsg, LocalTodo } from "../type/local.ts";
 
 export const ENGINE_NAMES: Record<string, string> = {
   claude: "Claude",
+  aipro: "aipro",
   lmstudio: "LM Studio",
   ollama: "Ollama",
   llamacpp: "llama.cpp",
@@ -96,6 +97,7 @@ export const ENGINE_NAMES: Record<string, string> = {
  */
 export const ENGINE_TAGS: Record<string, string> = {
   claude: "claude",
+  aipro: "aipro",
   lmstudio: "lm studio",
   ollama: "ollama",
   llamacpp: "llama.cpp",
@@ -121,6 +123,7 @@ const MODES: { id: LocalMode; label: string }[] = [
  *  on a local engine with no way home but Settings. */
 const ENGINE_OPTIONS = [
   { id: "claude", label: "Claude Code", hint: "The CLI, with every feature" },
+  { id: "aipro", label: "aipro", hint: "Local · not detected" },
   { id: "lmstudio", label: "LM Studio", hint: "Local · not detected" },
   { id: "ollama", label: "Ollama", hint: "Local · not detected" },
   { id: "llamacpp", label: "llama.cpp", hint: "Local · not detected" },
@@ -1152,7 +1155,7 @@ export function EnginePanel(): VNode {
             : local.detectedAt === 0
             ? "Local servers have not been looked for yet."
             : live.length === 0
-            ? "No local server answered on the default ports — start LM Studio, Ollama or llama.cpp, then scan again."
+            ? "No local server answered on the default ports — start aipro (or LM Studio, Ollama, llama.cpp), then scan again."
             : `Found ${
               live.map((d) =>
                 `${ENGINE_NAMES[d.engine]} (${d.models.length} model${

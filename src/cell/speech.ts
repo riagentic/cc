@@ -16,9 +16,11 @@
 import { cell, log } from "aio";
 import type { Speaker, SpeechConfig, SpeechStatus } from "../type/speech.ts";
 
-/** Where Kokoro-FastAPI listens by default — its own documented port, the same
- *  courtesy whisper and the local engines get. */
-export const DEFAULT_SPEECH_URL = "http://127.0.0.1:8880";
+/** aipro's OpenAI-compatible address: `speech.say` on this machine. */
+export const DEFAULT_SPEECH_URL = "http://127.0.0.1:7844";
+
+/** Kokoro-FastAPI's port, which this app used to talk to directly. */
+const OLD_SPEECH_URL = "http://127.0.0.1:8880";
 
 /**
  * The two voices this starts with.
@@ -143,6 +145,12 @@ export const speech = cell("speech", {
   // whether the app is talking is a fact about right now, and `onAtStart` is
   // the persisted answer to what it should be at the next launch.
   persist: { include: ["config"] },
+  // A config still pointing at the retired Kokoro server moves to aipro.
+  onRestore(s) {
+    if (s.config?.baseUrl === OLD_SPEECH_URL) {
+      s.config.baseUrl = DEFAULT_SPEECH_URL;
+    }
+  },
 
   // Same stance as the microphone: several readings are in flight at once and
   // each is a short orchestrator around an await. Snapshot isolation would

@@ -65,7 +65,17 @@ export type SayOpts = {
  *    lets a reply start playing before it has finished being made. Supertonic
  *    answers `pcm` with a 400 and does whole WAV files only.
  */
-type Server = { model: string; raw: boolean; rate: number };
+type Server = {
+  model: string;
+  raw: boolean;
+  rate: number;
+  /** aipro: whole WAVs, and a request may wait its turn — no deadline. */
+  aipro?: boolean;
+};
+
+/** aipro lists its models as `owned_by: "aipro"`. */
+const isAipro = (models: { data?: { owned_by?: string }[] } | null) =>
+  models?.data?.some((m) => m.owned_by === "aipro") === true;
 
 const known = new Map<string, Server>();
 
@@ -85,7 +95,10 @@ async function learn(base: string, signal: AbortSignal): Promise<Server> {
   );
   const models = health?.model
     ? null
-    : await json<{ data?: { id?: string }[] }>(`${base}/v1/models`, signal);
+    : await json<{ data?: { id?: string; owned_by?: string }[] }>(
+      `${base}/v1/models`,
+      signal,
+    );
   const server = identify(health, models);
   // Remembered only when something actually answered. Supertonic's health is
   // a 503 for as long as its model is loading, and a guess cached then was a
@@ -115,8 +128,11 @@ async function learn(base: string, signal: AbortSignal): Promise<Server> {
  */
 export function identify(
   health: { model?: string; sample_rate?: number } | null,
-  models: { data?: { id?: string }[] } | null,
+  models: { data?: { id?: string; owned_by?: string }[] } | null,
 ): Server {
+  if (isAipro(models)) {
+    return { model: "speech.say", raw: false, rate: RATE, aipro: true };
+  }
   const listed = models?.data
     ?.map((m) => String(m.id ?? "")).filter((id) => id !== "") ?? [];
   const model = health?.model ??
@@ -229,7 +245,8 @@ function request(
 ): Promise<Response> {
   return fetch(`${base}/v1/audio/speech`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    // aipro reads the key as the caller's name; other servers ignore it.
+    headers: { "content-type": "application/json", authorization: "Bearer cc" },
     body: JSON.stringify({
       // The OpenAI speech shape, which is what makes this swappable: any
       // server answering this route can be pointed at instead.
@@ -264,14 +281,17 @@ async function reallySay(
   playing = me;
   const at = Date.now();
   const base = opts.baseUrl.replace(/\/+$/, "");
-  const signal = AbortSignal.any([abort.signal, AbortSignal.timeout(MAX_MS)]);
   /** Still wanted: not silenced since this reading was asked for. */
   const wanted = () => mine === epoch && !abort.signal.aborted;
   const release = () => {
     if (playing === me) playing = null;
   };
 
-  const server = await learn(base, signal);
+  const server = await learn(base, abort.signal);
+  // aipro queues the request behind other work: Stop is the only deadline.
+  const signal = server.aipro
+    ? abort.signal
+    : AbortSignal.any([abort.signal, AbortSignal.timeout(MAX_MS)]);
 
   /** One piece of speech as bare samples, in whichever shape this server
    *  offers. Throws what the server said, so a refusal explains itself. */
@@ -421,6 +441,22 @@ export async function voices(
   baseUrl: string,
 ): Promise<{ id: string; grade: string; name: string }[]> {
   const base = baseUrl.replace(/\/+$/, "");
+  if ((await learn(base, AbortSignal.timeout(4000))).aipro) {
+    // aipro's shape: ids, plus a label and language for each.
+    const listed = await json<{
+      voices?: string[];
+      details?: { id?: string; label?: string; language?: string }[];
+    }>(`${base}/v1/audio/voices`);
+    const named = new Map(
+      (listed?.details ?? []).map((d) => [
+        String(d.id ?? ""),
+        [d.label, d.language].filter(Boolean).join(" — "),
+      ]),
+    );
+    return (listed?.voices ?? [])
+      .map((id) => ({ id: String(id), grade: "", name: named.get(id) ?? "" }))
+      .filter((v) => v.id !== "");
+  }
   // Two spellings, because there are two servers. Kokoro answers the OpenAI
   // route with grades from its model card; Supertonic has no such route and
   // lists its ten built-in styles under its own. Asked in that order and the
@@ -481,8 +517,9 @@ async function json<T>(
  * Is a speech server answering here?
  *
  * Both spellings of "are you alive", for the same reason as the voice list:
- * Kokoro serves `/health`, Supertonic `/v1/health`, and which one you are
- * running is not a thing this app should make you tell it.
+ * Kokoro serves `/health`, Supertonic `/v1/health`, aipro only `/v1/models`,
+ * and which one you are running is not a thing this app should make you tell
+ * it.
  */
 export async function probe(
   baseUrl: string,
@@ -496,7 +533,7 @@ export async function probe(
   // refreshes its list on focus is not that, and must not cost the next
   // reading a round of questions.
   if (fresh) known.delete(base);
-  for (const path of ["/health", "/v1/health"]) {
+  for (const path of ["/health", "/v1/health", "/v1/models"]) {
     try {
       const res = await fetch(`${base}${path}`, {
         signal: AbortSignal.timeout(900),

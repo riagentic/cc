@@ -1111,18 +1111,79 @@ Deno.test("a server that says nothing about its window leaves the setting alone"
 Deno.test("detection never invents a server", async () => {
   const io = await import("../../cell/local.server.ts");
   const found = await io.detectEngines();
-  // All three engines are always reported — the switch lists them either way,
+  // Every engine is always reported — the switch lists them either way,
   // and "not running" is an answer the user needs as much as "running".
-  assertEquals(found.length, 3);
+  assertEquals(found.length, 4);
   assertEquals(
     found.map((f) => f.engine).sort(),
-    ["llamacpp", "lmstudio", "ollama"],
+    ["aipro", "llamacpp", "lmstudio", "ollama"],
   );
   for (const f of found) {
     // Reachable is only ever claimed on the strength of a reply, and an
     // unreachable engine offers no models.
     if (!f.reachable) assertEquals(f.models.length, 0);
-    assertEquals(f.baseUrl.startsWith("http://localhost:"), true);
+    assertEquals(/^http:\/\/(localhost|127\.0\.0\.1):/.test(f.baseUrl), true);
+  }
+});
+
+Deno.test("aipro — tools always, its stated window, nothing to probe", async () => {
+  const io = await import("../../cell/local.server.ts");
+  const dead = "http://localhost:1"; // never asked
+  assertEquals(await io.probeTools("aipro", dead), true);
+  assertEquals(await io.probeWindow("aipro", dead, "text.code"), {
+    ctx: 65_536,
+    sure: true,
+  });
+  assertEquals(await io.probeContext("aipro", dead, "text.reason"), 65_536);
+  assertEquals(await io.probeContext("aipro", dead, "text.chat"), 16_384);
+});
+
+Deno.test("aipro — a queued stream is waited for, its notes shown, the caller named", async () => {
+  const io = await import("../../cell/local.server.ts");
+  let auth = "";
+  const enc = new TextEncoder();
+  const server = Deno.serve({ port: 0, onListen() {} }, (req) => {
+    auth = req.headers.get("authorization") ?? "";
+    return new Response(
+      new ReadableStream({
+        start(c) {
+          c.enqueue(enc.encode(": queue 2 ahead\n\n"));
+          // Silent for longer than the first-chunk watchdog below.
+          setTimeout(() => {
+            c.enqueue(enc.encode(
+              `data: ${
+                JSON.stringify({ choices: [{ delta: { content: "hi" } }] })
+              }\n\ndata: [DONE]\n\n`,
+            ));
+            c.close();
+          }, 300);
+        },
+      }),
+      { headers: { "content-type": "text/event-stream" } },
+    );
+  });
+  Deno.env.set("CC_STREAM_FIRST_MS", "50");
+  Deno.env.set("CC_STREAM_IDLE_MS", "50");
+  try {
+    const notes: string[] = [];
+    const chunks: unknown[] = [];
+    await io.chatStream({
+      baseUrl: `http://127.0.0.1:${server.addr.port}`,
+      model: "text.code",
+      messages: [{ role: "user", content: "x" }],
+      tools: [],
+      signal: AbortSignal.timeout(5_000),
+      patient: true,
+      onNote: (n) => notes.push(n),
+      onChunk: (c) => chunks.push(c),
+    });
+    assertEquals(notes, ["queue 2 ahead"]);
+    assertEquals(chunks.length, 1);
+    assertEquals(auth, "Bearer cc");
+  } finally {
+    Deno.env.delete("CC_STREAM_FIRST_MS");
+    Deno.env.delete("CC_STREAM_IDLE_MS");
+    await server.shutdown();
   }
 });
 

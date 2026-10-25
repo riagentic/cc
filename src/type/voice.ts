@@ -63,14 +63,4 @@ export type VoiceConfig = {
   autoSend: boolean;
   /** Which microphone to record from, or "" for the system default. */
   device: string;
-  /**
-   * Turn what was said into English, whatever language it was said in.
-   *
-   * Off by default, and this default is the one that matters: whisper-server's
-   * OWN default is `language = "en"`, which is not detection — it tells the
-   * model the audio IS English, and a Czech sentence then comes back as an
-   * English one. Dictation must write down what you said, in the language you
-   * said it; translating is a separate thing you ask for.
-   */
-  translate: boolean;
 };

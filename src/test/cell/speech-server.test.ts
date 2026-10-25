@@ -13,6 +13,7 @@ import {
   say,
   silence,
   Unreachable,
+  voices,
 } from "../../cell/speech.server.ts";
 
 type Asked = { model: string; format: string };
@@ -67,6 +68,49 @@ Deno.test("identify — whichever route answered wins, and a guess is only a gue
     rate: 24_000,
   });
   assertEquals(identify({ sample_rate: 22_050 }, null).rate, 22_050);
+});
+
+Deno.test("aipro — whole WAVs, its own voices, the caller named", async () => {
+  assertEquals(
+    identify(null, { data: [{ id: "text.chat", owned_by: "aipro" }] }),
+    { model: "speech.say", raw: false, rate: 24_000, aipro: true },
+  );
+  let auth = "";
+  const asked: string[] = [];
+  const server = Deno.serve({ port: 0, onListen() {} }, async (req) => {
+    const path = new URL(req.url).pathname;
+    if (path === "/v1/models") {
+      return Response.json({ data: [{ id: "text.chat", owned_by: "aipro" }] });
+    }
+    if (path === "/v1/audio/voices") {
+      return Response.json({
+        voices: ["af_heart"],
+        details: [{
+          id: "af_heart",
+          label: "Heart · female",
+          language: "English (US)",
+        }],
+      });
+    }
+    if (path === "/v1/audio/speech") {
+      auth = req.headers.get("authorization") ?? "";
+      asked.push((await req.json()).response_format);
+      return new Response("no", { status: 500 }); // no sound in a test
+    }
+    return new Response("", { status: 404 });
+  });
+  const url = `http://127.0.0.1:${server.addr.port}`;
+  try {
+    assert(await probe(url, true));
+    assertEquals(await voices(url), [
+      { id: "af_heart", grade: "", name: "Heart · female — English (US)" },
+    ]);
+    await assertRejects(() => say("Hello.", opts(url)));
+    assertEquals(asked, ["wav"]);
+    assertEquals(auth, "Bearer cc");
+  } finally {
+    await server.shutdown();
+  }
 });
 
 Deno.test("refusesRaw — only a refusal of the format turns streaming off", () => {

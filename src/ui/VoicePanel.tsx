@@ -42,7 +42,7 @@ export function VoicePanel(): VNode {
     <div class="grid" style={{ gap: "12px" }}>
       <Toggle
         label="Enable speech-to-text"
-        hint="Off by default — whisper holds VRAM the model could use, and typing is
+        hint="Off by default — transcribing takes aipro GPU time the model could use, and typing is
               always there. While off, the held key does nothing."
         checked={enabled}
         onChange={(v: boolean) => void voice.setEnabled(v)}
@@ -53,14 +53,15 @@ export function VoicePanel(): VNode {
           <div class="field__hint">
             Hold <b>{keyLabel(cfg.key)}</b>{" "}
             and speak; let go and the words land in the composer, and are sent
-            unless you choose otherwise below. Needs <code>whisper-server</code>
-            {" "}
+            unless you choose otherwise below. Needs <code>aipro</code>{" "}
             running locally.
           </div>
 
           <div class="field">
             <span class="field__label">Speech server</span>
-            <span class="field__hint">Where whisper.cpp answers</span>
+            <span class="field__hint">
+              Where aipro answers (speech.transcribe)
+            </span>
             <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
               <input
                 class="input"
@@ -160,22 +161,6 @@ export function VoicePanel(): VNode {
                 );
               })}
             </div>
-          </div>
-
-          <div class="field">
-            <span class="field__label">Write it down</span>
-            <span class="field__hint">
-              As said, in the language it was said in — or turned into English.
-              Whisper translates well; it is only wrong as a default.
-            </span>
-            <Segmented
-              value={cfg.translate === true ? "english" : "asis"}
-              options={[
-                { id: "asis", label: "As I said it" },
-                { id: "english", label: "In English" },
-              ]}
-              onChange={(v: string) => voice.setTranslate(v === "english")}
-            />
           </div>
 
           <div class="field">

@@ -340,6 +340,7 @@ body {
   white-space: nowrap;
 }
 .pane__tag--claude { --tag: #d97757; }
+.pane__tag--aipro { --tag: #e0a43a; }
 .pane__tag--llamacpp { --tag: #2eaa93; }
 .pane__tag--ollama { --tag: #a98bf5; }
 .pane__tag--lmstudio { --tag: #4f97f0; }

@@ -312,15 +312,14 @@ function wav(chunks: Uint8Array[], bytes: number): Uint8Array {
 }
 
 /**
- * What was said: one question to whisper, and more only when its answer
- * landed in a language you never speak.
+ * What was said: one question to aipro's `speech.transcribe`, and more only
+ * when its answer landed in a language you never speak.
  */
 export async function transcribe(
   wavBytes: Uint8Array,
   opts: {
     baseUrl: string;
     language: string;
-    translate: boolean;
     /** The languages you actually speak. Empty means "trust detection". */
     spoken: string[];
   },
@@ -393,17 +392,14 @@ export function mostConfident(tries: Heard[]): Heard | null {
 }
 
 /**
- * Ask whisper.cpp's server what was said, in one particular language.
+ * Ask aipro what was said, in one particular language.
  *
- * `/inference`, which is whisper-server's own route. The OpenAI-compatible
- * path that llama.cpp and LM Studio answer on is NOT served here — measured,
- * against a build from source: it returns 404. Worth writing down, because
- * "they all speak OpenAI" is true of the text servers and led straight to the
- * wrong guess for this one.
+ * `POST /v1/audio/transcriptions` on aipro's OpenAI-compatible address. It
+ * waits its turn in aipro's queue: no deadline here, only `signal`.
  */
 async function listen(
   wavBytes: Uint8Array,
-  opts: { baseUrl: string; translate: boolean },
+  opts: { baseUrl: string },
   language: string,
   signal: AbortSignal,
 ): Promise<Heard> {
@@ -413,46 +409,26 @@ async function listen(
     new Blob([wavBytes as BufferSource], { type: "audio/wav" }),
     "speech.wav",
   );
-  // `verbose_json`, not `json`, and the extra it carries is the point: the
-  // language it decided on, and a probability per word. Plain `json` answers
-  // with the text alone, so an answer in the wrong language was
-  // indistinguishable from one in the right language.
+  // `verbose_json`, not `json`: it carries the language the model decided
+  // on, which the "a language you speak" retry checks.
   form.append("response_format", "verbose_json");
   // Temperature 0: a sampled decode invents plausible words where a confident
   // one would have said nothing, and this is dictation, not prose generation.
   form.append("temperature", "0");
-  // Beam search, not greedy. Greedy takes the single likeliest word at each
-  // step and cannot back out of a bad start; on a hard clip it loops or
-  // gives up, and whisper then retries at rising temperatures, slowly.
-  // Measured, 20 requests per row, on a Czech clip with the language pinned:
-  // greedy 13/20 garbage loops at 1031 ms; beam of 5, none, at 243 ms. On
-  // plain English the beam costs 14 ms. What OpenAI's own CLI defaults to.
-  form.append("beam_size", "5");
-  // ALWAYS sent. Leave it out and whisper-server falls back to its own
-  // default, which is `en` — not "detect", but "this is English". Measured
-  // on a Czech sentence, 20 requests: with the field absent, every answer
-  // came back as an English translation; with `auto`, Czech. "" here means
-  // let the model decide, and `auto` is how the server spells that.
-  form.append("language", language === "" ? "auto" : language);
-  form.append("translate", opts.translate ? "true" : "false");
-  // NO `prompt`, and this is the line this feature's reliability hangs on.
-  //
-  // A first version sent the project's name and branch as whisper's initial
-  // prompt, so it would spell them right. Measured against large-v3 on one
-  // fixed clip of clear speech, 20 requests each: with no prompt, 0 empty
-  // answers; with that prompt, 9; with a neutral one-line prompt, 10; with
-  // the single word "cc", 13. Turning off the model's silence gate
-  // (`no_speech_thold`) did not help, and turning off its temperature retry
-  // (`temperature_inc=0`) made it 20 of 20 — so with a prompt the greedy
-  // decode produced nothing EVERY time, and the answers that did arrive were
-  // the random-temperature retry getting lucky. That is the whole of "it
-  // works sometimes": a coin the model tossed on every sentence.
-  //
-  // Half your dictation lost, to spell a branch name. Not a trade.
+  // Only when pinned — left out, aipro detects it.
+  if (language !== "") form.append("language", language);
+  // NO `prompt`: measured against whisper large-v3, any initial prompt (even
+  // the single word "cc") made it return nothing for clear speech on up to
+  // 13 of 20 requests. Half your dictation lost, to spell a branch name.
 
-  const url = `${opts.baseUrl.replace(/\/+$/, "")}/inference`;
+  const url = `${opts.baseUrl.replace(/\/+$/, "")}/v1/audio/transcriptions`;
   const at = Date.now();
-  const res = await fetch(url, { method: "POST", body: form, signal });
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { authorization: "Bearer cc" }, // names the caller in aipro
+    body: form,
+    signal,
+  });
   // What it said, not only its status — and read, which closes the body.
   if (!res.ok) throw new Error(await complaint(res));
   // Read as text, then parse. A 200 carrying something that is not the shape
@@ -479,7 +455,6 @@ async function listen(
       ms: Date.now() - at,
       sentBytes: wavBytes.length,
       language: language === "" ? "auto" : language,
-      translate: opts.translate,
       body: raw.slice(0, 200),
     });
   }
@@ -553,16 +528,14 @@ function readable(name: string): string {
   return label.length > 46 ? label.slice(0, 45) + "…" : label;
 }
 
-/** Is a speech server answering at this address? Same shape as the local
- *  engines' probe, and used the same way — to fill the address in for you. */
+/** Is aipro answering at this address? Same shape as the local engines'
+ *  probe, and used the same way — to fill the address in for you. */
 export async function probe(baseUrl: string): Promise<boolean> {
   try {
-    // `/health` — whisper-server has no model list to ask for, and posting a
-    // file just to find out whether it is there would be a transcription per
-    // probe.
-    const res = await fetch(`${baseUrl.replace(/\/+$/, "")}/health`, {
+    const res = await fetch(`${baseUrl.replace(/\/+$/, "")}/v1/models`, {
       signal: AbortSignal.timeout(700),
     });
+    await res.body?.cancel();
     return res.ok;
   } catch {
     return false;

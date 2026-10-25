@@ -76,6 +76,15 @@ import type {
 
 /* ── HTTP ─────────────────────────────────────────────────────────────────── */
 
+/** aipro reads the API key as the caller's name (its Apps tab); the other
+ *  engines ignore it. */
+const AUTH = { authorization: "Bearer cc" };
+
+/** aipro's window: 64K tokens, prompt and answer together, for the text.code
+ *  and text.reason defaults; 16K for its other text models. */
+export const aiproWindow = (model: string): number =>
+  /^text\.(code|reason)$/.test(model) ? 65_536 : 16_384;
+
 /** Models the server offers. `/v1/models` is common to all three engines;
  *  Ollama additionally serves its native `/api/tags`, used as the fallback
  *  for versions that predate its OpenAI surface. */
@@ -90,7 +99,10 @@ export async function listModels(
       ? AbortSignal.any([cancel, AbortSignal.timeout(timeoutMs)])
       : AbortSignal.timeout(timeoutMs);
   try {
-    const r = await fetch(`${base}/v1/models`, { signal: deadline() });
+    const r = await fetch(`${base}/v1/models`, {
+      headers: AUTH,
+      signal: deadline(),
+    });
     if (r.ok) {
       const body = await r.json();
       const data = Array.isArray(body?.data) ? body.data : [];
@@ -120,6 +132,7 @@ export async function listModels(
  *  the cell may not import this module eagerly, so the table is repeated here
  *  rather than making the client graph depend on a server module. */
 const PORTS: Record<LocalEngine, string> = {
+  aipro: "http://127.0.0.1:7844",
   lmstudio: "http://localhost:1234",
   ollama: "http://localhost:11434",
   llamacpp: "http://localhost:8080",
@@ -135,6 +148,7 @@ const PORTS: Record<LocalEngine, string> = {
  * predictable. A short curated list, not a port sweep.
  */
 const ALSO: Record<LocalEngine, string[]> = {
+  aipro: [],
   lmstudio: [],
   ollama: [],
   llamacpp: ["http://localhost:18080", "http://localhost:8081"],
@@ -260,6 +274,8 @@ export async function probeTools(
   model?: string,
 ): Promise<boolean | null> {
   const base = baseUrl.replace(/\/+$/, "");
+  // aipro speaks OpenAI's tools for every text task (text.code by default).
+  if (engine === "aipro") return true;
   if (engine === "lmstudio") {
     if (!model) return null;
     const body = await json(`${base}/api/v0/models`, undefined, cancel);
@@ -381,6 +397,8 @@ export async function probeWindow(
   cancel?: AbortSignal,
 ): Promise<{ ctx: number; sure: boolean } | null> {
   const base = baseUrl.replace(/\/+$/, "");
+  // aipro loads on demand and states its window — nothing to probe or warm.
+  if (engine === "aipro") return { ctx: aiproWindow(model), sure: true };
   if (engine === "llamacpp") {
     const props = await json(`${base}/props`, undefined, cancel);
     if (!props) return null;
@@ -507,6 +525,10 @@ export type ChatRequest = {
   thinkBudget?: number;
   /** Called with each SSE `data:` payload, already JSON-parsed. */
   onChunk: (chunk: unknown) => void;
+  /** aipro: the request may wait its turn for hours — no watchdog, and its
+   *  SSE comments (`: queue …`) go to `onNote` so the wait can be shown. */
+  patient?: boolean;
+  onNote?: (note: string) => void;
 };
 
 /** Silence after the first chunk — not slow tokens, *nothing* — for this
@@ -731,15 +753,17 @@ async function chatStreamOnce(
   const base = req.baseUrl.replace(/\/+$/, "");
   const silent = () => new Error("The server went silent mid-stream.");
   const watchdog = new AbortController();
-  let idleTimer = setTimeout(() => watchdog.abort(silent()), STREAM_FIRST_MS());
+  const arm = (ms: number) =>
+    req.patient ? undefined : setTimeout(() => watchdog.abort(silent()), ms);
+  let idleTimer = arm(STREAM_FIRST_MS());
   const alive = () => {
     clearTimeout(idleTimer);
-    idleTimer = setTimeout(() => watchdog.abort(silent()), STREAM_IDLE_MS());
+    idleTimer = arm(STREAM_IDLE_MS());
   };
   try {
     const r = await fetch(`${base}/v1/chat/completions`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", ...AUTH },
       signal: AbortSignal.any([req.signal, watchdog.signal]),
       body: JSON.stringify({
         model: req.model,
@@ -806,6 +830,10 @@ async function chatStreamOnce(
         if (line.startsWith("data:")) {
           sse = true;
           handle(line.slice(5).trim());
+        } else if (line.startsWith(":")) {
+          // An SSE comment — aipro's word on a queued or loading request.
+          const note = line.slice(1).trim();
+          if (note) req.onNote?.(note);
         } else if (!sse) plain += line + "\n";
       }
     }

@@ -6,8 +6,10 @@
  * other.
  */
 
-/** A backend that serves an OpenAI-compatible chat API on localhost. */
-export type LocalEngine = "lmstudio" | "ollama" | "llamacpp";
+/** A backend that serves an OpenAI-compatible chat API on localhost. `aipro`
+ *  is the default: the machine's AI provider, which queues and shares the GPU;
+ *  the other three are direct opt-ins. */
+export type LocalEngine = "aipro" | "lmstudio" | "ollama" | "llamacpp";
 
 /** What runs the project's conversation: the Claude Code CLI, or one of the
  *  local engines. Everything Claude-specific keys off exactly `"claude"`. */

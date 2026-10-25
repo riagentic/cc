@@ -173,19 +173,6 @@ testCell(
   },
 );
 
-testCell(voice, "translation is a choice, and the default is not to", (t) => {
-  // whisper-server's own default language is `en` — "this IS English", not
-  // "detect" — so a Czech sentence came back translated. Writing down what
-  // was said, in the language it was said in, is the default here; English
-  // is something you turn on.
-  t.init();
-  t.expect.state((s) => s.config.translate === false);
-  t.send.setTranslate(true);
-  t.expect.state((s) => s.config.translate === true);
-  t.send.setTranslate("yes" as unknown as boolean); // anything not `true` is off
-  t.expect.state((s) => s.config.translate === false);
-});
-
 testCell(voice, "the languages you speak are a short, clean list", (t) => {
   t.init();
   t.expect.state((s) => s.config.spoken.length === 0); // trust detection
@@ -334,10 +321,37 @@ Deno.test("transcribe — one language failing keeps the answer in hand", async 
     const text = await transcribe(new Uint8Array(44), {
       baseUrl: url,
       language: "",
-      translate: false,
       spoken: ["cs", "sk"],
     }, AbortSignal.timeout(5000));
     assertEquals(text, "Testy jsou zelené");
+  } finally {
+    await server.shutdown();
+  }
+});
+
+Deno.test("transcribe — aipro's route, the caller named, detection left to it", async () => {
+  let seen = { path: "", auth: "", lang: "" as string | null };
+  const server = Deno.serve({ port: 0, onListen() {} }, async (req) => {
+    const form = await req.formData();
+    seen = {
+      path: new URL(req.url).pathname,
+      auth: req.headers.get("authorization") ?? "",
+      lang: form.get("language") as string | null,
+    };
+    return Response.json({ text: "Hello", language: "en", segments: [] });
+  });
+  try {
+    const text = await transcribe(new Uint8Array(44), {
+      baseUrl: `http://127.0.0.1:${server.addr.port}`,
+      language: "",
+      spoken: [],
+    }, AbortSignal.timeout(5000));
+    assertEquals(text, "Hello");
+    assertEquals(seen, {
+      path: "/v1/audio/transcriptions",
+      auth: "Bearer cc",
+      lang: null,
+    });
   } finally {
     await server.shutdown();
   }

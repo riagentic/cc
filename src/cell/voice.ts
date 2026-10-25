@@ -8,11 +8,14 @@
  * next one, a misheard command is already running.
  */
 import { cell, log } from "aio";
+import type { MethodDraftMeta } from "aio";
 import type { VoiceConfig, VoiceStatus } from "../type/voice.ts";
 
-/** Where whisper.cpp's server listens by default. Its own documented port —
- *  the same courtesy the local engines get. */
-export const DEFAULT_VOICE_URL = "http://127.0.0.1:8910";
+/** aipro's OpenAI-compatible address: `speech.transcribe` on this machine. */
+export const DEFAULT_VOICE_URL = "http://127.0.0.1:7844";
+
+/** whisper-server's port, which this app used to talk to directly. */
+const OLD_VOICE_URL = "http://127.0.0.1:8910";
 
 /** The key held to talk.
  *
@@ -54,6 +57,12 @@ export const voice = cell("voice", {
   // The address and the language are worth keeping; a half-finished recording
   // is not.
   persist: { include: ["config"] },
+  // A config still pointing at the retired whisper-server moves to aipro.
+  onRestore(s) {
+    if (s.config?.baseUrl === OLD_VOICE_URL) {
+      s.config.baseUrl = DEFAULT_VOICE_URL;
+    }
+  },
 
   // Live reads and incremental commits, like the console cell and for the same
   // reason: `level` is a sync reducer fed by a process, and it runs many times
@@ -80,7 +89,6 @@ export const voice = cell("voice", {
       key: DEFAULT_KEY,
       autoSend: true,
       device: "",
-      translate: false,
     } as VoiceConfig,
     /** The microphones this machine offers. Filled when Settings asks. */
     devices: [] as { id: string; label: string }[],
@@ -144,12 +152,14 @@ export const voice = cell("voice", {
      * Orchestrator only — it awaits the recorder and then the model, and a
      * draft held across either would republish the state it entered with.
      */
-    async stop(s: VoiceState) {
+    async stop(s: VoiceState & Partial<MethodDraftMeta>) {
       // Read BEFORE the first await. Everything below is a commit point, and
       // the settings cannot change while a key is held anyway — so taking them
       // here is both correct and the honest description of when they applied.
       const cfg = { ...s.config };
       const take = s.take;
+      // No deadline of our own: aipro may queue it behind other work.
+      const signal = s.$signal ?? new AbortController().signal;
 
       const io = await import("./voice.server.ts");
       let wav: Uint8Array | null;
@@ -177,13 +187,10 @@ export const voice = cell("voice", {
         const text = await io.transcribe(wav, {
           baseUrl: cfg.baseUrl,
           language: cfg.language,
-          // `=== true`: a config saved before this field existed has no value
-          // here, and "not set" must mean the default, which is off.
-          translate: cfg.translate === true,
           // A config saved before this field existed has none, and "not set"
           // has to mean the old behaviour: trust detection.
           spoken: Array.isArray(cfg.spoken) ? cfg.spoken : [],
-        }, AbortSignal.timeout(60_000));
+        }, signal);
         await voice.settled(text, "", take); // aiol-ok: orchestration, one step
       } catch (e) {
         await voice.settled( // aiol-ok: orchestration, one step
@@ -384,10 +391,6 @@ export const voice = cell("voice", {
     setDevice(s: VoiceState, id: string) {
       if (typeof id !== "string") return;
       s.config.device = id;
-    },
-
-    setTranslate(s: VoiceState, on: boolean) {
-      s.config.translate = on === true;
     },
 
     /** Ask the machine what it can hear with. */

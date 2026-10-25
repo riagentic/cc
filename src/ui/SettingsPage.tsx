@@ -78,7 +78,7 @@ import {
  */
 const SECTION_KEYS: Record<string, string> = {
   "Engine":
-    "local llm lm studio ollama llama.cpp model server provider context window offline detect scan",
+    "local llm aipro lm studio ollama llama.cpp model server provider context window offline detect scan",
   "Voice":
     "speech dictation microphone mic whisper push to talk say speak transcribe stt voice2text language",
   "Projects":

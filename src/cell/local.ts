@@ -130,12 +130,18 @@ export const MAX_LOCAL_MESSAGES = 400;
 
 /** Where each engine serves by default. */
 export const DEFAULT_URLS: Record<LocalEngine, string> = {
+  aipro: "http://127.0.0.1:7844",
   lmstudio: "http://localhost:1234",
   ollama: "http://localhost:11434",
   llamacpp: "http://localhost:8080",
 };
 
 const DEFAULT_CTX = 32_768;
+
+/** The model a project lands on from a server's list: aipro's coding task when
+ *  it is offered, else the first. */
+const firstModel = (models: string[]): string =>
+  models.includes("text.code") ? "text.code" : models[0] ?? "";
 
 /** The tier, and the legacy permission mirrored beside it — written
  *  together, from the one mapping (`permissionOf`). */
@@ -485,7 +491,9 @@ export const local = cell("local", {
       key: string,
       engine: Engine,
     ) {
-      if (!["claude", "lmstudio", "ollama", "llamacpp"].includes(engine)) {
+      if (
+        !["claude", "aipro", "lmstudio", "ollama", "llamacpp"].includes(engine)
+      ) {
         return;
       }
       const cfg = cfgAt(s, key);
@@ -509,7 +517,9 @@ export const local = cell("local", {
         const found = s.detected.find((d) => d.engine === engine);
         if (found?.models.length) {
           chatAt(s, key).models = found.models;
-          if (!found.models.includes(cfg.model)) cfg.model = found.models[0];
+          if (!found.models.includes(cfg.model)) {
+            cfg.model = firstModel(found.models);
+          }
         }
         // The scan already asked whether that server can use tools; carrying
         // the answer over means the warning is on screen the moment the
@@ -574,7 +584,7 @@ export const local = cell("local", {
       chat.models = found.models;
       chat.toolsOk = found.tools ?? null;
       if (found.models.length && !found.models.includes(cfg.model)) {
-        cfg.model = found.models[0];
+        cfg.model = firstModel(found.models);
       }
       chat.error = null;
     },
@@ -686,7 +696,7 @@ export const local = cell("local", {
       c.error = null;
       // A picked model that is gone is worth replacing with a real one.
       const p = cfgAt(s, key);
-      if (!models.includes(p.model)) p.model = models[0] ?? "";
+      if (!models.includes(p.model)) p.model = firstModel(models);
     },
 
     modelsFailed(s: LocalState, key: string, why: string) {
@@ -1604,6 +1614,12 @@ export const local = cell("local", {
               thinkBudget: live().engine === "llamacpp"
                 ? io.thinkBudget(baseUrl, model)
                 : undefined,
+              patient: engine === "aipro",
+              // Nothing written yet: aipro saying the request is queued or
+              // loading is the only honest thing to show.
+              onNote: (note) => {
+                if (!acc.text && !acc.thinking) status(`aipro: ${note}`);
+              },
               onChunk: (chunk) => {
                 foldChunk(acc, chunk);
                 const size = acc.text.length + acc.thinking.length;
@@ -3224,6 +3240,7 @@ async function summarize(
       signal,
       // Room for a reasoning model to think before it writes the summary.
       maxTokens: Math.min(words * 2 + 4_096, Math.floor(ctx * 0.4)),
+      patient: cfg.engine === "aipro",
       onChunk: (chunk) => foldChunk(acc, chunk),
     });
     const out = splitThink(acc.text).text.trim();

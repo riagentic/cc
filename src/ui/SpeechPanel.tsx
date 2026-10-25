@@ -10,31 +10,16 @@ import { LANGUAGES } from "./languageList.ts";
 import { IconRefresh, IconSpeaker } from "./icons.tsx";
 
 /**
- * The two voice servers this app knows how to set up, and the trade between
- * them.
- *
- * Not a hardcoding of what it can talk to — it speaks the OpenAI speech route
- * and will drive anything that answers it, which is what the address field is
- * for. These are the two that are worth one click.
+ * The voice server worth one click: aipro, this machine's AI provider (Kokoro,
+ * and Piper for the languages Kokoro cannot say). The address field still takes
+ * anything that answers OpenAI's speech route.
  */
 const ENGINES: { url: string; label: string; hint: string }[] = [
   {
-    url: "http://127.0.0.1:8880",
-    label: "Kokoro",
+    url: DEFAULT_SPEECH_URL,
+    label: "aipro",
     hint:
-      "The best English there is at this size, and the only voice graded A. Eight languages, and Czech is not one of them.",
-  },
-  {
-    url: "http://127.0.0.1:7788",
-    label: "Supertonic",
-    hint:
-      "Thirty-one languages, Czech among them. English is a shade behind Kokoro and still good.",
-  },
-  {
-    url: "http://127.0.0.1:7799",
-    label: "Piper",
-    hint:
-      "Fifty-seven languages — Nepali, Bengali, Georgian, Welsh, the whole long tail. It is the 2021 generation and it sounds it: here for the languages the other two cannot say at all, not as a third opinion on English.",
+      "Kokoro for English and seven more languages, Piper for the rest — aipro picks the voice for the language and shares the machine with your other apps.",
   },
 ];
 
@@ -56,6 +41,13 @@ const NAMES: Record<string, string> = {
   am_fenrir: "Fenrir — male, American · deep",
   am_puck: "Puck — male, American · bright",
   bm_george: "George — male, British",
+  ef_dora: "Dora — female, Spanish",
+  ff_siwis: "Siwis — female, French",
+  if_sara: "Sara — female, Italian",
+  jf_alpha: "Alpha — female, Japanese",
+  pf_dora: "Dora — female, Portuguese",
+  zf_xiaobei: "Xiaobei — female, Chinese",
+  hf_alpha: "Alpha — female, Hindi",
   // Supertonic, which names its ten by nothing but sex and number.
   F1: "F1 — female",
   F2: "F2 — female",

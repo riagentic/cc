@@ -26,6 +26,7 @@ import { IconBranch, IconFolder, IconPlug } from "./icons.tsx";
 /** Engines a project can run on, named the way Settings names them. */
 export const ENGINE_OPTIONS = [
   { id: "claude", label: "Claude Code", hint: "The CLI, with every feature" },
+  { id: "aipro", label: "aipro", hint: "Local · this machine's AI provider" },
   { id: "lmstudio", label: "LM Studio", hint: "Local · OpenAI-compatible" },
   { id: "ollama", label: "Ollama", hint: "Local · OpenAI-compatible" },
   { id: "llamacpp", label: "llama.cpp", hint: "Local · OpenAI-compatible" },
