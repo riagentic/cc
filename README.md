@@ -40,7 +40,9 @@ as a second engine. Built on [aio](https://github.com/riagentic/aio).
   finished a simple app in ~16 minutes with many mistakes; a slower 27B model
   was more careful but ran out of patience before finishing. The harness helps,
   it does not make a small model smart.
-- **Tests:** about 500. Two of them fail now and then on timing.
+- **Tests:** 818 (`deno task test`), run locally, no CI. On a clean Linux VM
+  without the `claude` CLI, 813 pass; two of them also fail now and then on
+  timing.
 - Voice needs a speech server you run yourself; nothing is bundled.
 
 ## Run it
@@ -50,7 +52,7 @@ Needs [Deno](https://deno.com) 2.x, the `claude` CLI on `PATH` (or
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/riagentic/aio/main/install.sh | sh
-git clone <this repo> cc && cd cc
+git clone https://github.com/riagentic/cc && cd cc
 am fix                   # links the pinned aio version, installs what is missing
 deno task dev            # Electron window
 deno task dev ~/code/x   # …opened on that project
